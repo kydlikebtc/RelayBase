@@ -56,7 +56,7 @@ export default async function Home() {
             统一数据出口 · 稳定币结算
           </div>
           <h1>
-            把分散的数据接口，
+            把分散的接口，
             <span>收进一条稳定 API</span>
           </h1>
           <p className="hero-lede">

@@ -6,6 +6,9 @@ import test from "node:test";
 import { privateKeyToAccount } from "viem/accounts";
 
 const root = new URL("../", import.meta.url);
+const packageMetadata = JSON.parse(
+  await readFile(new URL("package.json", root), "utf8"),
+);
 const workerUrl = new URL("../dist/server/index.js", import.meta.url);
 workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
 const { default: worker } = await import(workerUrl.href);
@@ -239,7 +242,7 @@ function responseCookie(response, name) {
 
 test("renders the finished product routes without starter metadata", async () => {
   for (const [path, expected] of [
-    ["/", "把分散的数据接口"],
+    ["/", "把分散的接口"],
     ["/docs", "API 文档"],
     ["/catalog", "接口目录"],
     ["/pricing", "只为真实请求付费"],
@@ -261,7 +264,9 @@ test("renders the finished product routes without starter metadata", async () =>
 test("reports sandbox health and blocks live operations by default", async () => {
   const health = await fetchWorker("/api/health");
   assert.equal(health.status, 200);
-  assert.equal((await health.json()).mode, "sandbox");
+  const healthData = await health.json();
+  assert.equal(healthData.mode, "sandbox");
+  assert.equal(healthData.version, packageMetadata.version);
   assert.ok(health.headers.get("x-request-id"));
 
   const proxy = await fetchWorker(
