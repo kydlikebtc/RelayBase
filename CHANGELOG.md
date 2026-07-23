@@ -9,6 +9,45 @@ RelayBase 的用户可见变化、计费语义、安全边界与数据库迁移�
 
 - 待下一轮迭代记录。
 
+## [0.3.0-preview.1] - 2026-07-23
+
+### Added
+
+- 管理后台新增“TikHub 数据源”，支持 API Key 加密保存、在线验证、备用、
+  CAS 切换、到期显示和永久撤销。
+- D1 迁移 `0009`–`0010`，增加 AES-256-GCM 密文、完整 Key 哈希、已验证
+  scope、到期时间、唯一活动凭据状态以及目录凭据代次。
+- 管理 API `GET/POST/PATCH /api/admin/upstream-credentials`；列表只返回
+  凭据元数据和 16 位指纹，不返回明文、密文或完整哈希。
+
+### Changed
+
+- 代理、目录同步、readiness 和管理总览统一从活动 TikHub 凭据 resolver 取值；
+  首次启用托管模式后，缺失、撤销、过期或无法解密时不再回退环境变量。
+- 目录同步在上游读取前取得租约，只允许 OpenAPI 与价格目录方法一致的交集进入
+  可定价状态，并按活动 Key scope 隔离端点。
+- 目录发布绑定活动 Key 指纹和状态版本；切换/撤销 Key 会使旧目录失效，代理在
+  扣费前再次校验目录代次。
+- 支付人工入账仅接受服务商 `finished`，且金额受实际到账比例和订单面值双重上限
+  约束。
+
+### Security
+
+- TikHub Key 使用 32-byte 服务端 KEK、随机 96-bit IV、AES-256-GCM 和绑定
+  provider/凭据编号/格式版本的 AAD 加密。
+- Key 验证同时检查 TikHub 响应码、Key/账户状态、到期时间和 scope；运行时对
+  密文、scope、到期和状态指针异常全部 fail closed。
+- 永久撤销凭据时同时清除其可解密密文，仅保留哈希指纹和审计元数据。
+- 人工支付案件只有“失败或过期且实际到账为零”才能拒绝；结案后发现晚到资金会
+  自动重新打开案件。
+
+### Fixed
+
+- 阻止备用 Key 在并发启用期间被误撤销，也阻止旧确认框用新状态版本执行操作。
+- 阻止 price-only 或方法不匹配的路径被误标为可信价格并上架。
+- 阻止并发目录同步在取得租约前重复读取可能计费的 TikHub 价格目录。
+- 阻止部分付款按完整订单面值人工入账，以及已收到资金的支付案件被直接拒绝。
+
 ## [0.2.0-preview.1] - 2026-07-23
 
 ### Added
@@ -47,5 +86,6 @@ RelayBase 的用户可见变化、计费语义、安全边界与数据库迁移�
 
 - RelayBase 初始市场页、安全沙盒、基础 TikHub 代理、客户 API Key 与预付余额原型。
 
-[Unreleased]: https://github.com/kydlikebtc/RelayBase/compare/v0.2.0-preview.1...HEAD
+[Unreleased]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.1...HEAD
+[0.3.0-preview.1]: https://github.com/kydlikebtc/RelayBase/releases/tag/v0.3.0-preview.1
 [0.2.0-preview.1]: https://github.com/kydlikebtc/RelayBase/releases/tag/v0.2.0-preview.1

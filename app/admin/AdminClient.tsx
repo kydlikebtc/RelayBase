@@ -3,7 +3,12 @@
 import type { FormEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type AdminTab = "overview" | "users" | "catalog" | "payments";
+type AdminTab =
+  | "overview"
+  | "users"
+  | "upstream"
+  | "catalog"
+  | "payments";
 type RemoteState<T> =
   | { status: "idle" | "loading" }
   | { status: "ready"; data: T }
@@ -41,6 +46,11 @@ type OverviewResponse = {
     configured: boolean;
     keyFingerprint: string | null;
     baseUrl: string | null;
+    source: "managed" | "environment" | "none";
+    managedEnabled: boolean;
+    managedCredentialCount: number;
+    stateVersion: number;
+    encryptionConfigured: boolean;
   };
   generatedAt: string;
 };
@@ -89,6 +99,30 @@ type CatalogResponse = {
   total: number;
   offset: number;
   nextOffset: number | null;
+};
+
+type UpstreamCredential = {
+  id: string;
+  label: string;
+  fingerprint: string;
+  status: "active" | "standby" | "revoked";
+  scopeCount: number;
+  expiresAt: string | null;
+  verifiedAt: string | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+};
+
+type UpstreamCredentialsResponse = {
+  credentials: UpstreamCredential[];
+  activeSource: "managed" | "environment" | "none";
+  activeCredentialId: string | null;
+  activeFingerprint: string | null;
+  stateVersion: number;
+  managedEnabled: boolean;
+  encryptionConfigured: boolean;
+  environmentFallbackConfigured: boolean;
 };
 
 type AdminPayment = {
@@ -150,6 +184,12 @@ type ConfirmAction =
       kind: "endpoint";
       endpoint: CatalogEndpoint;
       nextEnabled: boolean;
+    }
+  | {
+      kind: "credential";
+      credential: UpstreamCredential;
+      action: "activate" | "revoke";
+      expectedVersion: number;
     }
   | { kind: "sync" };
 
@@ -299,6 +339,14 @@ function isOverviewResponse(value: unknown): value is OverviewResponse {
     typeof upstream.configured === "boolean" &&
     (upstream.keyFingerprint === null ||
       isNonEmptyString(upstream.keyFingerprint, 128)) &&
+    (upstream.source === "managed" ||
+      upstream.source === "environment" ||
+      upstream.source === "none") &&
+    typeof upstream.managedEnabled === "boolean" &&
+    isSafeNonNegativeInteger(upstream.managedCredentialCount) &&
+    upstream.managedCredentialCount <= 100 &&
+    isSafeNonNegativeInteger(upstream.stateVersion) &&
+    typeof upstream.encryptionConfigured === "boolean" &&
     (upstream.baseUrl === null || isSafeHttpUrl(upstream.baseUrl)) &&
     isDateString(value.generatedAt) &&
     value.recentCalls.length <= 100 &&
@@ -392,6 +440,89 @@ function isCatalogResponse(value: unknown): value is CatalogResponse {
         value.nextOffset <= 5_000)) &&
     value.endpoints.length <= 500 &&
     value.endpoints.every(isCatalogEndpoint)
+  );
+}
+
+function isUpstreamCredential(value: unknown): value is UpstreamCredential {
+  if (!isObject(value)) return false;
+  return (
+    isNonEmptyString(value.id, 100) &&
+    /^upc_[A-Za-z0-9_-]{16,80}$/.test(value.id) &&
+    isNonEmptyString(value.label, 80) &&
+    isNonEmptyString(value.fingerprint, 32) &&
+    /^[a-f0-9]{16}$/.test(value.fingerprint) &&
+    (value.status === "active" ||
+      value.status === "standby" ||
+      value.status === "revoked") &&
+    isSafeNonNegativeInteger(value.scopeCount) &&
+    value.scopeCount <= 500 &&
+    isNullableDateString(value.expiresAt) &&
+    isNullableDateString(value.verifiedAt) &&
+    isDateString(value.createdAt) &&
+    isNullableDateString(value.lastUsedAt) &&
+    isNullableDateString(value.revokedAt)
+  );
+}
+
+function isUpstreamCredentialsResponse(
+  value: unknown,
+): value is UpstreamCredentialsResponse {
+  if (!isObject(value) || !Array.isArray(value.credentials)) return false;
+  const activeCredentials = value.credentials.filter(
+    (credential) =>
+      isObject(credential) && credential.status === "active",
+  );
+  const activeCredential =
+    activeCredentials.length === 1 &&
+    isUpstreamCredential(activeCredentials[0])
+      ? activeCredentials[0]
+      : null;
+  const credentialStatesAreConsistent = value.credentials.every(
+    (credential) =>
+      isUpstreamCredential(credential) &&
+      ((credential.status === "revoked") ===
+        (credential.revokedAt !== null)) &&
+      (credential.status !== "active" ||
+        credential.verifiedAt !== null),
+  );
+  return (
+    value.credentials.length <= 100 &&
+    value.credentials.every(isUpstreamCredential) &&
+    (value.activeSource === "managed" ||
+      value.activeSource === "environment" ||
+      value.activeSource === "none") &&
+    (value.activeCredentialId === null ||
+      (isNonEmptyString(value.activeCredentialId, 100) &&
+        /^upc_[A-Za-z0-9_-]{16,80}$/.test(value.activeCredentialId))) &&
+    (value.activeFingerprint === null ||
+      (isNonEmptyString(value.activeFingerprint, 32) &&
+        /^[a-f0-9]{16}$/.test(value.activeFingerprint))) &&
+    isSafeNonNegativeInteger(value.stateVersion) &&
+    typeof value.managedEnabled === "boolean" &&
+    typeof value.encryptionConfigured === "boolean" &&
+    typeof value.environmentFallbackConfigured === "boolean" &&
+    credentialStatesAreConsistent &&
+    activeCredentials.length <= 1 &&
+    (value.activeSource !== "managed" ||
+      (activeCredential !== null &&
+        activeCredential.id === value.activeCredentialId &&
+        activeCredential.fingerprint === value.activeFingerprint))
+  );
+}
+
+function isUpstreamCredentialMutationResponse(
+  value: unknown,
+): value is {
+  credential: UpstreamCredential;
+  verified?: boolean;
+  activationConflict?: boolean;
+} {
+  return (
+    isObject(value) &&
+    isUpstreamCredential(value.credential) &&
+    (value.verified === undefined || typeof value.verified === "boolean") &&
+    (value.activationConflict === undefined ||
+      typeof value.activationConflict === "boolean")
   );
 }
 
@@ -914,6 +1045,9 @@ export function AdminClient() {
   const [catalog, setCatalog] = useState<RemoteState<CatalogResponse>>({
     status: "idle",
   });
+  const [upstreamCredentials, setUpstreamCredentials] = useState<
+    RemoteState<UpstreamCredentialsResponse>
+  >({ status: "idle" });
   const [payments, setPayments] = useState<RemoteState<PaymentsResponse>>({
     status: "idle",
   });
@@ -930,6 +1064,12 @@ export function AdminClient() {
   const [catalogQuery, setCatalogQuery] = useState("");
   const [catalogPlatform, setCatalogPlatform] = useState("all");
   const [catalogStatus, setCatalogStatus] = useState("all");
+  const [upstreamLabel, setUpstreamLabel] = useState("TikHub Production");
+  const [upstreamApiKey, setUpstreamApiKey] = useState("");
+  const [activateUpstreamAfterSave, setActivateUpstreamAfterSave] =
+    useState(true);
+  const [savingUpstreamCredential, setSavingUpstreamCredential] =
+    useState(false);
   const [priceDrafts, setPriceDrafts] = useState<Record<string, string>>({});
   const [savingPath, setSavingPath] = useState("");
   const [paymentFilter, setPaymentFilter] = useState("manual_review");
@@ -1075,6 +1215,30 @@ export function AdminClient() {
     }
   }, [adminSecret]);
 
+  const loadUpstreamCredentials = useCallback(
+    async (secret = adminSecret) => {
+      if (!secret) return;
+      setUpstreamCredentials({ status: "loading" });
+      try {
+        const data = await adminRequest(
+          "/api/admin/upstream-credentials",
+          secret,
+          isUpstreamCredentialsResponse,
+        );
+        setUpstreamCredentials({ status: "ready", data });
+      } catch (error) {
+        setUpstreamCredentials({
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "无法读取 TikHub 凭据。",
+        });
+      }
+    },
+    [adminSecret],
+  );
+
   const loadPayments = useCallback(async (secret = adminSecret) => {
     if (!secret) return;
     setPayments({ status: "loading" });
@@ -1178,6 +1342,7 @@ export function AdminClient() {
         setOverview({ status: "ready", data });
         setRememberForTab(persistForTab);
         void loadUsers(secret);
+        void loadUpstreamCredentials(secret);
         void loadCatalog(secret);
         void loadPayments(secret);
         void loadPaymentReviews(secret);
@@ -1191,7 +1356,13 @@ export function AdminClient() {
         setCheckingSecret(false);
       }
     },
-    [loadCatalog, loadPaymentReviews, loadPayments, loadUsers],
+    [
+      loadCatalog,
+      loadPaymentReviews,
+      loadPayments,
+      loadUpstreamCredentials,
+      loadUsers,
+    ],
   );
 
   useEffect(() => {
@@ -1272,8 +1443,12 @@ export function AdminClient() {
     setRememberForTab(false);
     setAuthError("");
     setNotice("");
+    setUpstreamApiKey("");
+    setSavingUpstreamCredential(false);
+    setConfirmAction(null);
     setOverview({ status: "idle" });
     setUsers({ status: "idle" });
+    setUpstreamCredentials({ status: "idle" });
     setCatalog({ status: "idle" });
     setPayments({ status: "idle" });
     setPaymentReviews({ status: "idle" });
@@ -1283,6 +1458,74 @@ export function AdminClient() {
   function submitSecret(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void authenticate(secretInput, rememberForTab);
+  }
+
+  async function submitUpstreamCredential(
+    event: FormEvent<HTMLFormElement>,
+  ) {
+    event.preventDefault();
+    if (upstreamCredentials.status !== "ready") {
+      setNotice("请先刷新 TikHub 凭据状态。");
+      return;
+    }
+    const label = upstreamLabel.replace(/\s+/g, " ").trim();
+    if (label.length < 2 || label.length > 80) {
+      setNotice("TikHub 凭据名称必须是 2–80 个字符。");
+      return;
+    }
+    if (
+      !/^[\x21-\x7E]{16,512}$/.test(upstreamApiKey)
+    ) {
+      setNotice("请输入 16–512 个 ASCII 可见字符组成的 TikHub API Key。");
+      return;
+    }
+    if (!upstreamCredentials.data.encryptionConfigured) {
+      setNotice(
+        "服务端尚未配置 TIKHUB_CREDENTIALS_ENCRYPTION_KEY，不能保存上游密钥。",
+      );
+      return;
+    }
+
+    setSavingUpstreamCredential(true);
+    setNotice("");
+    try {
+      const apiKey = upstreamApiKey;
+      setUpstreamApiKey("");
+      const result = await adminRequest(
+        "/api/admin/upstream-credentials",
+        adminSecret,
+        isUpstreamCredentialMutationResponse,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            label,
+            apiKey,
+            activate: activateUpstreamAfterSave,
+            expectedVersion: upstreamCredentials.data.stateVersion,
+          }),
+        },
+      );
+      setNotice(
+        result.activationConflict
+          ? `已加密保存 ${result.credential.label} 为备用；活动数据源在提交期间发生变化，请从列表重新确认切换。`
+          : result.credential.status === "active"
+          ? `已验证并启用 ${result.credential.label}。`
+          : `已加密保存 ${result.credential.label}，当前为备用状态。`,
+      );
+      await Promise.all([
+        loadUpstreamCredentials(),
+        loadOverview(),
+      ]);
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "TikHub 凭据保存失败。",
+      );
+      await loadUpstreamCredentials();
+    } finally {
+      setSavingUpstreamCredential(false);
+    }
   }
 
   async function saveEndpointPrice(endpoint: CatalogEndpoint) {
@@ -1439,6 +1682,35 @@ export function AdminClient() {
             : `已下架 ${endpoint.path}，新请求将无法调用。`,
         );
         await Promise.all([loadCatalog(), loadOverview()]);
+      } else if (confirmAction.kind === "credential") {
+        if (upstreamCredentials.status !== "ready") {
+          throw new AdminApiError(
+            "TikHub 凭据状态尚未加载，请刷新后重试。",
+            409,
+          );
+        }
+        const result = await adminRequest(
+          "/api/admin/upstream-credentials",
+          adminSecret,
+          isUpstreamCredentialMutationResponse,
+          {
+            method: "PATCH",
+            body: JSON.stringify({
+              id: confirmAction.credential.id,
+              action: confirmAction.action,
+              expectedVersion: confirmAction.expectedVersion,
+            }),
+          },
+        );
+        setNotice(
+          confirmAction.action === "activate"
+            ? `已验证并切换到 ${result.credential.label}。`
+            : `已撤销 ${result.credential.label}；密文不会再被运行时使用。`,
+        );
+        await Promise.all([
+          loadUpstreamCredentials(),
+          loadOverview(),
+        ]);
       } else {
         const result = await adminRequest(
           "/api/admin/catalog/sync",
@@ -1453,7 +1725,17 @@ export function AdminClient() {
       }
       setConfirmAction(null);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "管理操作失败。");
+      if (
+        confirmAction.kind === "credential" &&
+        error instanceof AdminApiError &&
+        error.status === 409
+      ) {
+        setConfirmAction(null);
+        await loadUpstreamCredentials();
+        setNotice("TikHub 活动凭据状态已变化，请重新确认本次操作。");
+      } else {
+        setNotice(error instanceof Error ? error.message : "管理操作失败。");
+      }
     } finally {
       setMutating(false);
     }
@@ -1562,6 +1844,7 @@ export function AdminClient() {
             [
               ["overview", "运营总览"],
               ["users", "用户管理"],
+              ["upstream", "TikHub 数据源"],
               ["catalog", "路由与定价"],
               ["payments", "支付复核"],
             ] as const
@@ -1659,14 +1942,20 @@ export function AdminClient() {
                         </dd>
                       </div>
                       <div>
+                        <dt>活动来源</dt>
+                        <dd>
+                          {overviewData.upstream.source === "managed"
+                            ? "后台托管"
+                            : overviewData.upstream.source === "environment"
+                              ? "环境变量"
+                              : "无活动密钥"}
+                        </dd>
+                      </div>
+                      <div>
                         <dt>密钥指纹</dt>
                         <dd>
                           {overviewData.upstream.keyFingerprint ?? "不可用"}
                         </dd>
-                      </div>
-                      <div>
-                        <dt>数据生成</dt>
-                        <dd>{formatDate(overviewData.generatedAt)}</dd>
                       </div>
                     </dl>
                   </div>
@@ -1930,6 +2219,281 @@ export function AdminClient() {
                     <div className="admin-empty">
                       <strong>没有符合条件的用户</strong>
                       <p>调整搜索词或账户状态筛选后重试。</p>
+                    </div>
+                  )}
+                </>
+              ) : null}
+            </StatePanel>
+          </section>
+        ) : null}
+
+        {activeTab === "upstream" ? (
+          <section
+            className="admin-section"
+            aria-labelledby="upstream-credentials-title"
+          >
+            <div className="admin-section-head">
+              <div>
+                <p className="section-kicker">TIKHUB / DATA SOURCE</p>
+                <h2 id="upstream-credentials-title">TikHub 数据源</h2>
+              </div>
+              <button
+                className="button button-ghost button-small"
+                onClick={() => void loadUpstreamCredentials()}
+              >
+                刷新状态
+              </button>
+            </div>
+            <StatePanel
+              state={upstreamCredentials}
+              label="TikHub 凭据"
+              onRetry={() => void loadUpstreamCredentials()}
+            >
+              {upstreamCredentials.status === "ready" ? (
+                <>
+                  {!upstreamCredentials.data.encryptionConfigured ? (
+                    <div className="admin-readiness-alert">
+                      <div>
+                        <strong>凭据加密主密钥缺失或格式无效</strong>
+                        <p>
+                          先在 Sites 环境中设置 32 字节、无 padding、
+                          43 字符 base64url 格式的
+                          TIKHUB_CREDENTIALS_ENCRYPTION_KEY，再保存
+                          TikHub API Key。
+                        </p>
+                      </div>
+                    </div>
+                  ) : null}
+                  {upstreamCredentials.data.managedEnabled &&
+                  !upstreamCredentials.data.activeCredentialId ? (
+                    <div className="admin-readiness-alert">
+                      <div>
+                        <strong>托管模式没有活动数据源</strong>
+                        <p>
+                          上游代理和目录同步会安全关闭。请选择一个备用 Key
+                          并完成在线验证后启用。
+                        </p>
+                      </div>
+                    </div>
+                  ) : null}
+                  {upstreamCredentials.data.managedEnabled &&
+                  upstreamCredentials.data.environmentFallbackConfigured ? (
+                    <div className="admin-readiness-alert">
+                      <div>
+                        <strong>旧环境变量 Key 已被安全忽略</strong>
+                        <p>
+                          托管模式启用后不会回退 TIKHUB_API_KEY；
+                          请在此处切换活动凭据，避免意外使用旧 Key。
+                        </p>
+                      </div>
+                    </div>
+                  ) : null}
+                  <div className="admin-upstream-source-grid">
+                    <article>
+                      <span>当前来源</span>
+                      <strong>
+                        {upstreamCredentials.data.activeSource === "managed"
+                          ? "后台托管 Key"
+                          : upstreamCredentials.data.activeSource ===
+                              "environment"
+                            ? "环境变量回退"
+                            : "未配置"}
+                      </strong>
+                      <small>
+                        指纹{" "}
+                        {upstreamCredentials.data.activeFingerprint ??
+                          "不可用"}
+                      </small>
+                    </article>
+                    <article>
+                      <span>托管状态版本</span>
+                      <strong>
+                        v{upstreamCredentials.data.stateVersion}
+                      </strong>
+                      <small>
+                        切换使用 CAS 防止并发管理员相互覆盖
+                      </small>
+                    </article>
+                    <article>
+                      <span>已保存凭据</span>
+                      <strong>
+                        {upstreamCredentials.data.credentials.length}
+                      </strong>
+                      <small>
+                        明文不会从服务端返回
+                      </small>
+                    </article>
+                  </div>
+
+                  <form
+                    className="admin-upstream-form"
+                    onSubmit={submitUpstreamCredential}
+                  >
+                    <div>
+                      <p className="section-kicker">ADD CREDENTIAL</p>
+                      <h3>新增 TikHub API Key</h3>
+                      <p>
+                        Key 经同源 HTTPS 提交后立即使用 AES-256-GCM
+                        加密；D1 保存密文、完整哈希、已验证 scope
+                        与到期时间，日志和后台列表只显示截断指纹。
+                      </p>
+                    </div>
+                    <label>
+                      <span>凭据名称</span>
+                      <input
+                        value={upstreamLabel}
+                        minLength={2}
+                        maxLength={80}
+                        required
+                        onChange={(event) =>
+                          setUpstreamLabel(event.target.value)
+                        }
+                        placeholder="例如：TikHub Production"
+                      />
+                    </label>
+                    <label>
+                      <span>TikHub API Key</span>
+                      <input
+                        type="password"
+                        autoComplete="off"
+                        spellCheck={false}
+                        minLength={16}
+                        maxLength={512}
+                        required
+                        value={upstreamApiKey}
+                        onChange={(event) =>
+                          setUpstreamApiKey(event.target.value)
+                        }
+                        placeholder="只在本次提交中使用"
+                      />
+                    </label>
+                    <label className="admin-memory-option">
+                      <input
+                        type="checkbox"
+                        checked={activateUpstreamAfterSave}
+                        onChange={(event) =>
+                          setActivateUpstreamAfterSave(event.target.checked)
+                        }
+                      />
+                      <span>
+                        保存后向 TikHub 验证并设为活动数据源
+                        <small>
+                          关闭时仅加密保存为备用，不会用于任何客户请求
+                        </small>
+                      </span>
+                    </label>
+                    <button
+                      className="button button-blue"
+                      type="submit"
+                      disabled={
+                        savingUpstreamCredential ||
+                        !upstreamCredentials.data.encryptionConfigured
+                      }
+                    >
+                      {savingUpstreamCredential
+                        ? "正在安全保存…"
+                        : activateUpstreamAfterSave
+                          ? "验证、保存并启用"
+                          : "加密保存为备用"}
+                    </button>
+                  </form>
+
+                  {upstreamCredentials.data.credentials.length ? (
+                    <div className="admin-upstream-credential-list">
+                      {upstreamCredentials.data.credentials.map(
+                        (credential) => (
+                          <article
+                            className={`admin-upstream-credential is-${credential.status}`}
+                            key={credential.id}
+                          >
+                            <div>
+                              <span
+                                className={`admin-account-status is-${credential.status}`}
+                              >
+                                {credential.status === "active"
+                                  ? "活动"
+                                  : credential.status === "standby"
+                                    ? "备用"
+                                    : "已撤销"}
+                              </span>
+                              <h3>{credential.label}</h3>
+                              <code>{credential.fingerprint}</code>
+                              <small>
+                                {credential.scopeCount
+                                  ? `${credential.scopeCount} 个已验证授权范围`
+                                  : "尚未验证授权范围"}
+                              </small>
+                            </div>
+                            <dl>
+                              <div>
+                                <dt>创建时间</dt>
+                                <dd>{formatDate(credential.createdAt)}</dd>
+                              </div>
+                              <div>
+                                <dt>最近验证</dt>
+                                <dd>{formatDate(credential.verifiedAt)}</dd>
+                              </div>
+                              <div>
+                                <dt>最近调用</dt>
+                                <dd>{formatDate(credential.lastUsedAt)}</dd>
+                              </div>
+                              <div>
+                                <dt>到期时间</dt>
+                                <dd>
+                                  {credential.expiresAt
+                                    ? formatDate(credential.expiresAt)
+                                    : "不设到期"}
+                                </dd>
+                              </div>
+                            </dl>
+                            <div className="admin-card-actions">
+                              {credential.status === "standby" ? (
+                                <button
+                                  className="button button-blue button-small"
+                                  disabled={
+                                    !upstreamCredentials.data
+                                      .encryptionConfigured
+                                  }
+                                  onClick={() =>
+                                    setConfirmAction({
+                                      kind: "credential",
+                                      credential,
+                                      action: "activate",
+                                      expectedVersion:
+                                        upstreamCredentials.data.stateVersion,
+                                    })
+                                  }
+                                >
+                                  验证并切换
+                                </button>
+                              ) : null}
+                              {credential.status !== "revoked" ? (
+                                <button
+                                  className="button admin-button-danger-ghost button-small"
+                                  onClick={() =>
+                                    setConfirmAction({
+                                      kind: "credential",
+                                      credential,
+                                      action: "revoke",
+                                      expectedVersion:
+                                        upstreamCredentials.data.stateVersion,
+                                    })
+                                  }
+                                >
+                                  撤销
+                                </button>
+                              ) : null}
+                            </div>
+                          </article>
+                        ),
+                      )}
+                    </div>
+                  ) : (
+                    <div className="admin-empty">
+                      <strong>尚未保存 TikHub 凭据</strong>
+                      <p>
+                        配置加密主密钥后，在上方添加第一个 TikHub API Key。
+                      </p>
                     </div>
                   )}
                 </>
@@ -2512,7 +3076,9 @@ export function AdminClient() {
             (confirmAction.kind === "user" &&
               confirmAction.nextStatus === "suspended") ||
             (confirmAction.kind === "endpoint" &&
-              !confirmAction.nextEnabled)
+              !confirmAction.nextEnabled) ||
+            (confirmAction.kind === "credential" &&
+              confirmAction.action === "revoke")
           }
           title={
             confirmAction.kind === "user"
@@ -2523,7 +3089,11 @@ export function AdminClient() {
                 ? confirmAction.nextEnabled
                   ? "审核并上架此接口？"
                   : "下架此接口？"
-                : "从 TikHub 同步全部接口？"
+                : confirmAction.kind === "credential"
+                  ? confirmAction.action === "activate"
+                    ? "验证并切换 TikHub 数据源？"
+                    : "撤销这个 TikHub API Key？"
+                  : "从 TikHub 同步全部接口？"
           }
           description={
             confirmAction.kind === "user"
@@ -2534,7 +3104,13 @@ export function AdminClient() {
                 ? confirmAction.nextEnabled
                   ? `将 ${confirmAction.endpoint.path} 标记为只读已复核并按当前客户价上架。`
                   : `${confirmAction.endpoint.path} 将立即停止接受新调用，历史账单不受影响。`
-                : "同步会读取 TikHub 当前目录。新接口默认下架，价格变化的已上架接口会自动下架等待复核，客户价不会被静默覆盖。"
+                : confirmAction.kind === "credential"
+                  ? confirmAction.action === "activate"
+                    ? `服务端会先向 TikHub 验证 ${confirmAction.credential.label}，成功后用版本比较切换唯一活动凭据。`
+                    : confirmAction.credential.status === "active"
+                      ? `撤销 ${confirmAction.credential.label} 后托管模式会保持开启，但数据调用和目录同步将安全关闭，直到启用另一个 Key。`
+                      : `${confirmAction.credential.label} 将永久标记为已撤销，不能再次启用。`
+                  : "同步会读取 TikHub 当前目录。新接口默认下架，价格变化的已上架接口会自动下架等待复核，客户价不会被静默覆盖。"
           }
           confirmLabel={
             confirmAction.kind === "user"
@@ -2545,7 +3121,11 @@ export function AdminClient() {
                 ? confirmAction.nextEnabled
                   ? "确认上架"
                   : "确认下架"
-                : "开始同步"
+                : confirmAction.kind === "credential"
+                  ? confirmAction.action === "activate"
+                    ? "验证并切换"
+                    : "确认撤销"
+                  : "开始同步"
           }
           onCancel={() => {
             if (!mutating) setConfirmAction(null);

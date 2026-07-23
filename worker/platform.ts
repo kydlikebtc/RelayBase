@@ -41,15 +41,13 @@ const NOWPAYMENTS_STATUSES = new Set([
   "expired",
 ]);
 const NOWPAYMENTS_REVIEW_CREDITABLE_STATUSES = new Set([
-  "confirmed",
-  "sending",
-  "partially_paid",
   "finished",
 ]);
 
 export interface PlatformEnv {
   DB?: D1Database;
   TIKHUB_API_KEY?: string;
+  TIKHUB_CREDENTIALS_ENCRYPTION_KEY?: string;
   TIKHUB_BASE_URL?: string;
   RESELLER_AUTHORIZED?: string;
   PAYMENT_PROVIDER?: string;
@@ -105,6 +103,7 @@ type CatalogRecord = {
   price_verified: number;
   enabled: number;
   read_only: number;
+  sync_generation: string | null;
 };
 
 type PaymentOrderRecord = {
@@ -121,6 +120,35 @@ type PaymentOrderRecord = {
   credited_usd_micros: number;
   created_at: string;
   updated_at: string;
+};
+
+type ManagedUpstreamCredentialRecord = {
+  id: string;
+  label: string;
+  encrypted_secret: string;
+  secret_hash: string;
+  verified_scopes_json: string | null;
+  expires_at: string | null;
+  status: "active" | "standby" | "revoked";
+  verified_at: string | null;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+};
+
+type ResolvedTikHubCredential = {
+  secret: string;
+  fingerprint: string;
+  source: "managed" | "environment";
+  id: string | null;
+  scopes: string[] | null;
+  expiresAt: string | null;
+  stateVersion: number;
+};
+
+type TikHubCredentialVerification = {
+  scopes: string[];
+  expiresAt: string | null;
 };
 
 type NowPaymentsPayment = {
@@ -263,6 +291,27 @@ export async function handlePlatformRequest(
 
     if (url.pathname === "/api/payments" && request.method === "POST") {
       return await handleCreatePayment(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/admin/upstream-credentials" &&
+      request.method === "GET"
+    ) {
+      return await handleUpstreamCredentialsList(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/admin/upstream-credentials" &&
+      request.method === "POST"
+    ) {
+      return await handleUpstreamCredentialCreate(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/admin/upstream-credentials" &&
+      request.method === "PATCH"
+    ) {
+      return await handleUpstreamCredentialUpdate(request, env, requestId);
     }
 
     if (
@@ -1738,18 +1787,18 @@ async function handleCreatePayment(
     );
   }
   const readiness = await operationalReadiness(env);
-  if (!readiness.capabilities.proxyEnabled) {
-    throw new PlatformError(
-      503,
-      "service_not_ready",
-      "数据代理尚未完成授权与配置，暂不接受充值。",
-    );
-  }
   if (!readiness.capabilities.schemaReady) {
     throw new PlatformError(
       503,
       "database_migrations_required",
       "数据库迁移尚未完成，暂不接受充值。",
+    );
+  }
+  if (!readiness.capabilities.proxyEnabled) {
+    throw new PlatformError(
+      503,
+      "service_not_ready",
+      "数据代理尚未完成授权与配置，暂不接受充值。",
     );
   }
   if ((env.PAYMENT_PROVIDER ?? "nowpayments") !== "nowpayments") {
@@ -2247,6 +2296,15 @@ async function applyVerifiedNowPayment(
   }
 
   if (order.status === "manual_resolved" && status !== "refunded") {
+    if (normalizedPositiveDecimal(verified.actually_paid) != null) {
+      await persistPaymentReviewCase(db, {
+        orderId: input.orderId,
+        providerPaymentId: input.paymentId,
+        parentPaymentId: parentPaymentId || null,
+        reason: "funds_after_manual_rejection",
+        verified,
+      });
+    }
     return;
   }
   const verifiedUsdMicros = parseUsdMicros(verified.price_amount);
@@ -2651,10 +2709,23 @@ async function persistPaymentReviewCase(
          ON CONFLICT(provider_payment_id) DO UPDATE SET
            parent_payment_id = excluded.parent_payment_id,
            reason = excluded.reason,
+           status = 'open',
            actually_paid = excluded.actually_paid,
            pay_currency = excluded.pay_currency,
-           evidence_json = excluded.evidence_json
-         WHERE payment_review_cases.status = 'open'
+           evidence_json = excluded.evidence_json,
+           resolution_action = NULL,
+           resolution_credit_usd_micros = NULL,
+           resolution_request_hash = NULL,
+           resolution_note = NULL,
+           resolution_reference = NULL,
+           resolved_at = NULL
+         WHERE (
+             payment_review_cases.status = 'open'
+             OR (
+               payment_review_cases.status = 'resolved'
+               AND payment_review_cases.resolution_action = 'reject'
+             )
+           )
            AND payment_review_cases.order_id = excluded.order_id`,
       )
       .bind(
@@ -2673,7 +2744,7 @@ async function persistPaymentReviewCase(
       .prepare(
         `UPDATE payment_orders
          SET status = 'manual_review', updated_at = CURRENT_TIMESTAMP
-         WHERE id = ? AND status NOT IN ('refunded', 'manual_resolved')
+         WHERE id = ? AND status != 'refunded'
            AND EXISTS (
              SELECT 1 FROM payment_review_cases
              WHERE provider_payment_id = ? AND status = 'open'
@@ -2698,7 +2769,17 @@ async function handleProxyRequest(
   ctx: WorkerExecutionContext,
   requestId: string,
 ): Promise<Response> {
-  const readiness = platformReadiness(env);
+  const readiness = await operationalReadiness(env);
+  if (
+    readiness.capabilities.databaseConfigured &&
+    !readiness.capabilities.schemaReady
+  ) {
+    throw new PlatformError(
+      503,
+      "service_not_ready",
+      "数据库迁移尚未完成，已停止真实调用与扣费。",
+    );
+  }
   if (!readiness.capabilities.proxyEnabled) {
     throw new PlatformError(
       503,
@@ -2707,7 +2788,8 @@ async function handleProxyRequest(
     );
   }
   if (
-    !readiness.capabilities.reconciliationConfigured
+    !readiness.capabilities.reconciliationConfigured ||
+    !readiness.capabilities.catalogReady
   ) {
     throw new PlatformError(
       503,
@@ -2715,6 +2797,7 @@ async function handleProxyRequest(
       "计费数据库、接口目录或自动对账尚未就绪，已停止真实调用。",
     );
   }
+  const db = requireDb(env);
   if (request.method !== "GET" && request.method !== "POST") {
     throw new PlatformError(
       405,
@@ -2725,7 +2808,6 @@ async function handleProxyRequest(
 
   const url = new URL(request.url);
   validateProxyPath(url.pathname);
-  const db = requireDb(env);
   let reconciliationRecent = false;
   try {
     const heartbeat = await db
@@ -2759,7 +2841,7 @@ async function handleProxyRequest(
       .prepare(
         `SELECT path, platform, http_method, upstream_price_usd_micros,
                 customer_price_usd_micros, price_verified,
-                enabled, read_only,
+                enabled, read_only, sync_generation,
                 (SELECT request_count
                  FROM upstream_rate_limit_buckets LIMIT 1)
                   AS _upstream_rate_limit_schema,
@@ -2885,6 +2967,52 @@ async function handleProxyRequest(
       409,
       "idempotency_conflict",
       `该 Idempotency-Key 已用于请求 ${previous.id}（${previous.status}），未重复调用或扣费。`,
+    );
+  }
+  const upstreamCredential = await resolveTikHubCredential(env, db);
+  if (!upstreamCredential) {
+    throw new PlatformError(
+      503,
+      "upstream_not_configured",
+      "TikHub 服务端密钥尚未配置。",
+    );
+  }
+  if (
+    !tikHubCredentialAllowsPath(
+      upstreamCredential.scopes,
+      url.pathname,
+    )
+  ) {
+    throw new PlatformError(
+      403,
+      "upstream_credential_scope_denied",
+      "当前 TikHub 活动凭据没有调用该数据接口的权限。",
+    );
+  }
+  const currentCatalogCredential = await db
+    .prepare(
+      `SELECT EXISTS(
+         SELECT 1 FROM catalog_sync_state
+         WHERE id = 1 AND last_success_generation = ?
+           AND credential_source = ?
+           AND credential_id IS ?
+           AND credential_fingerprint = ?
+           AND credential_state_version = ?
+       ) AS matches_current`,
+    )
+    .bind(
+      catalog.sync_generation,
+      upstreamCredential.source,
+      upstreamCredential.id,
+      upstreamCredential.fingerprint,
+      upstreamCredential.stateVersion,
+    )
+    .first<{ matches_current: number }>();
+  if (Number(currentCatalogCredential?.matches_current ?? 0) !== 1) {
+    throw new PlatformError(
+      409,
+      "catalog_credential_changed",
+      "TikHub 活动凭据在请求准备期间发生变化，请稍后重试。",
     );
   }
 
@@ -3051,7 +3179,7 @@ async function handleProxyRequest(
     `${upstreamBase}${url.pathname.slice("/v1".length)}${url.search}`,
   );
   const upstreamHeaders = new Headers({
-    authorization: `Bearer ${env.TIKHUB_API_KEY}`,
+    authorization: `Bearer ${upstreamCredential.secret}`,
     accept: request.headers.get("accept") ?? "application/json",
     "user-agent": "RelayBase-API/1.0",
   });
@@ -3060,6 +3188,23 @@ async function handleProxyRequest(
   }
 
   const startedAt = Date.now();
+  if (upstreamCredential.id) {
+    ctx.waitUntil(
+      db
+        .prepare(
+          `UPDATE upstream_credentials
+           SET last_used_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND provider = 'tikhub' AND revoked_at IS NULL
+             AND EXISTS (
+               SELECT 1 FROM upstream_credential_state
+               WHERE provider = 'tikhub'
+                 AND active_credential_id = upstream_credentials.id
+             )`,
+        )
+        .bind(upstreamCredential.id)
+        .run(),
+    );
+  }
   let upstreamResponse: Response;
   try {
     upstreamResponse = await fetch(upstreamUrl, {
@@ -3218,6 +3363,7 @@ async function handleProxyRequest(
     const upstreamMessage = await safeUpstreamErrorMessage(
       upstreamResponse,
       MAX_UPSTREAM_ERROR_BODY_BYTES,
+      [upstreamCredential.secret],
     );
     return upstreamErrorResponse(
       upstreamResponse.status,
@@ -3488,6 +3634,19 @@ async function handleAdminOverview(
   requireAdminSecret(request, env, "platform");
   const db = requireDb(env);
   const readiness = await operationalReadiness(env);
+  const upstreamSnapshot = await managedTikHubCredentialsSnapshot(db);
+  const activeManagedCredential =
+    upstreamSnapshot.credentials.find(
+      (credential) => credential.status === "active",
+    ) ?? null;
+  const environmentUpstreamKey = env.TIKHUB_API_KEY;
+  const environmentUpstreamConfigured = hasConfiguredCredential(
+    environmentUpstreamKey,
+  );
+  const environmentUpstreamFingerprint =
+    environmentUpstreamConfigured && !upstreamSnapshot.managedEnabled
+      ? (await sha256Hex(environmentUpstreamKey)).slice(0, 16)
+      : null;
   const [
     usersResult,
     callsResult,
@@ -3616,10 +3775,22 @@ async function handleAdminOverview(
         missing: readiness.missing,
       },
       upstream: {
-        configured: hasConfiguredCredential(env.TIKHUB_API_KEY),
-        keyFingerprint: hasConfiguredCredential(env.TIKHUB_API_KEY)
-          ? (await sha256Hex(env.TIKHUB_API_KEY)).slice(0, 12)
-          : null,
+        configured: readiness.capabilities.upstreamConfigured,
+        keyFingerprint:
+          activeManagedCredential?.secret_hash.slice(0, 16) ??
+          environmentUpstreamFingerprint,
+        source: activeManagedCredential
+          ? "managed"
+          : !upstreamSnapshot.managedEnabled &&
+              environmentUpstreamConfigured
+            ? "environment"
+            : "none",
+        managedEnabled: upstreamSnapshot.managedEnabled,
+        managedCredentialCount: upstreamSnapshot.credentials.length,
+        stateVersion: upstreamSnapshot.stateVersion,
+        encryptionConfigured: hasValidTikHubCredentialsEncryptionKey(
+          env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY,
+        ),
         baseUrl: hasValidRuntimeConfiguration(env)
           ? normalizeUpstreamBase(env.TIKHUB_BASE_URL)
           : null,
@@ -4185,7 +4356,7 @@ async function handlePaymentReviewResolve(
               r.resolution_action, r.resolution_credit_usd_micros,
               r.resolution_request_hash,
               p.user_id, p.provider_payment_id AS order_payment_id,
-              p.amount_usd_micros, p.pay_currency
+              p.amount_usd_micros, p.pay_currency, p.pay_amount
        FROM payment_review_cases r
        JOIN payment_orders p ON p.id = r.order_id
        WHERE r.id = ?`,
@@ -4205,6 +4376,7 @@ async function handlePaymentReviewResolve(
       order_payment_id: string | null;
       amount_usd_micros: number;
       pay_currency: string;
+      pay_amount: string | null;
     }>();
   if (!review) {
     throw new PlatformError(404, "review_case_not_found", "复核案件不存在。");
@@ -4284,12 +4456,53 @@ async function handlePaymentReviewResolve(
       "服务商状态尚未确认可入账资金，或到账币种不匹配，不能人工入账。",
     );
   }
+  if (action === "credit" && creditUsdMicros != null) {
+    const expectedPayAmount =
+      normalizedPositiveDecimal(review.pay_amount) ??
+      normalizedPositiveDecimal(verified.pay_amount);
+    const maxCreditUsdMicros =
+      expectedPayAmount == null
+        ? null
+        : proportionalPaymentCreditUsdMicros(
+            review.amount_usd_micros,
+            verified.actually_paid,
+            expectedPayAmount,
+          );
+    if (
+      maxCreditUsdMicros == null ||
+      creditUsdMicros > maxCreditUsdMicros
+    ) {
+      throw new PlatformError(
+        400,
+        "review_credit_exceeds_verified_payment",
+        maxCreditUsdMicros == null
+          ? "无法从服务商证据计算可入账上限，不能人工入账。"
+          : `人工入账不能超过已验证到账比例对应的 ${maxCreditUsdMicros} 美元微单位。`,
+      );
+    }
+  }
   if (action === "refund_confirmed" && verifiedStatus !== "refunded") {
     throw new PlatformError(
       409,
       "refund_not_confirmed",
       "服务商状态尚未确认退款，不能关闭为已退款。",
     );
+  }
+  if (action === "reject") {
+    const actualPaid = decimalToScaledInteger(
+      verified.actually_paid,
+      18,
+    );
+    if (
+      (verifiedStatus !== "failed" && verifiedStatus !== "expired") ||
+      actualPaid !== BigInt(0)
+    ) {
+      throw new PlatformError(
+        409,
+        "payment_review_reject_not_safe",
+        "只有服务商已确认失败或过期且实际到账为零的案件才能拒绝；已收到资金的案件必须入账、冻结或确认退款。",
+      );
+    }
   }
 
   const ledgerReference = `nowpayments-review:${caseId}:credit`;
@@ -4554,105 +4767,414 @@ async function handleAdminAuditList(
   );
 }
 
+async function handleUpstreamCredentialsList(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  requireAdminSecret(request, env, "platform");
+  const db = requireDb(env);
+  const snapshot = await managedTikHubCredentialsSnapshot(db);
+  const active =
+    snapshot.credentials.find((row) => row.status === "active") ?? null;
+  const environmentKey = env.TIKHUB_API_KEY;
+  const environmentConfigured = hasConfiguredCredential(environmentKey);
+  const environmentFingerprint = environmentConfigured
+    ? (await sha256Hex(environmentKey)).slice(0, 16)
+    : null;
+
+  return jsonResponse(
+    {
+      credentials: snapshot.credentials.map(publicManagedTikHubCredential),
+      activeSource: active
+        ? "managed"
+        : !snapshot.managedEnabled && environmentConfigured
+          ? "environment"
+          : "none",
+      activeCredentialId: snapshot.activeCredentialId,
+      activeFingerprint:
+        active?.secret_hash.slice(0, 16) ??
+        (!snapshot.managedEnabled ? environmentFingerprint : null),
+      stateVersion: snapshot.stateVersion,
+      managedEnabled: snapshot.managedEnabled,
+      encryptionConfigured: hasValidTikHubCredentialsEncryptionKey(
+        env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY,
+      ),
+      environmentFallbackConfigured: environmentConfigured,
+    },
+    200,
+    requestId,
+  );
+}
+
+async function handleUpstreamCredentialCreate(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  assertSameOrigin(request, env);
+  requireAdminSecret(request, env, "platform");
+  const encryptionKey = requireTikHubCredentialsEncryptionKey(env);
+  const body = await readJsonBody<{
+    label?: unknown;
+    apiKey?: unknown;
+    activate?: unknown;
+    expectedVersion?: unknown;
+  }>(request, MAX_DASHBOARD_BODY_BYTES);
+  const label = sanitizeUpstreamCredentialLabel(body.label);
+  const apiKey =
+    typeof body.apiKey === "string" ? body.apiKey : "";
+  if (!isValidTikHubApiKey(apiKey)) {
+    throw new PlatformError(
+      400,
+      "invalid_upstream_credential",
+      "TikHub API Key 格式无效。",
+    );
+  }
+  if (typeof body.activate !== "boolean") {
+    throw new PlatformError(
+      400,
+      "invalid_upstream_credential_action",
+      "必须明确选择是否在保存后验证并启用。",
+    );
+  }
+  const expectedVersion =
+    typeof body.expectedVersion === "number"
+      ? body.expectedVersion
+      : Number.NaN;
+  if (
+    body.activate &&
+    (!Number.isSafeInteger(expectedVersion) ||
+      expectedVersion < 0 ||
+      expectedVersion > 2_147_483_647)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_upstream_credential_version",
+      "启用 TikHub 凭据时必须提供当前状态版本。",
+    );
+  }
+
+  const db = requireDb(env);
+  if (body.activate) {
+    const currentState = await upstreamCredentialState(db);
+    if (currentState.version !== expectedVersion) {
+      throw new PlatformError(
+        409,
+        "upstream_credential_update_conflict",
+        "TikHub 活动凭据已发生变化，请刷新后重试。",
+      );
+    }
+  }
+  const verification = body.activate
+    ? await verifyTikHubApiKey(apiKey, env)
+    : null;
+
+  const id = `upc_${randomBase64Url(18)}`;
+  const secretHash = await sha256Hex(apiKey);
+  const fingerprint = secretHash.slice(0, 16);
+  const encryptedSecret = await encryptTikHubApiKey(
+    apiKey,
+    encryptionKey,
+    id,
+  );
+  const created = await db
+    .prepare(
+      `INSERT INTO upstream_credentials
+       (id, provider, label, encrypted_secret, secret_hash,
+        verified_scopes_json, expires_at, verified_at, created_at)
+       SELECT ?, 'tikhub', ?, ?, ?, ?, ?,
+              CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
+              CURRENT_TIMESTAMP
+       WHERE NOT EXISTS (
+         SELECT 1 FROM upstream_credentials
+         WHERE provider = 'tikhub' AND secret_hash = ?
+       )
+       AND (
+         SELECT COUNT(*)
+         FROM upstream_credentials
+         WHERE provider = 'tikhub'
+       ) < 100`,
+    )
+    .bind(
+      id,
+      label,
+      encryptedSecret,
+      secretHash,
+      verification ? JSON.stringify(verification.scopes) : null,
+      verification?.expiresAt ?? null,
+      body.activate ? 1 : 0,
+      secretHash,
+    )
+    .run();
+  if (Number(created.meta?.changes ?? 0) !== 1) {
+    throw new PlatformError(
+      409,
+      "upstream_credential_exists",
+      "相同 TikHub API Key 已经存在。",
+    );
+  }
+  await writeAdminAudit(db, request, {
+    action: "upstream_credential.created",
+    targetType: "upstream_credential",
+    targetId: id,
+    details: {
+      provider: "tikhub",
+      label,
+      fingerprint,
+      activateRequested: body.activate,
+    },
+  });
+
+  let activationConflict = false;
+  if (body.activate) {
+    try {
+      await activateManagedTikHubCredential(
+        db,
+        request,
+        id,
+        expectedVersion,
+      );
+    } catch (error) {
+      if (
+        error instanceof PlatformError &&
+        error.code === "upstream_credential_update_conflict"
+      ) {
+        activationConflict = true;
+      } else {
+        throw error;
+      }
+    }
+  }
+  const stored = await managedTikHubCredentialById(db, id);
+  if (!stored) {
+    throw new PlatformError(
+      500,
+      "upstream_credential_write_failed",
+      "TikHub 凭据保存失败。",
+    );
+  }
+  return jsonResponse(
+    {
+      credential: publicManagedTikHubCredential(stored),
+      verified: body.activate,
+      activationConflict,
+    },
+    activationConflict ? 202 : 201,
+    requestId,
+  );
+}
+
+async function handleUpstreamCredentialUpdate(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  assertSameOrigin(request, env);
+  requireAdminSecret(request, env, "platform");
+  const body = await readJsonBody<{
+    id?: unknown;
+    action?: unknown;
+    expectedVersion?: unknown;
+  }>(request, MAX_DASHBOARD_BODY_BYTES);
+  const id = typeof body.id === "string" ? body.id.trim() : "";
+  const action =
+    typeof body.action === "string" ? body.action.trim() : "";
+  if (!/^upc_[A-Za-z0-9_-]{16,80}$/.test(id)) {
+    throw new PlatformError(
+      400,
+      "invalid_upstream_credential_id",
+      "TikHub 凭据编号无效。",
+    );
+  }
+  if (action !== "activate" && action !== "revoke") {
+    throw new PlatformError(
+      400,
+      "invalid_upstream_credential_action",
+      "TikHub 凭据操作仅支持 activate 或 revoke。",
+    );
+  }
+  const expectedVersion =
+    typeof body.expectedVersion === "number"
+      ? body.expectedVersion
+      : Number.NaN;
+  if (
+    !Number.isSafeInteger(expectedVersion) ||
+    expectedVersion < 0 ||
+    expectedVersion > 2_147_483_647
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_upstream_credential_version",
+      "TikHub 凭据操作必须提供当前状态版本。",
+    );
+  }
+
+  const db = requireDb(env);
+  const existing = await managedTikHubCredentialById(db, id);
+  if (!existing) {
+    throw new PlatformError(
+      404,
+      "upstream_credential_not_found",
+      "没有找到这个 TikHub 凭据。",
+    );
+  }
+  if (existing.status === "revoked") {
+    throw new PlatformError(
+      409,
+      "upstream_credential_revoked",
+      "已撤销的 TikHub 凭据不能再次使用。",
+    );
+  }
+
+  if (action === "activate") {
+    const currentState = await upstreamCredentialState(db);
+    if (currentState.version !== expectedVersion) {
+      throw new PlatformError(
+        409,
+        "upstream_credential_update_conflict",
+        "TikHub 活动凭据已发生变化，请刷新后重试。",
+      );
+    }
+    const encryptionKey = requireTikHubCredentialsEncryptionKey(env);
+    const apiKey = await decryptTikHubApiKey(
+      existing.encrypted_secret,
+      encryptionKey,
+      existing.id,
+    );
+    const verification = await verifyTikHubApiKey(apiKey, env);
+    const storedVerification = await db
+      .prepare(
+        `UPDATE upstream_credentials
+         SET verified_scopes_json = ?, expires_at = ?,
+             verified_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND provider = 'tikhub' AND revoked_at IS NULL`,
+      )
+      .bind(
+        JSON.stringify(verification.scopes),
+        verification.expiresAt,
+        id,
+      )
+      .run();
+    if (Number(storedVerification.meta?.changes ?? 0) !== 1) {
+      throw new PlatformError(
+        409,
+        "upstream_credential_update_conflict",
+        "TikHub 凭据状态已发生变化，请刷新后重试。",
+      );
+    }
+    await activateManagedTikHubCredential(
+      db,
+      request,
+      id,
+      expectedVersion,
+    );
+  } else {
+    if (existing.status === "active") {
+      const revokedActive = await db.batch([
+        db
+          .prepare(
+            `UPDATE upstream_credential_state
+             SET active_credential_id = NULL, version = version + 1,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE provider = 'tikhub' AND active_credential_id = ?
+               AND version = ?`,
+          )
+          .bind(id, expectedVersion),
+        db
+          .prepare(
+            `UPDATE upstream_credentials
+             SET revoked_at = CURRENT_TIMESTAMP,
+                 encrypted_secret = 'revoked'
+             WHERE id = ? AND provider = 'tikhub' AND revoked_at IS NULL
+               AND EXISTS (
+                 SELECT 1 FROM upstream_credential_state
+                 WHERE provider = 'tikhub' AND managed_enabled = 1
+                   AND active_credential_id IS NULL AND version = ?
+               )`,
+          )
+          .bind(id, expectedVersion + 1),
+        db
+          .prepare(
+            `DELETE FROM catalog_sync_state
+             WHERE id = 1
+               AND EXISTS (
+                 SELECT 1 FROM upstream_credential_state
+                 WHERE provider = 'tikhub' AND managed_enabled = 1
+                   AND active_credential_id IS NULL AND version = ?
+               )`,
+          )
+          .bind(expectedVersion + 1),
+      ]);
+      if (
+        Number(revokedActive[0]?.meta?.changes ?? 0) !== 1 ||
+        Number(revokedActive[1]?.meta?.changes ?? 0) !== 1
+      ) {
+        throw new PlatformError(
+          409,
+          "upstream_credential_update_conflict",
+          "TikHub 活动凭据已发生变化，请刷新后重试。",
+        );
+      }
+    } else {
+      const revoked = await db
+        .prepare(
+          `UPDATE upstream_credentials
+           SET revoked_at = CURRENT_TIMESTAMP,
+               encrypted_secret = 'revoked'
+           WHERE id = ? AND provider = 'tikhub' AND revoked_at IS NULL
+             AND EXISTS (
+               SELECT 1 FROM upstream_credential_state
+               WHERE provider = 'tikhub' AND version = ?
+                 AND (
+                   active_credential_id IS NULL OR
+                   active_credential_id != ?
+                 )
+             )`,
+        )
+        .bind(id, expectedVersion, id)
+        .run();
+      if (Number(revoked.meta?.changes ?? 0) !== 1) {
+        throw new PlatformError(
+          409,
+          "upstream_credential_update_conflict",
+          "TikHub 凭据状态已发生变化，请刷新后重试。",
+        );
+      }
+    }
+    await writeAdminAudit(db, request, {
+      action: "upstream_credential.revoked",
+      targetType: "upstream_credential",
+      targetId: id,
+      details: {
+        provider: "tikhub",
+        label: existing.label,
+        fingerprint: existing.secret_hash.slice(0, 16),
+      },
+    });
+  }
+
+  const updated = await managedTikHubCredentialById(db, id);
+  if (!updated) {
+    throw new PlatformError(
+      500,
+      "upstream_credential_write_failed",
+      "TikHub 凭据状态更新失败。",
+    );
+  }
+  return jsonResponse(
+    { credential: publicManagedTikHubCredential(updated) },
+    200,
+    requestId,
+  );
+}
+
 async function handleCatalogSync(
   request: Request,
   env: PlatformEnv,
   requestId: string,
 ): Promise<Response> {
   requireAdminSecret(request, env, "catalog");
-  if (!env.TIKHUB_API_KEY) {
-    throw new PlatformError(
-      503,
-      "upstream_not_configured",
-      "TikHub 服务端密钥尚未配置。",
-    );
-  }
-
-  const upstreamBase = normalizeUpstreamBase(env.TIKHUB_BASE_URL);
-  let response: Response;
-  try {
-    response = await fetch(
-      `${upstreamBase}/tikhub/user/get_all_endpoints_info`,
-      {
-        headers: {
-          authorization: `Bearer ${env.TIKHUB_API_KEY}`,
-          accept: "application/json",
-        },
-        redirect: "error",
-        signal: AbortSignal.timeout(
-          clampInteger(env.UPSTREAM_TIMEOUT_MS, 45_000, 30_000, 60_000),
-        ),
-      },
-    );
-  } catch {
-    throw new PlatformError(
-      502,
-      "catalog_sync_failed",
-      "TikHub 端点目录暂时不可用。",
-    );
-  }
-  if (!response.ok) {
-    throw new PlatformError(
-      502,
-      "catalog_sync_failed",
-      `TikHub 端点目录同步失败（${response.status}）。`,
-    );
-  }
-
-  const payload = await readResponseJson(
-    response,
-    MAX_CATALOG_RESPONSE_BYTES,
-    "catalog_sync_failed",
-  );
-  let openApiResponse: Response;
-  try {
-    openApiResponse = await fetch(
-      `${new URL(upstreamBase).origin}/openapi.json`,
-      {
-        headers: { accept: "application/json" },
-        redirect: "error",
-        signal: AbortSignal.timeout(
-          clampInteger(env.UPSTREAM_TIMEOUT_MS, 45_000, 30_000, 60_000),
-        ),
-      },
-    );
-  } catch {
-    throw new PlatformError(
-      502,
-      "catalog_schema_sync_failed",
-      "TikHub OpenAPI 文档暂时不可用。",
-    );
-  }
-  if (!openApiResponse.ok) {
-    throw new PlatformError(
-      502,
-      "catalog_schema_sync_failed",
-      `TikHub OpenAPI 文档同步失败（${openApiResponse.status}）。`,
-    );
-  }
-  const openApiPayload = await readResponseJson(
-    openApiResponse,
-    MAX_OPENAPI_RESPONSE_BYTES,
-    "catalog_schema_sync_failed",
-  );
-  const prices = extractCatalogPrices(payload);
-  const openApi = extractOpenApiCatalog(openApiPayload);
-  const entries = mergeCatalogEntries(prices, openApi);
-  if (prices.length === 0 || openApi.size === 0 || entries.length === 0) {
-    throw new PlatformError(
-      502,
-      "catalog_sync_failed",
-      "上游响应中没有识别到完整端点与价格，请人工检查响应格式。",
-    );
-  }
-  if (entries.length > 5_000) {
-    throw new PlatformError(
-      502,
-      "catalog_sync_failed",
-      "上游端点目录超过安全处理上限，请人工检查响应。",
-    );
-  }
-
   const db = requireDb(env);
   const syncGeneration = `sync_${randomBase64Url(16)}`;
   const acquiredLock = await db
@@ -4677,6 +5199,122 @@ async function handleCatalogSync(
   }
 
   try {
+    const credential = await resolveTikHubCredential(env, db);
+    if (!credential) {
+      throw new PlatformError(
+        503,
+        "upstream_not_configured",
+        "TikHub 服务端密钥尚未配置。",
+      );
+    }
+
+    const upstreamBase = normalizeUpstreamBase(env.TIKHUB_BASE_URL);
+    let response: Response;
+    try {
+      response = await fetch(
+        `${upstreamBase}/tikhub/user/get_all_endpoints_info`,
+        {
+          headers: {
+            authorization: `Bearer ${credential.secret}`,
+            accept: "application/json",
+          },
+          redirect: "error",
+          signal: AbortSignal.timeout(
+            clampInteger(
+              env.UPSTREAM_TIMEOUT_MS,
+              45_000,
+              30_000,
+              60_000,
+            ),
+          ),
+        },
+      );
+    } catch {
+      throw new PlatformError(
+        502,
+        "catalog_sync_failed",
+        "TikHub 端点目录暂时不可用。",
+      );
+    }
+    if (!response.ok) {
+      throw new PlatformError(
+        502,
+        "catalog_sync_failed",
+        `TikHub 端点目录同步失败（${response.status}）。`,
+      );
+    }
+
+    const payload = await readResponseJson(
+      response,
+      MAX_CATALOG_RESPONSE_BYTES,
+      "catalog_sync_failed",
+    );
+    let openApiResponse: Response;
+    try {
+      openApiResponse = await fetch(
+        `${new URL(upstreamBase).origin}/openapi.json`,
+        {
+          headers: { accept: "application/json" },
+          redirect: "error",
+          signal: AbortSignal.timeout(
+            clampInteger(
+              env.UPSTREAM_TIMEOUT_MS,
+              45_000,
+              30_000,
+              60_000,
+            ),
+          ),
+        },
+      );
+    } catch {
+      throw new PlatformError(
+        502,
+        "catalog_schema_sync_failed",
+        "TikHub OpenAPI 文档暂时不可用。",
+      );
+    }
+    if (!openApiResponse.ok) {
+      throw new PlatformError(
+        502,
+        "catalog_schema_sync_failed",
+        `TikHub OpenAPI 文档同步失败（${openApiResponse.status}）。`,
+      );
+    }
+    const openApiPayload = await readResponseJson(
+      openApiResponse,
+      MAX_OPENAPI_RESPONSE_BYTES,
+      "catalog_schema_sync_failed",
+    );
+    const prices = extractCatalogPrices(payload);
+    const openApi = extractOpenApiCatalog(openApiPayload);
+    const entries = mergeCatalogEntries(
+      prices,
+      openApi,
+      credential.scopes,
+    );
+    const pricedEntries = entries.filter(
+      (entry) => entry.priceVerified,
+    ).length;
+    if (
+      prices.length === 0 ||
+      openApi.size === 0 ||
+      entries.length === 0 ||
+      pricedEntries === 0
+    ) {
+      throw new PlatformError(
+        502,
+        "catalog_sync_failed",
+        "上游响应中没有识别到完整端点与价格，请人工检查响应格式。",
+      );
+    }
+    if (entries.length > 5_000) {
+      throw new PlatformError(
+        502,
+        "catalog_sync_failed",
+        "上游端点目录超过安全处理上限，请人工检查响应。",
+      );
+    }
+
     const currentCount = await db
       .prepare(`SELECT COUNT(*) AS count FROM endpoint_catalog`)
       .first<{ count: number }>();
@@ -4772,6 +5410,22 @@ async function handleCatalogSync(
       );
     }
 
+    const publishCredential = await resolveTikHubCredential(env, db);
+    if (
+      !publishCredential ||
+      publishCredential.id !== credential.id ||
+      publishCredential.source !== credential.source ||
+      publishCredential.fingerprint !== credential.fingerprint ||
+      publishCredential.stateVersion !== credential.stateVersion
+    ) {
+      throw new PlatformError(
+        409,
+        "catalog_sync_credential_changed",
+        "TikHub 活动凭据在同步期间发生变化，本次快照不会发布。",
+      );
+    }
+    const managedCredentialFlag =
+      credential.source === "managed" ? 1 : 0;
     const finalization = await db.batch([
       db
         .prepare(
@@ -4792,6 +5446,12 @@ async function handleCatalogSync(
              AND EXISTS (
                SELECT 1 FROM catalog_sync_locks l
                WHERE l.id = 1 AND l.generation = ?
+             )
+             AND EXISTS (
+               SELECT 1 FROM upstream_credential_state u
+               WHERE u.provider = 'tikhub' AND u.version = ?
+                 AND u.managed_enabled = ?
+                 AND u.active_credential_id IS ?
              )
            ON CONFLICT(path) DO UPDATE SET
              platform = excluded.platform,
@@ -4828,7 +5488,13 @@ async function handleCatalogSync(
              source_updated_at = CURRENT_TIMESTAMP,
              updated_at = CURRENT_TIMESTAMP`,
         )
-        .bind(syncGeneration, syncGeneration),
+        .bind(
+          syncGeneration,
+          syncGeneration,
+          credential.stateVersion,
+          managedCredentialFlag,
+          credential.id,
+        ),
       db
         .prepare(
           `UPDATE endpoint_catalog
@@ -4842,23 +5508,58 @@ async function handleCatalogSync(
              AND EXISTS (
                SELECT 1 FROM catalog_sync_locks l
                WHERE l.id = 1 AND l.generation = ?
+             )
+             AND EXISTS (
+               SELECT 1 FROM upstream_credential_state u
+               WHERE u.provider = 'tikhub' AND u.version = ?
+                 AND u.managed_enabled = ?
+                 AND u.active_credential_id IS ?
              )`,
         )
-        .bind(syncGeneration, syncGeneration),
+        .bind(
+          syncGeneration,
+          syncGeneration,
+          credential.stateVersion,
+          managedCredentialFlag,
+          credential.id,
+        ),
       db
         .prepare(
           `INSERT INTO catalog_sync_state
-           (id, last_success_generation, synced_at)
-           SELECT 1, ?, CURRENT_TIMESTAMP
+           (id, last_success_generation, credential_source,
+            credential_id, credential_fingerprint,
+            credential_state_version, synced_at)
+           SELECT 1, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
            WHERE EXISTS (
              SELECT 1 FROM catalog_sync_locks
              WHERE id = 1 AND generation = ?
            )
+             AND EXISTS (
+               SELECT 1 FROM upstream_credential_state u
+               WHERE u.provider = 'tikhub' AND u.version = ?
+                 AND u.managed_enabled = ?
+                 AND u.active_credential_id IS ?
+             )
            ON CONFLICT(id) DO UPDATE SET
              last_success_generation = excluded.last_success_generation,
+             credential_source = excluded.credential_source,
+             credential_id = excluded.credential_id,
+             credential_fingerprint = excluded.credential_fingerprint,
+             credential_state_version =
+               excluded.credential_state_version,
              synced_at = CURRENT_TIMESTAMP`,
         )
-        .bind(syncGeneration, syncGeneration),
+        .bind(
+          syncGeneration,
+          credential.source,
+          credential.id,
+          credential.fingerprint,
+          credential.stateVersion,
+          syncGeneration,
+          credential.stateVersion,
+          managedCredentialFlag,
+          credential.id,
+        ),
       db
         .prepare(
           `DELETE FROM catalog_sync_staging
@@ -4868,12 +5569,27 @@ async function handleCatalogSync(
     ]);
     const published = await db
       .prepare(
-        `SELECT last_success_generation
+        `SELECT last_success_generation, credential_source,
+                credential_id, credential_fingerprint,
+                credential_state_version
          FROM catalog_sync_state
          WHERE id = 1`,
       )
-      .first<{ last_success_generation: string }>();
-    if (published?.last_success_generation !== syncGeneration) {
+      .first<{
+        last_success_generation: string;
+        credential_source: string | null;
+        credential_id: string | null;
+        credential_fingerprint: string | null;
+        credential_state_version: number | null;
+      }>();
+    if (
+      published?.last_success_generation !== syncGeneration ||
+      published.credential_source !== credential.source ||
+      published.credential_id !== credential.id ||
+      published.credential_fingerprint !== credential.fingerprint ||
+      Number(published.credential_state_version) !==
+        credential.stateVersion
+    ) {
       throw new PlatformError(
         409,
         "catalog_sync_lease_lost",
@@ -5628,6 +6344,620 @@ async function getNowPaymentsPayment(
   return payload as NowPaymentsPayment;
 }
 
+async function managedTikHubCredentialsSnapshot(
+  db: D1Database,
+): Promise<{
+  credentials: ManagedUpstreamCredentialRecord[];
+  activeCredentialId: string | null;
+  managedEnabled: boolean;
+  stateVersion: number;
+}> {
+  const state = await upstreamCredentialState(db);
+  let rows: D1Result<ManagedUpstreamCredentialRecord>;
+  try {
+    rows = await db
+      .prepare(
+        `SELECT c.id, c.label, c.encrypted_secret, c.secret_hash,
+                c.verified_scopes_json, c.expires_at,
+                CASE
+                  WHEN c.revoked_at IS NOT NULL THEN 'revoked'
+                  WHEN s.active_credential_id = c.id THEN 'active'
+                  ELSE 'standby'
+                END AS status,
+                c.verified_at, c.created_at, c.last_used_at, c.revoked_at
+         FROM upstream_credentials c
+         JOIN upstream_credential_state s
+           ON s.provider = c.provider
+         WHERE c.provider = 'tikhub'
+         ORDER BY c.created_at DESC, c.id DESC
+         LIMIT 100`,
+      )
+      .all<ManagedUpstreamCredentialRecord>();
+  } catch {
+    throw new PlatformError(
+      503,
+      "database_migrations_required",
+      "TikHub 凭据库迁移尚未完成。",
+    );
+  }
+  return {
+    credentials: rows.results ?? [],
+    activeCredentialId: state.activeCredentialId,
+    managedEnabled: state.managedEnabled,
+    stateVersion: state.version,
+  };
+}
+
+async function upstreamCredentialState(
+  db: D1Database,
+): Promise<{
+  activeCredentialId: string | null;
+  managedEnabled: boolean;
+  version: number;
+}> {
+  try {
+    const row = await db
+      .prepare(
+        `SELECT active_credential_id, managed_enabled, version
+         FROM upstream_credential_state
+         WHERE provider = 'tikhub'`,
+      )
+      .first<{
+        active_credential_id: string | null;
+        managed_enabled: number;
+        version: number;
+      }>();
+    const managedEnabled = Number(row?.managed_enabled);
+    const version = Number(row?.version);
+    if (
+      !row ||
+      (managedEnabled !== 0 && managedEnabled !== 1) ||
+      !Number.isSafeInteger(version) ||
+      version < 0 ||
+      (managedEnabled === 0 && row.active_credential_id !== null)
+    ) {
+      throw new Error("missing credential state");
+    }
+    return {
+      activeCredentialId: row.active_credential_id,
+      managedEnabled: managedEnabled === 1,
+      version,
+    };
+  } catch {
+    throw new PlatformError(
+      503,
+      "database_migrations_required",
+      "TikHub 凭据库迁移尚未完成。",
+    );
+  }
+}
+
+async function managedTikHubCredentialById(
+  db: D1Database,
+  id: string,
+): Promise<ManagedUpstreamCredentialRecord | null> {
+  try {
+    return await db
+      .prepare(
+        `SELECT c.id, c.label, c.encrypted_secret, c.secret_hash,
+                c.verified_scopes_json, c.expires_at,
+                CASE
+                  WHEN c.revoked_at IS NOT NULL THEN 'revoked'
+                  WHEN s.active_credential_id = c.id THEN 'active'
+                  ELSE 'standby'
+                END AS status,
+                c.verified_at, c.created_at, c.last_used_at, c.revoked_at
+         FROM upstream_credentials c
+         JOIN upstream_credential_state s
+           ON s.provider = c.provider
+         WHERE c.provider = 'tikhub' AND c.id = ?`,
+      )
+      .bind(id)
+      .first<ManagedUpstreamCredentialRecord>();
+  } catch {
+    throw new PlatformError(
+      503,
+      "database_migrations_required",
+      "TikHub 凭据库迁移尚未完成。",
+    );
+  }
+}
+
+function publicManagedTikHubCredential(
+  credential: ManagedUpstreamCredentialRecord,
+) {
+  let scopeCount = 0;
+  try {
+    const scopes = normalizeTikHubCredentialScopes(
+      credential.verified_scopes_json
+        ? (JSON.parse(credential.verified_scopes_json) as unknown)
+        : null,
+    );
+    scopeCount = scopes?.length ?? 0;
+  } catch {
+    scopeCount = 0;
+  }
+  return {
+    id: credential.id,
+    label: credential.label,
+    fingerprint: credential.secret_hash.slice(0, 16),
+    status: credential.status,
+    scopeCount,
+    expiresAt: credential.expires_at,
+    verifiedAt: credential.verified_at,
+    createdAt: credential.created_at,
+    lastUsedAt: credential.last_used_at,
+    revokedAt: credential.revoked_at,
+  };
+}
+
+async function activateManagedTikHubCredential(
+  db: D1Database,
+  request: Request,
+  id: string,
+  expectedVersion: number,
+): Promise<void> {
+  const existing = await managedTikHubCredentialById(db, id);
+  if (!existing) {
+    throw new PlatformError(
+      404,
+      "upstream_credential_not_found",
+      "没有找到这个 TikHub 凭据。",
+    );
+  }
+  if (existing.status === "revoked") {
+    throw new PlatformError(
+      409,
+      "upstream_credential_revoked",
+      "已撤销的 TikHub 凭据不能再次使用。",
+    );
+  }
+  const activated = await db
+    .prepare(
+      `UPDATE upstream_credential_state
+       SET managed_enabled = 1, active_credential_id = ?,
+           version = version + 1, updated_at = CURRENT_TIMESTAMP
+       WHERE provider = 'tikhub' AND version = ?
+         AND EXISTS (
+           SELECT 1 FROM upstream_credentials
+           WHERE id = ? AND provider = 'tikhub' AND revoked_at IS NULL
+         )`,
+    )
+    .bind(id, expectedVersion, id)
+    .run();
+  if (Number(activated.meta?.changes ?? 0) !== 1) {
+    throw new PlatformError(
+      409,
+      "upstream_credential_update_conflict",
+      "TikHub 活动凭据已发生变化，请刷新后重试。",
+    );
+  }
+  await db
+    .prepare(
+      `DELETE FROM catalog_sync_state
+       WHERE id = 1
+         AND EXISTS (
+           SELECT 1 FROM upstream_credential_state
+           WHERE provider = 'tikhub' AND managed_enabled = 1
+             AND active_credential_id = ? AND version = ?
+         )`,
+    )
+    .bind(id, expectedVersion + 1)
+    .run();
+  await writeAdminAudit(db, request, {
+    action: "upstream_credential.activated",
+    targetType: "upstream_credential",
+    targetId: id,
+    details: {
+      provider: "tikhub",
+      label: existing.label,
+      fingerprint: existing.secret_hash.slice(0, 16),
+      previousStateVersion: expectedVersion,
+    },
+  });
+}
+
+function sanitizeUpstreamCredentialLabel(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new PlatformError(
+      400,
+      "invalid_upstream_credential_label",
+      "TikHub 凭据名称无效。",
+    );
+  }
+  const label = value.replace(/\s+/g, " ").trim();
+  if (
+    label.length < 2 ||
+    label.length > 80 ||
+    /[\u0000-\u001F\u007F]/.test(label)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_upstream_credential_label",
+      "TikHub 凭据名称必须是 2–80 个可见字符。",
+    );
+  }
+  return label;
+}
+
+function isValidTikHubApiKey(value: string): boolean {
+  return /^[\x21-\x7E]{16,512}$/.test(value);
+}
+
+function hasValidTikHubCredentialsEncryptionKey(
+  value?: string,
+): value is string {
+  if (!value || !/^[A-Za-z0-9_-]{43}$/.test(value)) return false;
+  try {
+    return base64UrlToBytes(value).length === 32;
+  } catch {
+    return false;
+  }
+}
+
+function requireTikHubCredentialsEncryptionKey(env: PlatformEnv): string {
+  if (
+    !hasValidTikHubCredentialsEncryptionKey(
+      env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY,
+    )
+  ) {
+    throw new PlatformError(
+      503,
+      "upstream_credential_encryption_unavailable",
+      "TikHub 凭据加密主密钥尚未正确配置。",
+    );
+  }
+  return env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY;
+}
+
+async function importTikHubCredentialsEncryptionKey(
+  encodedKey: string,
+): Promise<CryptoKey> {
+  return await crypto.subtle.importKey(
+    "raw",
+    bytesToArrayBuffer(base64UrlToBytes(encodedKey)),
+    { name: "AES-GCM" },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+function tikHubCredentialAdditionalData(id: string): ArrayBuffer {
+  return bytesToArrayBuffer(
+    new TextEncoder().encode(`relaybase:tikhub:${id}:v1`),
+  );
+}
+
+async function encryptTikHubApiKey(
+  apiKey: string,
+  encodedKey: string,
+  id: string,
+): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv,
+      additionalData: tikHubCredentialAdditionalData(id),
+      tagLength: 128,
+    },
+    await importTikHubCredentialsEncryptionKey(encodedKey),
+    new TextEncoder().encode(apiKey),
+  );
+  return `v1.${bytesToBase64Url(iv)}.${bytesToBase64Url(
+    new Uint8Array(ciphertext),
+  )}`;
+}
+
+async function decryptTikHubApiKey(
+  encryptedSecret: string,
+  encodedKey: string,
+  id: string,
+): Promise<string> {
+  const parts = encryptedSecret.split(".");
+  if (
+    parts.length !== 3 ||
+    parts[0] !== "v1" ||
+    !/^[A-Za-z0-9_-]{16}$/.test(parts[1] ?? "") ||
+    !/^[A-Za-z0-9_-]{32,800}$/.test(parts[2] ?? "")
+  ) {
+    throw new PlatformError(
+      503,
+      "upstream_credential_decryption_failed",
+      "TikHub 凭据密文格式无效，已停止上游调用。",
+    );
+  }
+  try {
+    const plaintext = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: bytesToArrayBuffer(base64UrlToBytes(parts[1] ?? "")),
+        additionalData: tikHubCredentialAdditionalData(id),
+        tagLength: 128,
+      },
+      await importTikHubCredentialsEncryptionKey(encodedKey),
+      bytesToArrayBuffer(base64UrlToBytes(parts[2] ?? "")),
+    );
+    const apiKey = new TextDecoder("utf-8", { fatal: true }).decode(
+      plaintext,
+    );
+    if (!isValidTikHubApiKey(apiKey)) {
+      throw new Error("invalid decrypted secret");
+    }
+    return apiKey;
+  } catch {
+    throw new PlatformError(
+      503,
+      "upstream_credential_decryption_failed",
+      "TikHub 凭据无法解密，已停止上游调用。",
+    );
+  }
+}
+
+async function verifyTikHubApiKey(
+  apiKey: string,
+  env: PlatformEnv,
+): Promise<TikHubCredentialVerification> {
+  const upstreamBase = normalizeUpstreamBase(env.TIKHUB_BASE_URL);
+  let response: Response;
+  try {
+    response = await fetch(`${upstreamBase}/tikhub/user/get_user_info`, {
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        accept: "application/json",
+      },
+      redirect: "error",
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    throw new PlatformError(
+      502,
+      "upstream_credential_verification_failed",
+      "TikHub 暂时无法验证这个 API Key。",
+    );
+  }
+  if (response.status === 401 || response.status === 403) {
+    throw new PlatformError(
+      400,
+      "upstream_credential_rejected",
+      "TikHub 拒绝了这个 API Key。",
+    );
+  }
+  if (!response.ok) {
+    throw new PlatformError(
+      502,
+      "upstream_credential_verification_failed",
+      `TikHub 凭据验证失败（${response.status}）。`,
+    );
+  }
+  const payload = await readResponseJson(
+    response,
+    MAX_PROVIDER_RESPONSE_BYTES,
+    "upstream_credential_verification_failed",
+  );
+  if (
+    !isPlainRecord(payload) ||
+    Number(payload.code) !== 200 ||
+    !isPlainRecord(payload.api_key_data) ||
+    !isPlainRecord(payload.user_data)
+  ) {
+    throw new PlatformError(
+      502,
+      "upstream_credential_verification_failed",
+      "TikHub 凭据验证响应格式无效。",
+    );
+  }
+  const apiKeyData = payload.api_key_data;
+  const userData = payload.user_data;
+  if (
+    Number(apiKeyData.api_key_status) !== 1 ||
+    userData.account_disabled !== false ||
+    userData.is_active !== true
+  ) {
+    throw new PlatformError(
+      400,
+      "upstream_credential_inactive",
+      "这个 TikHub API Key 或所属账户当前不可用。",
+    );
+  }
+  let expiresAt: string | null = null;
+  if (apiKeyData.expires_at !== null) {
+    if (
+      typeof apiKeyData.expires_at !== "string" ||
+      !Number.isFinite(Date.parse(apiKeyData.expires_at)) ||
+      Date.parse(apiKeyData.expires_at) <= Date.now()
+    ) {
+      throw new PlatformError(
+        400,
+        "upstream_credential_expired",
+        "这个 TikHub API Key 已过期。",
+      );
+    }
+    expiresAt = new Date(apiKeyData.expires_at).toISOString();
+  }
+  const scopes = normalizeTikHubCredentialScopes(
+    apiKeyData.api_key_scopes,
+  );
+  if (!scopes || !hasTikHubDataScope(scopes)) {
+    throw new PlatformError(
+      400,
+      "upstream_credential_scope_insufficient",
+      "这个 TikHub API Key 没有可用于数据接口的授权范围。",
+    );
+  }
+  return { scopes, expiresAt };
+}
+
+function normalizeTikHubCredentialScopes(
+  value: unknown,
+): string[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 500) {
+    return null;
+  }
+  const normalized: string[] = [];
+  for (const scope of value) {
+    if (typeof scope !== "string") return null;
+    const compact = scope.trim().toLowerCase().replace(/\/+$/, "");
+    if (
+      !compact ||
+      compact.length > 512 ||
+      (compact !== "*" &&
+        compact !== "all" &&
+        !/^\/api\/v1(?:\/[a-z0-9_-]+)*$/.test(compact))
+    ) {
+      return null;
+    }
+    normalized.push(compact);
+  }
+  return [...new Set(normalized)].sort();
+}
+
+function hasTikHubDataScope(scopes: string[]): boolean {
+  return scopes.some((normalized) => {
+    if (
+      normalized === "*" ||
+      normalized === "all" ||
+      normalized === "/api/v1"
+    ) {
+      return true;
+    }
+    if (!normalized.startsWith("/api/v1/")) return false;
+    return (
+      !normalized.startsWith("/api/v1/tikhub/user") &&
+      !normalized.startsWith("/api/v1/tikhub/admin") &&
+      !normalized.startsWith("/api/v1/demo")
+    );
+  });
+}
+
+function tikHubCredentialAllowsPath(
+  scopes: string[] | null,
+  catalogPath: string,
+): boolean {
+  if (scopes === null) return true;
+  const upstreamPath = `/api${catalogPath}`.toLowerCase();
+  return scopes.some((scope) => {
+    if (scope === "*" || scope === "all" || scope === "/api/v1") {
+      return true;
+    }
+    return (
+      upstreamPath === scope ||
+      upstreamPath.startsWith(`${scope}/`)
+    );
+  });
+}
+
+function storedTikHubCredentialScopes(value: string | null): string[] {
+  if (!value) {
+    throw new PlatformError(
+      503,
+      "upstream_credential_state_invalid",
+      "TikHub 活动凭据缺少已验证的授权范围。",
+    );
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    const scopes = normalizeTikHubCredentialScopes(parsed);
+    if (!scopes || !hasTikHubDataScope(scopes)) throw new Error();
+    return scopes;
+  } catch {
+    throw new PlatformError(
+      503,
+      "upstream_credential_state_invalid",
+      "TikHub 活动凭据授权范围无效，已停止上游调用。",
+    );
+  }
+}
+
+async function resolveTikHubCredential(
+  env: PlatformEnv,
+  db: D1Database,
+): Promise<ResolvedTikHubCredential | null> {
+  const state = await upstreamCredentialState(db);
+  if (state.managedEnabled) {
+    if (!state.activeCredentialId) return null;
+    const managed = await managedTikHubCredentialById(
+      db,
+      state.activeCredentialId,
+    );
+    if (!managed || managed.status !== "active" || managed.revoked_at) {
+      throw new PlatformError(
+        503,
+        "upstream_credential_state_invalid",
+        "TikHub 活动凭据状态无效，已停止上游调用。",
+      );
+    }
+    if (
+      managed.expires_at !== null &&
+      (!Number.isFinite(Date.parse(managed.expires_at)) ||
+        Date.parse(managed.expires_at) <= Date.now())
+    ) {
+      throw new PlatformError(
+        503,
+        "upstream_credential_expired",
+        "TikHub 活动凭据已过期，已停止上游调用。",
+      );
+    }
+    const encryptionKey = requireTikHubCredentialsEncryptionKey(env);
+    return {
+      secret: await decryptTikHubApiKey(
+        managed.encrypted_secret,
+        encryptionKey,
+        managed.id,
+      ),
+      fingerprint: managed.secret_hash.slice(0, 16),
+      source: "managed",
+      id: managed.id,
+      scopes: storedTikHubCredentialScopes(
+        managed.verified_scopes_json,
+      ),
+      expiresAt: managed.expires_at,
+      stateVersion: state.version,
+    };
+  }
+  if (!hasConfiguredCredential(env.TIKHUB_API_KEY)) return null;
+  return {
+    secret: env.TIKHUB_API_KEY,
+    fingerprint: (await sha256Hex(env.TIKHUB_API_KEY)).slice(0, 16),
+    source: "environment",
+    id: null,
+    scopes: null,
+    expiresAt: null,
+    stateVersion: state.version,
+  };
+}
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+function base64UrlToBytes(value: string): Uint8Array {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw new Error("invalid base64url");
+  }
+  const padded = value
+    .replace(/-/g, "+")
+    .replace(/_/g, "/")
+    .padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
 function platformReadiness(env: PlatformEnv) {
   const databaseConfigured = Boolean(env.DB);
   const legalReviewConfirmed = env.LEGAL_REVIEW_CONFIRMED === "true";
@@ -5705,6 +7035,7 @@ function platformReadiness(env: PlatformEnv) {
       configurationValid,
       legalReviewConfirmed,
       resellerAuthorized,
+      upstreamConfigured,
       proxyEnabled,
       paymentsEnabled,
       adminConfigured,
@@ -5740,6 +7071,14 @@ function hasValidRuntimeConfiguration(env: PlatformEnv): boolean {
   } catch {
     return false;
   }
+  if (
+    env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY &&
+    !hasValidTikHubCredentialsEncryptionKey(
+      env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY,
+    )
+  ) {
+    return false;
+  }
   const rawAppUrl = env.PUBLIC_APP_URL;
   if (!rawAppUrl) return false;
   if (rawAppUrl !== rawAppUrl.trim()) return false;
@@ -5766,6 +7105,7 @@ async function operationalReadiness(env: PlatformEnv) {
   let catalogReady = false;
   let schemaReady = false;
   let reconciliationRecent = false;
+  let upstreamConfigured = base.capabilities.upstreamConfigured;
   if (env.DB) {
     try {
       const row = await env.DB
@@ -5796,6 +7136,18 @@ async function operationalReadiness(env: PlatformEnv) {
              (SELECT last_success_generation
               FROM catalog_sync_state LIMIT 1)
                AS catalog_sync_state_schema,
+             (SELECT credential_source
+              FROM catalog_sync_state LIMIT 1)
+               AS catalog_credential_source,
+             (SELECT credential_id
+              FROM catalog_sync_state LIMIT 1)
+               AS catalog_credential_id,
+             (SELECT credential_fingerprint
+              FROM catalog_sync_state LIMIT 1)
+               AS catalog_credential_fingerprint,
+             (SELECT credential_state_version
+              FROM catalog_sync_state LIMIT 1)
+               AS catalog_credential_state_version,
              (SELECT generation FROM catalog_sync_staging LIMIT 1)
                AS catalog_sync_staging_schema,
              (SELECT idempotency_hash FROM payment_orders LIMIT 1)
@@ -5824,6 +7176,11 @@ async function operationalReadiness(env: PlatformEnv) {
                AS payment_review_credit_schema,
              (SELECT id FROM admin_audit_logs LIMIT 1)
                AS admin_audit_schema,
+             (SELECT secret_hash FROM upstream_credentials LIMIT 1)
+               AS upstream_credentials_schema,
+             (SELECT managed_enabled
+              FROM upstream_credential_state LIMIT 1)
+               AS upstream_credential_state_schema,
              EXISTS(
                SELECT 1
                FROM operation_heartbeats
@@ -5835,32 +7192,71 @@ async function operationalReadiness(env: PlatformEnv) {
         .first<{
           enabled_count: number;
           reconciliation_recent: number;
+          catalog_credential_source: string | null;
+          catalog_credential_id: string | null;
+          catalog_credential_fingerprint: string | null;
+          catalog_credential_state_version: number | null;
         }>();
       schemaReady = row != null;
-      catalogReady = Number(row?.enabled_count ?? 0) > 0;
       reconciliationRecent =
         Number(row?.reconciliation_recent ?? 0) === 1;
+      try {
+        const resolved = await resolveTikHubCredential(env, env.DB);
+        upstreamConfigured = Boolean(resolved);
+        catalogReady =
+          resolved != null &&
+          Number(row?.enabled_count ?? 0) > 0 &&
+          row?.catalog_credential_source === resolved.source &&
+          row.catalog_credential_id === resolved.id &&
+          row.catalog_credential_fingerprint === resolved.fingerprint &&
+          Number(row.catalog_credential_state_version) ===
+            resolved.stateVersion;
+      } catch {
+        upstreamConfigured = false;
+        catalogReady = false;
+      }
     } catch {
       schemaReady = false;
       catalogReady = false;
       reconciliationRecent = false;
+      upstreamConfigured = false;
     }
   }
+  const proxyEnabled =
+    base.capabilities.databaseConfigured &&
+    base.capabilities.configurationValid &&
+    base.capabilities.legalReviewConfirmed &&
+    base.capabilities.resellerAuthorized &&
+    upstreamConfigured;
   const paymentsEnabled =
-    base.capabilities.paymentsEnabled &&
+    proxyEnabled &&
+    base.capabilities.authenticationConfigured &&
+    env.CRYPTO_PAYMENTS_ENABLED === "true" &&
+    (env.PAYMENT_PROVIDER ?? "nowpayments") === "nowpayments" &&
+    hasConfiguredCredential(env.NOWPAYMENTS_API_KEY) &&
+    hasConfiguredCredential(env.NOWPAYMENTS_IPN_SECRET) &&
     base.capabilities.adminConfigured &&
     schemaReady &&
     catalogReady &&
     reconciliationRecent;
   const ready =
-    base.ready && schemaReady && catalogReady && reconciliationRecent;
-  const missing = [...base.missing];
+    proxyEnabled &&
+    paymentsEnabled &&
+    base.capabilities.adminConfigured &&
+    base.capabilities.authenticationConfigured &&
+    schemaReady &&
+    catalogReady &&
+    reconciliationRecent;
+  const missing = base.missing.filter(
+    (item) => item !== "upstream_credentials",
+  );
+  if (!upstreamConfigured) missing.push("upstream_credentials");
   if (!schemaReady) missing.push("database_migrations");
   if (!catalogReady) missing.push("enabled_catalog");
   if (!reconciliationRecent) missing.push("scheduled_reconciliation");
   const mode = ready
     ? "live"
-    : base.capabilities.proxyEnabled
+    : proxyEnabled
       ? "partial"
       : "sandbox";
 
@@ -5869,6 +7265,8 @@ async function operationalReadiness(env: PlatformEnv) {
     mode,
     capabilities: {
       ...base.capabilities,
+      upstreamConfigured,
+      proxyEnabled,
       schemaReady,
       catalogReady,
       reconciliationRecent,
@@ -6110,6 +7508,7 @@ async function readResponseText(
 async function safeUpstreamErrorMessage(
   response: Response,
   limit: number,
+  sensitiveValues: string[] = [],
 ): Promise<string> {
   let text: string;
   try {
@@ -6131,7 +7530,16 @@ async function safeUpstreamErrorMessage(
   } catch {
     message = text;
   }
-  const safe = message
+  let redacted = message.replace(
+    /\bbearer\s+[\x21-\x7E]{8,512}/gi,
+    "Bearer [redacted]",
+  );
+  for (const sensitiveValue of sensitiveValues) {
+    if (sensitiveValue.length >= 8) {
+      redacted = redacted.split(sensitiveValue).join("[redacted]");
+    }
+  }
+  const safe = redacted
     .replace(/[\u0000-\u001F\u007F]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
@@ -6577,33 +7985,24 @@ function extractOpenApiCatalog(
 function mergeCatalogEntries(
   prices: ReturnType<typeof extractCatalogPrices>,
   openApi: ReturnType<typeof extractOpenApiCatalog>,
+  credentialScopes: string[] | null,
 ): CatalogSyncEntry[] {
-  const merged = new Map<string, CatalogSyncEntry>();
-  for (const metadata of openApi.values()) {
-    merged.set(metadata.path, {
+  const pricesByPath = new Map(prices.map((price) => [price.path, price]));
+  return [...openApi.values()].map((metadata) => {
+    const price = pricesByPath.get(metadata.path);
+    const methodMatches =
+      price != null &&
+      (price.httpMethod == null ||
+        price.httpMethod === metadata.httpMethod) &&
+      tikHubCredentialAllowsPath(credentialScopes, metadata.path);
+    return {
       ...metadata,
-      upstreamPriceUsdMicros: 0,
-      priceVerified: false,
-    });
-  }
-  for (const price of prices) {
-    const metadata = openApi.get(price.path);
-    const httpMethod = metadata?.httpMethod ?? price.httpMethod ?? "GET";
-    merged.set(price.path, {
-      path: price.path,
-      platform: metadata?.platform ?? price.path.split("/")[2] ?? "other",
-      httpMethod,
-      summary: metadata?.summary ?? null,
-      description: metadata?.description ?? null,
-      parameterSchemaJson: metadata?.parameterSchemaJson ?? null,
-      upstreamPriceUsdMicros: price.upstreamPriceUsdMicros,
-      priceVerified: true,
-      looksReadOnly:
-        metadata?.looksReadOnly ??
-        looksLikeReadOnlyOperation(price.path, httpMethod),
-    });
-  }
-  return [...merged.values()];
+      upstreamPriceUsdMicros: methodMatches
+        ? price.upstreamPriceUsdMicros
+        : 0,
+      priceVerified: methodMatches,
+    };
+  });
 }
 
 function compactCatalogText(value: unknown, maxLength: number): string | null {
@@ -7083,6 +8482,36 @@ function compareDecimalAmounts(left: unknown, right: unknown): number {
   if (leftScaled == null || rightScaled == null) return -1;
   if (leftScaled === rightScaled) return 0;
   return leftScaled > rightScaled ? 1 : -1;
+}
+
+function proportionalPaymentCreditUsdMicros(
+  orderUsdMicros: number,
+  actualPaid: unknown,
+  expectedPayAmount: unknown,
+): number | null {
+  if (!Number.isSafeInteger(orderUsdMicros) || orderUsdMicros <= 0) {
+    return null;
+  }
+  const actualScaled = decimalToScaledInteger(actualPaid, 18);
+  const expectedScaled = decimalToScaledInteger(expectedPayAmount, 18);
+  if (
+    actualScaled == null ||
+    expectedScaled == null ||
+    actualScaled <= BigInt(0) ||
+    expectedScaled <= BigInt(0)
+  ) {
+    return null;
+  }
+  const proportional =
+    (BigInt(orderUsdMicros) * actualScaled) / expectedScaled;
+  const capped =
+    proportional > BigInt(orderUsdMicros)
+      ? BigInt(orderUsdMicros)
+      : proportional;
+  if (capped < BigInt(1) || capped > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return null;
+  }
+  return Number(capped);
 }
 
 function isMaterialOverpayment(actual: unknown, expected: unknown): boolean {
