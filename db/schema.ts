@@ -357,7 +357,15 @@ export const endpointCatalog = sqliteTable(
       .notNull()
       .default(false),
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(false),
-    readOnly: integer("read_only", { mode: "boolean" }).notNull().default(true),
+    readOnly: integer("read_only", { mode: "boolean" }).notNull().default(false),
+    safetyClassification: text("safety_classification")
+      .notNull()
+      .default("ambiguous"),
+    safetyReasonsJson: text("safety_reasons_json"),
+    safetyPolicyVersion: integer("safety_policy_version")
+      .notNull()
+      .default(1),
+    revision: integer("revision").notNull().default(0),
     sourceUpdatedAt: text("source_updated_at"),
     syncGeneration: text("sync_generation"),
     reviewedAt: text("reviewed_at"),
@@ -406,6 +414,148 @@ export const catalogSyncState = sqliteTable("catalog_sync_state", {
   syncedAt: text("synced_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
+export const catalogBatchPlans = sqliteTable(
+  "catalog_batch_plans",
+  {
+    id: text("id").primaryKey(),
+    actorFingerprint: text("actor_fingerprint").notNull(),
+    previewIdempotencyHash: text("preview_idempotency_hash").notNull(),
+    previewRequestHash: text("preview_request_hash").notNull(),
+    policyVersion: integer("policy_version").notNull(),
+    action: text("action").notNull(),
+    status: text("status").notNull().default("preparing"),
+    version: integer("version").notNull().default(0),
+    filterPlatform: text("filter_platform"),
+    filterQuery: text("filter_query"),
+    filterStatus: text("filter_status").notNull(),
+    filterSafety: text("filter_safety").notNull(),
+    selectorJson: text("selector_json").notNull(),
+    mutationJson: text("mutation_json").notNull(),
+    markupBps: integer("markup_bps"),
+    minimumCustomerPriceUsdMicros: integer(
+      "minimum_customer_price_usd_micros",
+    ),
+    catalogGeneration: text("catalog_generation").notNull(),
+    credentialSource: text("credential_source"),
+    credentialId: text("credential_id"),
+    credentialFingerprint: text("credential_fingerprint"),
+    credentialStateVersion: integer("credential_state_version"),
+    openApiSnapshotHash: text("openapi_snapshot_hash").notNull(),
+    priceSnapshotHash: text("price_snapshot_hash").notNull(),
+    matchedCount: integer("matched_count").notNull(),
+    selectedCount: integer("selected_count").notNull(),
+    excludedStaleCount: integer("excluded_stale_count").notNull(),
+    excludedUnverifiedCount: integer(
+      "excluded_unverified_count",
+    ).notNull(),
+    excludedUnsafeCount: integer("excluded_unsafe_count").notNull(),
+    noChangeCount: integer("no_change_count").notNull(),
+    priceIncreaseCount: integer("price_increase_count").notNull(),
+    priceDecreaseCount: integer("price_decrease_count").notNull(),
+    priceUnchangedCount: integer("price_unchanged_count").notNull(),
+    blockedCount: integer("blocked_count").notNull(),
+    upstreamTotalUsdMicros: integer(
+      "upstream_total_usd_micros",
+    ).notNull(),
+    beforeCustomerTotalUsdMicros: integer(
+      "before_customer_total_usd_micros",
+    ).notNull(),
+    afterCustomerTotalUsdMicros: integer(
+      "after_customer_total_usd_micros",
+    ).notNull(),
+    targetDigest: text("target_digest").notNull(),
+    beforeDigest: text("before_digest").notNull(),
+    afterDigest: text("after_digest").notNull(),
+    confirmationText: text("confirmation_text").notNull(),
+    applyIdempotencyHash: text("apply_idempotency_hash"),
+    applyRequestHash: text("apply_request_hash"),
+    applyResultJson: text("apply_result_json"),
+    appliedCount: integer("applied_count"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    previewedAt: text("previewed_at"),
+    expiresAt: text("expires_at").notNull(),
+    applyStartedAt: text("apply_started_at"),
+    appliedAt: text("applied_at"),
+  },
+  (table) => [
+    uniqueIndex("catalog_batch_plans_preview_idempotency_unique").on(
+      table.previewIdempotencyHash,
+    ),
+    uniqueIndex("catalog_batch_plans_apply_idempotency_unique").on(
+      table.applyIdempotencyHash,
+    ),
+    index("catalog_batch_plans_actor_created_idx").on(
+      table.actorFingerprint,
+      table.createdAt,
+    ),
+    index("catalog_batch_plans_status_expires_idx").on(
+      table.status,
+      table.expiresAt,
+    ),
+  ],
+);
+
+export const catalogBatchPlanItems = sqliteTable(
+  "catalog_batch_plan_items",
+  {
+    id: text("id").primaryKey(),
+    planId: text("plan_id")
+      .notNull()
+      .references(() => catalogBatchPlans.id, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    ordinal: integer("ordinal").notNull(),
+    platform: text("platform").notNull(),
+    httpMethod: text("http_method").notNull(),
+    summary: text("summary"),
+    expectedRevision: integer("expected_revision").notNull(),
+    originalUpstreamPriceUsdMicros: integer(
+      "original_upstream_price_usd_micros",
+    ).notNull(),
+    originalCustomerPriceUsdMicros: integer(
+      "original_customer_price_usd_micros",
+    ).notNull(),
+    originalPriceVerified: integer("original_price_verified", {
+      mode: "boolean",
+    })
+      .notNull()
+      .default(false),
+    originalEnabled: integer("original_enabled", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    originalReadOnly: integer("original_read_only", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    originalSyncGeneration: text("original_sync_generation"),
+    originalReviewedAt: text("original_reviewed_at"),
+    originalUpdatedAt: text("original_updated_at").notNull(),
+    targetCustomerPriceUsdMicros: integer(
+      "target_customer_price_usd_micros",
+    ).notNull(),
+    targetEnabled: integer("target_enabled", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    targetReadOnly: integer("target_read_only", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    willChange: integer("will_change", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    blockerCode: text("blocker_code"),
+    itemDigest: text("item_digest").notNull(),
+  },
+  (table) => [
+    uniqueIndex("catalog_batch_plan_items_plan_path_unique").on(
+      table.planId,
+      table.path,
+    ),
+    uniqueIndex("catalog_batch_plan_items_plan_ordinal_unique").on(
+      table.planId,
+      table.ordinal,
+    ),
+    index("catalog_batch_plan_items_plan_idx").on(table.planId),
+  ],
+);
+
 export const catalogSyncStaging = sqliteTable(
   "catalog_sync_staging",
   {
@@ -427,6 +577,13 @@ export const catalogSyncStaging = sqliteTable(
     looksReadOnly: integer("looks_read_only", { mode: "boolean" })
       .notNull()
       .default(false),
+    safetyClassification: text("safety_classification")
+      .notNull()
+      .default("ambiguous"),
+    safetyReasonsJson: text("safety_reasons_json"),
+    safetyPolicyVersion: integer("safety_policy_version")
+      .notNull()
+      .default(1),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [

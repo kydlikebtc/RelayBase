@@ -75,6 +75,27 @@ type UsersResponse = {
   nextOffset: number | null;
 };
 
+type CatalogSafetyClassification =
+  | "safe_data_read"
+  | "ambiguous"
+  | "prohibited";
+type CatalogFilterStatus = "all" | "enabled" | "disabled" | "review";
+type CatalogSafetyFilter = "all" | CatalogSafetyClassification;
+type CatalogBatchAction = "publish" | "reprice" | "disable";
+type CatalogBatchStatus =
+  | "preparing"
+  | "ready"
+  | "blocked"
+  | "applying"
+  | "applied"
+  | "stale"
+  | "expired";
+type CatalogBatchBlockerCode =
+  | "stale_endpoint"
+  | "price_unverified"
+  | "unsafe_operation"
+  | "price_out_of_range";
+
 type CatalogEndpoint = {
   path: string;
   platform: string;
@@ -87,6 +108,10 @@ type CatalogEndpoint = {
   priceVerified: boolean;
   enabled: boolean;
   readOnly: boolean;
+  safetyClassification: CatalogSafetyClassification;
+  safetyReasons: string[];
+  safetyPolicyVersion: number;
+  revision: number;
   sourceUpdatedAt: string | null;
   presentInLatestSync: boolean;
   reviewedAt: string | null;
@@ -124,6 +149,88 @@ type CatalogSyncInfo = {
   credentialFingerprint: string | null;
   syncedAt: string;
   coverage: CatalogSyncCoverage | null;
+};
+
+type CatalogBatchSelection = {
+  platform: string | null;
+  query: string;
+  status: CatalogFilterStatus;
+  safety: CatalogSafetyFilter;
+};
+
+type CatalogBatchPreviewRequest = {
+  action: CatalogBatchAction;
+  expectedCatalogGeneration: string;
+  selection: CatalogBatchSelection;
+  pricing?: {
+    markupBps: number;
+    minimumCustomerPriceUsdMicros: number;
+  };
+};
+
+type CatalogBatchItem = {
+  path: string;
+  platform: string;
+  method: string;
+  summary: string | null;
+  expectedRevision: number;
+  before: {
+    upstreamPriceUsdMicros: number;
+    customerPriceUsdMicros: number;
+    priceVerified: boolean;
+    enabled: boolean;
+    readOnly: boolean;
+    syncGeneration: string | null;
+    reviewedAt: string | null;
+    updatedAt: string;
+  };
+  after: {
+    customerPriceUsdMicros: number;
+    enabled: boolean;
+    readOnly: boolean;
+  };
+  willChange: boolean;
+  blockerCode: CatalogBatchBlockerCode | null;
+  itemDigest: string;
+};
+
+type CatalogBatchResponse = {
+  replayed: boolean;
+  batch: {
+    id: string;
+    status: CatalogBatchStatus;
+    version: number;
+    action: CatalogBatchAction;
+    catalogGeneration: string;
+    counts: {
+      matched: number;
+      selected: number;
+      blocked: number;
+      stale: number;
+      unverified: number;
+      unsafe: number;
+      noChange: number;
+      priceIncrease: number;
+      priceDecrease: number;
+      priceUnchanged: number;
+    };
+    totals: {
+      upstream: number;
+      beforeCustomer: number;
+      afterCustomer: number;
+    };
+    targetDigest: string;
+    beforeDigest: string;
+    afterDigest: string;
+    confirmationText: string;
+    previewedAt: string | null;
+    expiresAt: string;
+    appliedAt: string | null;
+    applyResult: JsonValue;
+  };
+  items: CatalogBatchItem[];
+  offset: number;
+  nextOffset: number | null;
 };
 
 type UpstreamCredential = {
@@ -229,7 +336,9 @@ type JsonValue =
 type Validator<T> = (value: unknown) => value is T;
 
 const SESSION_SECRET_KEY = "relaybase.admin.master-secret.v1";
+const CATALOG_SAFETY_POLICY_VERSION = 1;
 const validPaymentStatus = /^[a-z][a-z0-9_]{0,63}$/;
+const validSha256Digest = /^[a-f0-9]{64}$/;
 
 class AdminApiError extends Error {
   constructor(
@@ -427,6 +536,33 @@ function isUsersResponse(value: unknown): value is UsersResponse {
   );
 }
 
+function isCatalogSafetyClassification(
+  value: unknown,
+): value is CatalogSafetyClassification {
+  return (
+    value === "safe_data_read" ||
+    value === "ambiguous" ||
+    value === "prohibited"
+  );
+}
+
+function isCatalogFilterStatus(
+  value: unknown,
+): value is CatalogFilterStatus {
+  return (
+    value === "all" ||
+    value === "enabled" ||
+    value === "disabled" ||
+    value === "review"
+  );
+}
+
+function isCatalogSafetyFilter(
+  value: unknown,
+): value is CatalogSafetyFilter {
+  return value === "all" || isCatalogSafetyClassification(value);
+}
+
 function isCatalogEndpoint(value: unknown): value is CatalogEndpoint {
   if (!isObject(value)) return false;
   return (
@@ -442,6 +578,14 @@ function isCatalogEndpoint(value: unknown): value is CatalogEndpoint {
     typeof value.priceVerified === "boolean" &&
     typeof value.enabled === "boolean" &&
     typeof value.readOnly === "boolean" &&
+    isCatalogSafetyClassification(value.safetyClassification) &&
+    Array.isArray(value.safetyReasons) &&
+    value.safetyReasons.length <= 32 &&
+    value.safetyReasons.every((reason) => isNonEmptyString(reason, 160)) &&
+    isSafeNonNegativeInteger(value.safetyPolicyVersion) &&
+    value.safetyPolicyVersion <= 2_147_483_647 &&
+    isSafeNonNegativeInteger(value.revision) &&
+    value.revision <= 2_147_483_647 &&
     isNullableDateString(value.sourceUpdatedAt) &&
     typeof value.presentInLatestSync === "boolean" &&
     isNullableDateString(value.reviewedAt) &&
@@ -518,6 +662,171 @@ function isCatalogResponse(value: unknown): value is CatalogResponse {
     value.endpoints.length <= 500 &&
     value.endpoints.every(isCatalogEndpoint)
   );
+}
+
+function isCatalogBatchAction(value: unknown): value is CatalogBatchAction {
+  return value === "publish" || value === "reprice" || value === "disable";
+}
+
+function isCatalogBatchStatus(value: unknown): value is CatalogBatchStatus {
+  return (
+    value === "preparing" ||
+    value === "ready" ||
+    value === "blocked" ||
+    value === "applying" ||
+    value === "applied" ||
+    value === "stale" ||
+    value === "expired"
+  );
+}
+
+function isCatalogBatchBlockerCode(
+  value: unknown,
+): value is CatalogBatchBlockerCode {
+  return (
+    value === "stale_endpoint" ||
+    value === "price_unverified" ||
+    value === "unsafe_operation" ||
+    value === "price_out_of_range"
+  );
+}
+
+function isCatalogBatchItem(value: unknown): value is CatalogBatchItem {
+  if (
+    !isObject(value) ||
+    !isObject(value.before) ||
+    !isObject(value.after)
+  ) {
+    return false;
+  }
+  const before = value.before;
+  const after = value.after;
+  const blockerIsValid =
+    value.blockerCode === null ||
+    isCatalogBatchBlockerCode(value.blockerCode);
+  return (
+    isSafePath(value.path) &&
+    isNonEmptyString(value.platform, 80) &&
+    isNonEmptyString(value.method, 16) &&
+    /^[A-Z]+$/.test(value.method) &&
+    isNullableString(value.summary, 1_000) &&
+    isSafeNonNegativeInteger(value.expectedRevision) &&
+    value.expectedRevision <= 2_147_483_647 &&
+    isSafeNonNegativeInteger(before.upstreamPriceUsdMicros) &&
+    isSafeNonNegativeInteger(before.customerPriceUsdMicros) &&
+    typeof before.priceVerified === "boolean" &&
+    typeof before.enabled === "boolean" &&
+    typeof before.readOnly === "boolean" &&
+    (before.syncGeneration === null ||
+      (isNonEmptyString(before.syncGeneration, 128) &&
+        /^sync_[A-Za-z0-9_-]{16,80}$/.test(before.syncGeneration))) &&
+    isNullableDateString(before.reviewedAt) &&
+    isDateString(before.updatedAt) &&
+    isSafeNonNegativeInteger(after.customerPriceUsdMicros) &&
+    typeof after.enabled === "boolean" &&
+    typeof after.readOnly === "boolean" &&
+    typeof value.willChange === "boolean" &&
+    blockerIsValid &&
+    (!value.willChange || value.blockerCode === null) &&
+    (value.blockerCode === null || value.willChange === false) &&
+    isNonEmptyString(value.itemDigest, 64) &&
+    validSha256Digest.test(value.itemDigest)
+  );
+}
+
+function isCatalogBatchResponse(
+  value: unknown,
+): value is CatalogBatchResponse {
+  if (
+    !isObject(value) ||
+    !isObject(value.batch) ||
+    !Array.isArray(value.items)
+  ) {
+    return false;
+  }
+  const batch = value.batch;
+  if (!isObject(batch.counts) || !isObject(batch.totals)) return false;
+  const counts = batch.counts;
+  const totals = batch.totals;
+  if (
+    !isSafeNonNegativeInteger(counts.matched) ||
+    !isSafeNonNegativeInteger(counts.selected) ||
+    !isSafeNonNegativeInteger(counts.blocked) ||
+    !isSafeNonNegativeInteger(counts.stale) ||
+    !isSafeNonNegativeInteger(counts.unverified) ||
+    !isSafeNonNegativeInteger(counts.unsafe) ||
+    !isSafeNonNegativeInteger(counts.noChange) ||
+    !isSafeNonNegativeInteger(counts.priceIncrease) ||
+    !isSafeNonNegativeInteger(counts.priceDecrease) ||
+    !isSafeNonNegativeInteger(counts.priceUnchanged) ||
+    counts.selected + counts.blocked + counts.noChange !== counts.matched ||
+    counts.stale + counts.unverified + counts.unsafe > counts.blocked ||
+    counts.priceIncrease + counts.priceDecrease + counts.priceUnchanged !==
+      counts.matched
+  ) {
+    return false;
+  }
+  if (
+    !isSafeNonNegativeInteger(totals.upstream) ||
+    !isSafeNonNegativeInteger(totals.beforeCustomer) ||
+    !isSafeNonNegativeInteger(totals.afterCustomer)
+  ) {
+    return false;
+  }
+  if (
+    !isCatalogBatchAction(batch.action) ||
+    !isCatalogBatchStatus(batch.status) ||
+    !isNonEmptyString(batch.catalogGeneration, 128) ||
+    !/^sync_[A-Za-z0-9_-]{16,80}$/.test(batch.catalogGeneration)
+  ) {
+    return false;
+  }
+  const expectedConfirmation =
+    `APPLY ${batch.action.toUpperCase()} ` +
+    `${counts.selected}/${counts.matched} ` +
+    `${typeof batch.targetDigest === "string" ? batch.targetDigest.slice(0, 12) : ""} ` +
+    `${batch.catalogGeneration.slice(-12)}`;
+  const previewStateIsValid =
+    batch.status === "preparing"
+      ? batch.previewedAt === null
+      : isDateString(batch.previewedAt);
+  const applyStateIsValid =
+    batch.status === "applied"
+      ? isDateString(batch.appliedAt) && batch.applyResult !== null
+      : batch.appliedAt === null && batch.applyResult === null;
+  const readyStateIsValid =
+    batch.status !== "ready" ||
+    (counts.matched > 0 && counts.selected > 0 && counts.blocked === 0);
+  if (
+    typeof value.replayed !== "boolean" ||
+    !isNonEmptyString(batch.id, 84) ||
+    !/^cbp_[A-Za-z0-9_-]{20,80}$/.test(batch.id) ||
+    !isSafeNonNegativeInteger(batch.version) ||
+    !isNonEmptyString(batch.targetDigest, 64) ||
+    !validSha256Digest.test(batch.targetDigest) ||
+    !isNonEmptyString(batch.beforeDigest, 64) ||
+    !validSha256Digest.test(batch.beforeDigest) ||
+    !isNonEmptyString(batch.afterDigest, 64) ||
+    !validSha256Digest.test(batch.afterDigest) ||
+    batch.confirmationText !== expectedConfirmation ||
+    !previewStateIsValid ||
+    !isDateString(batch.expiresAt) ||
+    !applyStateIsValid ||
+    !readyStateIsValid ||
+    !isJsonValue(batch.applyResult) ||
+    !isSafeNonNegativeInteger(value.offset) ||
+    value.offset > counts.matched ||
+    value.items.length > 100 ||
+    !value.items.every(isCatalogBatchItem) ||
+    new Set(value.items.map((item) => item.path)).size !== value.items.length
+  ) {
+    return false;
+  }
+  const expectedNextOffset =
+    value.offset + value.items.length < counts.matched
+      ? value.offset + value.items.length
+      : null;
+  return value.nextOffset === expectedNextOffset;
 }
 
 function isUpstreamCredential(value: unknown): value is UpstreamCredential {
@@ -707,13 +1016,16 @@ function isCatalogUpdateResponse(
   path: string;
   enabled: boolean;
   readOnly: boolean;
+  revision: number;
 } {
   return (
     isObject(value) &&
     value.ok === true &&
     isSafePath(value.path) &&
     typeof value.enabled === "boolean" &&
-    typeof value.readOnly === "boolean"
+    typeof value.readOnly === "boolean" &&
+    isSafeNonNegativeInteger(value.revision) &&
+    value.revision <= 2_147_483_647
   );
 }
 
@@ -870,6 +1182,77 @@ function parseUsdInput(value: string): number | null {
     : null;
 }
 
+function parseMarkupPercentInput(value: string): number | null {
+  const normalized = value.trim();
+  if (!/^\d{1,3}(?:\.\d{1,2})?$/.test(normalized)) return null;
+  const [whole, fraction = ""] = normalized.split(".");
+  const basisPoints = Number(whole) * 100 + Number(fraction.padEnd(2, "0"));
+  return Number.isSafeInteger(basisPoints) &&
+    basisPoints >= 0 &&
+    basisPoints <= 50_000
+    ? basisPoints
+    : null;
+}
+
+function createAdminIdempotencyKey(scope: "preview" | "apply") {
+  return `catalog-${scope}:${crypto.randomUUID()}`;
+}
+
+function catalogSafetyLabel(value: CatalogSafetyClassification) {
+  const labels: Record<CatalogSafetyClassification, string> = {
+    safe_data_read: "安全数据读取",
+    ambiguous: "需人工判断",
+    prohibited: "禁止公开",
+  };
+  return labels[value];
+}
+
+function catalogSafetyFilterLabel(value: CatalogSafetyFilter) {
+  return value === "all" ? "全部安全分类" : catalogSafetyLabel(value);
+}
+
+function catalogStatusFilterLabel(value: CatalogFilterStatus) {
+  const labels: Record<CatalogFilterStatus, string> = {
+    all: "全部状态",
+    enabled: "已上架",
+    disabled: "已下架",
+    review: "待复核",
+  };
+  return labels[value];
+}
+
+function catalogBatchActionLabel(value: CatalogBatchAction) {
+  const labels: Record<CatalogBatchAction, string> = {
+    publish: "批量审核并上架",
+    reprice: "批量重算客户价",
+    disable: "批量下架",
+  };
+  return labels[value];
+}
+
+function catalogBatchStatusLabel(value: CatalogBatchStatus) {
+  const labels: Record<CatalogBatchStatus, string> = {
+    preparing: "正在准备",
+    ready: "可应用",
+    blocked: "已阻断",
+    applying: "正在应用",
+    applied: "已应用",
+    stale: "已失效",
+    expired: "已过期",
+  };
+  return labels[value];
+}
+
+function catalogBatchBlockerLabel(value: CatalogBatchBlockerCode) {
+  const labels: Record<CatalogBatchBlockerCode, string> = {
+    stale_endpoint: "目录代次不一致",
+    price_unverified: "成本未核验",
+    unsafe_operation: "安全分类不允许",
+    price_out_of_range: "目标价格超出范围",
+  };
+  return labels[value];
+}
+
 function parseCreditUsdInput(value: string): number | null {
   const normalized = value.trim();
   if (!/^\d{1,6}(?:\.\d{1,6})?$/.test(normalized)) return null;
@@ -1018,6 +1401,320 @@ function ConfirmDialog({
   );
 }
 
+function CatalogBatchReceipt({
+  response,
+  request,
+  matchesCurrentRequest,
+  confirmation,
+  refreshing,
+  applying,
+  onConfirmationChange,
+  onRefresh,
+  onApply,
+}: {
+  response: CatalogBatchResponse;
+  request: CatalogBatchPreviewRequest | null;
+  matchesCurrentRequest: boolean;
+  confirmation: string;
+  refreshing: boolean;
+  applying: boolean;
+  onConfirmationChange: (value: string) => void;
+  onRefresh: () => void;
+  onApply: () => void;
+}) {
+  const batch = response.batch;
+  const confirmationMatches = confirmation === batch.confirmationText;
+  const [expired, setExpired] = useState(false);
+  const priceDelta =
+    batch.totals.afterCustomer - batch.totals.beforeCustomer;
+
+  useEffect(() => {
+    let timer = 0;
+    const checkExpiry = () => {
+      const remaining = Date.parse(batch.expiresAt) - Date.now();
+      if (remaining <= 0) {
+        setExpired(true);
+        return;
+      }
+      timer = window.setTimeout(checkExpiry, Math.min(remaining, 60_000));
+    };
+    timer = window.setTimeout(checkExpiry, 0);
+    return () => window.clearTimeout(timer);
+  }, [batch.expiresAt]);
+
+  return (
+    <div className="admin-catalog-batch-receipt">
+      <div className="admin-catalog-batch-receipt-head">
+        <div>
+          <div className="admin-catalog-batch-status-line">
+            <span
+              className={`admin-catalog-batch-status is-${batch.status}`}
+            >
+              {catalogBatchStatusLabel(batch.status)}
+            </span>
+            {response.replayed ? <span>幂等回放</span> : null}
+          </div>
+          <h4>{catalogBatchActionLabel(batch.action)}</h4>
+          <code>{batch.id}</code>
+        </div>
+        <div className="admin-catalog-batch-receipt-actions">
+          <span>v{batch.version}</span>
+          <button
+            className="button button-ghost button-small"
+            type="button"
+            disabled={refreshing || applying}
+            onClick={onRefresh}
+          >
+            {refreshing ? "刷新中…" : "刷新回执"}
+          </button>
+        </div>
+      </div>
+
+      <div className="admin-catalog-batch-snapshot">
+        <span>
+          目录代次 <code>{batch.catalogGeneration}</code>
+        </span>
+        <span>
+          预览 {formatDate(batch.previewedAt)} / 过期{" "}
+          {formatDate(batch.expiresAt)}
+        </span>
+        {batch.appliedAt ? (
+          <span>应用 {formatDate(batch.appliedAt)}</span>
+        ) : null}
+        {request ? (
+          <span>
+            选择器：{request.selection.platform ?? "全部平台"} ·{" "}
+            {catalogStatusFilterLabel(request.selection.status)} ·{" "}
+            {catalogSafetyFilterLabel(request.selection.safety)}
+            {request.selection.query
+              ? ` · “${request.selection.query}”`
+              : ""}
+          </span>
+        ) : null}
+      </div>
+
+      {!matchesCurrentRequest && batch.status === "ready" ? (
+        <div className="admin-catalog-batch-alert is-warning" role="alert">
+          当前筛选、定价规则或目录代次已不同于此预览。旧快照仍保留供审计，但必须重新生成后才能应用。
+        </div>
+      ) : null}
+      {batch.status === "blocked" ? (
+        <div className="admin-catalog-batch-alert is-blocked" role="alert">
+          这是整批原子操作：任一阻断项都会阻止全部修改，不会跳过问题项后应用其余端点。
+        </div>
+      ) : null}
+      {expired && batch.status === "ready" ? (
+        <div className="admin-catalog-batch-alert is-warning" role="alert">
+          此预览已到期，不能继续应用；请按当前目录重新生成。
+        </div>
+      ) : null}
+
+      <div className="admin-catalog-batch-counts">
+        <article>
+          <span>服务端匹配</span>
+          <strong>{batch.counts.matched.toLocaleString()}</strong>
+          <small>冻结进预览的端点</small>
+        </article>
+        <article>
+          <span>计划修改</span>
+          <strong>{batch.counts.selected.toLocaleString()}</strong>
+          <small>无变化 {batch.counts.noChange.toLocaleString()}</small>
+        </article>
+        <article className={batch.counts.blocked ? "is-danger" : ""}>
+          <span>阻断</span>
+          <strong>{batch.counts.blocked.toLocaleString()}</strong>
+          <small>
+            代次 {batch.counts.stale} / 成本 {batch.counts.unverified} / 安全{" "}
+            {batch.counts.unsafe}
+          </small>
+        </article>
+        <article>
+          <span>价格方向</span>
+          <strong>
+            +{batch.counts.priceIncrease} / -{batch.counts.priceDecrease}
+          </strong>
+          <small>不变 {batch.counts.priceUnchanged.toLocaleString()}</small>
+        </article>
+      </div>
+
+      <div className="admin-catalog-batch-totals">
+        <div>
+          <span>上游成本合计</span>
+          <strong>{formatUsd(batch.totals.upstream, 6)}</strong>
+        </div>
+        <div>
+          <span>变更前客户价合计</span>
+          <strong>{formatUsd(batch.totals.beforeCustomer, 6)}</strong>
+        </div>
+        <div>
+          <span>变更后客户价合计</span>
+          <strong>{formatUsd(batch.totals.afterCustomer, 6)}</strong>
+          <small>
+            差额 {priceDelta >= 0 ? "+" : "-"}
+            {formatUsd(Math.abs(priceDelta), 6)}
+          </small>
+        </div>
+      </div>
+
+      <details className="admin-catalog-batch-digests">
+        <summary>
+          <span>校验摘要 / DIGESTS</span>
+          <b>展开完整值</b>
+        </summary>
+        <dl>
+          <div>
+            <dt>目标集合</dt>
+            <dd>
+              <code>{batch.targetDigest}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>变更前</dt>
+            <dd>
+              <code>{batch.beforeDigest}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>变更后</dt>
+            <dd>
+              <code>{batch.afterDigest}</code>
+            </dd>
+          </div>
+        </dl>
+      </details>
+
+      {batch.status === "ready" ? (
+        <div className="admin-catalog-batch-confirmation">
+          <div>
+            <span>完整确认文本</span>
+            <code>{batch.confirmationText}</code>
+            <small>逐字手输上方完整内容；大小写、空格和摘要都必须一致。</small>
+          </div>
+          <label>
+            <span>输入确认</span>
+            <input
+              autoComplete="off"
+              spellCheck={false}
+              maxLength={240}
+              value={confirmation}
+              aria-invalid={confirmation.length > 0 && !confirmationMatches}
+              onChange={(event) => onConfirmationChange(event.target.value)}
+            />
+          </label>
+          <button
+            className={`button ${
+              batch.action === "disable"
+                ? "admin-button-danger"
+                : "button-blue"
+            }`}
+            type="button"
+            disabled={
+              applying ||
+              refreshing ||
+              expired ||
+              !matchesCurrentRequest ||
+              !confirmationMatches
+            }
+            onClick={onApply}
+          >
+            {applying ? "正在原子应用…" : "应用整批变更"}
+          </button>
+        </div>
+      ) : null}
+
+      {batch.applyResult !== null ? (
+        <details className="admin-catalog-batch-apply-result" open>
+          <summary>应用回执</summary>
+          <pre>{JSON.stringify(batch.applyResult, null, 2)}</pre>
+        </details>
+      ) : null}
+
+      <div className="admin-catalog-batch-items-head">
+        <div>
+          <h5>端点明细</h5>
+          <p>仅展示当前响应中的前 {response.items.length} 项，摘要计数以服务端为准。</p>
+        </div>
+        {response.nextOffset !== null ? (
+          <span>还有 {batch.counts.matched - response.nextOffset} 项未展示</span>
+        ) : null}
+      </div>
+      {response.items.length ? (
+        <div className="admin-table-wrap admin-catalog-batch-table-wrap">
+          <table className="admin-table admin-catalog-batch-table">
+            <thead>
+              <tr>
+                <th>端点</th>
+                <th>变更前</th>
+                <th>变更后</th>
+                <th>结果</th>
+              </tr>
+            </thead>
+            <tbody>
+              {response.items.map((item) => (
+                <tr key={item.path}>
+                  <td>
+                    <span className="admin-platform">{item.platform}</span>
+                    <span className="admin-method">{item.method}</span>
+                    <code title={item.path}>{item.path}</code>
+                    <small>
+                      revision {item.expectedRevision} ·{" "}
+                      {item.itemDigest.slice(0, 12)}
+                    </small>
+                    {item.summary ? <small>{item.summary}</small> : null}
+                  </td>
+                  <td>
+                    <strong>
+                      {formatUsd(item.before.customerPriceUsdMicros, 6)}
+                    </strong>
+                    <small>
+                      {item.before.enabled ? "已上架" : "已下架"} ·{" "}
+                      {item.before.readOnly ? "只读" : "未确认只读"}
+                    </small>
+                    <small>
+                      成本 {formatUsd(item.before.upstreamPriceUsdMicros, 6)}
+                    </small>
+                  </td>
+                  <td>
+                    <strong>
+                      {formatUsd(item.after.customerPriceUsdMicros, 6)}
+                    </strong>
+                    <small>
+                      {item.after.enabled ? "将上架" : "将下架"} ·{" "}
+                      {item.after.readOnly ? "只读" : "未确认只读"}
+                    </small>
+                  </td>
+                  <td>
+                    <span
+                      className={`admin-catalog-batch-item-result ${
+                        item.blockerCode
+                          ? "is-blocked"
+                          : item.willChange
+                            ? "is-change"
+                            : "is-no-change"
+                      }`}
+                    >
+                      {item.blockerCode
+                        ? catalogBatchBlockerLabel(item.blockerCode)
+                        : item.willChange
+                          ? "将修改"
+                          : "无变化"}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="admin-empty">
+          <strong>此预览没有端点明细</strong>
+          <p>刷新回执，或调整服务端选择器后重新生成预览。</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PaymentReviewDialog({
   review,
   action,
@@ -1154,6 +1851,15 @@ function PaymentReviewDialog({
 
 export function AdminClient() {
   const restoredSecret = useRef(false);
+  const catalogBatchPreviewRetry = useRef<{
+    requestSignature: string;
+    idempotencyKey: string;
+  } | null>(null);
+  const catalogBatchApplyRetry = useRef<{
+    batchId: string;
+    requestSignature: string;
+    idempotencyKey: string;
+  } | null>(null);
   const [secretInput, setSecretInput] = useState("");
   const [adminSecret, setAdminSecret] = useState("");
   const [rememberForTab, setRememberForTab] = useState(false);
@@ -1187,7 +1893,25 @@ export function AdminClient() {
   const [userStatus, setUserStatus] = useState("all");
   const [catalogQuery, setCatalogQuery] = useState("");
   const [catalogPlatform, setCatalogPlatform] = useState("all");
-  const [catalogStatus, setCatalogStatus] = useState("all");
+  const [catalogStatus, setCatalogStatus] =
+    useState<CatalogFilterStatus>("all");
+  const [catalogSafety, setCatalogSafety] =
+    useState<CatalogSafetyFilter>("all");
+  const [catalogBatchAction, setCatalogBatchAction] =
+    useState<CatalogBatchAction>("publish");
+  const [catalogBatchMarkupPercent, setCatalogBatchMarkupPercent] =
+    useState("30");
+  const [catalogBatchMinimumPrice, setCatalogBatchMinimumPrice] =
+    useState("0.001");
+  const [catalogBatch, setCatalogBatch] =
+    useState<CatalogBatchResponse | null>(null);
+  const [catalogBatchRequest, setCatalogBatchRequest] =
+    useState<CatalogBatchPreviewRequest | null>(null);
+  const [catalogBatchConfirmation, setCatalogBatchConfirmation] = useState("");
+  const [catalogBatchError, setCatalogBatchError] = useState("");
+  const [previewingCatalogBatch, setPreviewingCatalogBatch] = useState(false);
+  const [refreshingCatalogBatch, setRefreshingCatalogBatch] = useState(false);
+  const [applyingCatalogBatch, setApplyingCatalogBatch] = useState(false);
   const [upstreamLabel, setUpstreamLabel] = useState("TikHub Production");
   const [upstreamApiKey, setUpstreamApiKey] = useState("");
   const [activateUpstreamAfterSave, setActivateUpstreamAfterSave] =
@@ -1528,6 +2252,65 @@ export function AdminClient() {
     ).sort((left, right) => left.localeCompare(right, "zh-CN"));
   }, [catalog]);
 
+  const currentCatalogBatchRequest = useMemo<CatalogBatchPreviewRequest | null>(
+    () => {
+      if (catalog.status !== "ready" || !catalog.data.sync) return null;
+      const markupBps = parseMarkupPercentInput(catalogBatchMarkupPercent);
+      const minimumCustomerPriceUsdMicros = parseUsdInput(
+        catalogBatchMinimumPrice,
+      );
+      if (
+        catalogBatchAction !== "disable" &&
+        (markupBps === null || minimumCustomerPriceUsdMicros === null)
+      ) {
+        return null;
+      }
+      const request: CatalogBatchPreviewRequest = {
+        action: catalogBatchAction,
+        expectedCatalogGeneration: catalog.data.sync.generation,
+        selection: {
+          platform:
+            catalogPlatform === "all"
+              ? null
+              : catalogPlatform.trim().toLowerCase(),
+          query: catalogQuery
+            .replace(/\s+/g, " ")
+            .trim()
+            .toLocaleLowerCase("zh-CN"),
+          status: catalogStatus,
+          safety: catalogSafety,
+        },
+      };
+      if (
+        catalogBatchAction !== "disable" &&
+        markupBps !== null &&
+        minimumCustomerPriceUsdMicros !== null
+      ) {
+        request.pricing = {
+          markupBps,
+          minimumCustomerPriceUsdMicros,
+        };
+      }
+      return request;
+    },
+    [
+      catalog,
+      catalogBatchAction,
+      catalogBatchMarkupPercent,
+      catalogBatchMinimumPrice,
+      catalogPlatform,
+      catalogQuery,
+      catalogSafety,
+      catalogStatus,
+    ],
+  );
+
+  const catalogBatchRequestMatchesCurrent =
+    catalogBatchRequest !== null &&
+    currentCatalogBatchRequest !== null &&
+    JSON.stringify(catalogBatchRequest) ===
+      JSON.stringify(currentCatalogBatchRequest);
+
   const visibleEndpoints = useMemo(() => {
     if (catalog.status !== "ready") return [];
     const query = catalogQuery.trim().toLocaleLowerCase("zh-CN");
@@ -1535,7 +2318,8 @@ export function AdminClient() {
       const matchesQuery =
         !query ||
         endpoint.path.toLocaleLowerCase("zh-CN").includes(query) ||
-        endpoint.platform.toLocaleLowerCase("zh-CN").includes(query);
+        endpoint.platform.toLocaleLowerCase("zh-CN").includes(query) ||
+        endpoint.summary?.toLocaleLowerCase("zh-CN").includes(query);
       const matchesPlatform =
         catalogPlatform === "all" || endpoint.platform === catalogPlatform;
       const matchesStatus =
@@ -1545,10 +2329,21 @@ export function AdminClient() {
         (catalogStatus === "review" &&
           (!endpoint.reviewedAt ||
             !endpoint.presentInLatestSync ||
-            !endpoint.priceVerified));
-      return matchesQuery && matchesPlatform && matchesStatus;
+            !endpoint.priceVerified ||
+            endpoint.safetyClassification !== "safe_data_read" ||
+            endpoint.safetyPolicyVersion !== CATALOG_SAFETY_POLICY_VERSION));
+      const matchesSafety =
+        catalogSafety === "all" ||
+        endpoint.safetyClassification === catalogSafety;
+      return matchesQuery && matchesPlatform && matchesStatus && matchesSafety;
     });
-  }, [catalog, catalogPlatform, catalogQuery, catalogStatus]);
+  }, [
+    catalog,
+    catalogPlatform,
+    catalogQuery,
+    catalogSafety,
+    catalogStatus,
+  ]);
 
   const visiblePayments = useMemo(() => {
     if (payments.status !== "ready") return [];
@@ -1575,6 +2370,15 @@ export function AdminClient() {
     setUpstreamApiKey("");
     setSavingUpstreamCredential(false);
     setConfirmAction(null);
+    setCatalogBatch(null);
+    setCatalogBatchRequest(null);
+    setCatalogBatchConfirmation("");
+    setCatalogBatchError("");
+    setPreviewingCatalogBatch(false);
+    setRefreshingCatalogBatch(false);
+    setApplyingCatalogBatch(false);
+    catalogBatchPreviewRetry.current = null;
+    catalogBatchApplyRetry.current = null;
     setOverview({ status: "idle" });
     setUsers({ status: "idle" });
     setUpstreamCredentials({ status: "idle" });
@@ -1619,7 +2423,6 @@ export function AdminClient() {
     setNotice("");
     try {
       const apiKey = upstreamApiKey;
-      setUpstreamApiKey("");
       const result = await adminRequest(
         "/api/admin/upstream-credentials",
         adminSecret,
@@ -1634,11 +2437,12 @@ export function AdminClient() {
           }),
         },
       );
+      setUpstreamApiKey("");
       setNotice(
         result.activationConflict
           ? `已加密保存 ${result.credential.label} 为备用；活动数据源在提交期间发生变化，请从列表重新确认切换。`
           : result.credential.status === "active"
-          ? `已验证并启用 ${result.credential.label}。`
+          ? `已验证并启用 ${result.credential.label}；下一步请到“路由与定价”同步 TikHub 目录。`
           : `已加密保存 ${result.credential.label}，当前为备用状态。`,
       );
       await Promise.all([
@@ -1654,6 +2458,181 @@ export function AdminClient() {
       await loadUpstreamCredentials();
     } finally {
       setSavingUpstreamCredential(false);
+    }
+  }
+
+  async function previewCatalogBatch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (previewingCatalogBatch || applyingCatalogBatch) return;
+    if (
+      catalog.status !== "ready" ||
+      !catalog.data.sync ||
+      !catalog.data.sync.coverage
+    ) {
+      setCatalogBatchError(
+        "当前目录没有完整覆盖证明，请先成功同步 TikHub 后再生成批量预览。",
+      );
+      return;
+    }
+    if (
+      catalogQuery.length > 120 ||
+      /[\u0000-\u001F\u007F]/.test(catalogQuery)
+    ) {
+      setCatalogBatchError("目录搜索条件必须不超过 120 个可见字符。");
+      return;
+    }
+    if (!currentCatalogBatchRequest) {
+      setCatalogBatchError(
+        "加价百分比必须为 0%–500%，最多 2 位小数；最低客户价必须为 $0.000001–$100。",
+      );
+      return;
+    }
+
+    const requestSignature = JSON.stringify(currentCatalogBatchRequest);
+    if (
+      !catalogBatchPreviewRetry.current ||
+      catalogBatchPreviewRetry.current.requestSignature !== requestSignature
+    ) {
+      catalogBatchPreviewRetry.current = {
+        requestSignature,
+        idempotencyKey: createAdminIdempotencyKey("preview"),
+      };
+    }
+    const idempotencyKey =
+      catalogBatchPreviewRetry.current.idempotencyKey;
+    setPreviewingCatalogBatch(true);
+    setCatalogBatchError("");
+    setNotice("");
+    try {
+      const result = await adminRequest(
+        "/api/admin/catalog/batches/preview",
+        adminSecret,
+        isCatalogBatchResponse,
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          body: requestSignature,
+        },
+      );
+      if (catalogBatch?.batch.id !== result.batch.id) {
+        catalogBatchApplyRetry.current = null;
+      }
+      setCatalogBatch(result);
+      setCatalogBatchRequest(currentCatalogBatchRequest);
+      setCatalogBatchConfirmation("");
+      catalogBatchPreviewRetry.current = null;
+      setNotice(
+        result.batch.status === "ready"
+          ? `批量预览已冻结：匹配 ${result.batch.counts.matched} 项，计划修改 ${result.batch.counts.selected} 项。请核对后手输完整确认文本。`
+          : `批量预览已生成但整批不可应用：${result.batch.counts.blocked} 项阻断，${result.batch.counts.noChange} 项无需变化。`,
+      );
+    } catch (error) {
+      setCatalogBatchError(
+        error instanceof Error ? error.message : "批量目录预览生成失败。",
+      );
+    } finally {
+      setPreviewingCatalogBatch(false);
+    }
+  }
+
+  async function refreshCatalogBatch() {
+    if (!catalogBatch || refreshingCatalogBatch || applyingCatalogBatch) return;
+    setRefreshingCatalogBatch(true);
+    setCatalogBatchError("");
+    try {
+      const result = await adminRequest(
+        `/api/admin/catalog/batches/${encodeURIComponent(
+          catalogBatch.batch.id,
+        )}?limit=100&offset=0`,
+        adminSecret,
+        isCatalogBatchResponse,
+      );
+      setCatalogBatch(result);
+      if (result.batch.status === "applied") {
+        await Promise.all([loadCatalog(), loadOverview()]);
+      }
+    } catch (error) {
+      setCatalogBatchError(
+        error instanceof Error ? error.message : "批量目录回执刷新失败。",
+      );
+    } finally {
+      setRefreshingCatalogBatch(false);
+    }
+  }
+
+  async function applyCatalogBatch() {
+    if (!catalogBatch || applyingCatalogBatch || previewingCatalogBatch) return;
+    const batch = catalogBatch.batch;
+    if (!catalogBatchRequestMatchesCurrent) {
+      setCatalogBatchError(
+        "筛选条件、定价规则或目录代次已变化；请按当前条件重新生成预览。",
+      );
+      return;
+    }
+    if (batch.status !== "ready" || batch.counts.blocked !== 0) {
+      setCatalogBatchError("当前批量预览不是可应用状态。");
+      return;
+    }
+    if (Date.parse(batch.expiresAt) <= Date.now()) {
+      setCatalogBatchError("当前批量预览已过期，请重新生成。");
+      return;
+    }
+    if (catalogBatchConfirmation !== batch.confirmationText) {
+      setCatalogBatchError("请逐字手输完整确认文本后再应用。");
+      return;
+    }
+
+    const payload = {
+      expectedVersion: batch.version,
+      previewDigest: batch.targetDigest,
+      confirmation: catalogBatchConfirmation,
+    };
+    const requestSignature = JSON.stringify(payload);
+    if (
+      !catalogBatchApplyRetry.current ||
+      catalogBatchApplyRetry.current.batchId !== batch.id ||
+      catalogBatchApplyRetry.current.requestSignature !== requestSignature
+    ) {
+      catalogBatchApplyRetry.current = {
+        batchId: batch.id,
+        requestSignature,
+        idempotencyKey: createAdminIdempotencyKey("apply"),
+      };
+    }
+    const idempotencyKey = catalogBatchApplyRetry.current.idempotencyKey;
+    setApplyingCatalogBatch(true);
+    setCatalogBatchError("");
+    setNotice("");
+    try {
+      const result = await adminRequest(
+        `/api/admin/catalog/batches/${encodeURIComponent(batch.id)}/apply`,
+        adminSecret,
+        isCatalogBatchResponse,
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          body: requestSignature,
+        },
+      );
+      setCatalogBatch(result);
+      if (result.batch.status === "applied") {
+        setNotice(
+          `${result.replayed ? "已确认重复请求回执" : "批量操作完成"}：${catalogBatchActionLabel(
+            result.batch.action,
+          )} ${result.batch.counts.selected} 项。`,
+        );
+        await Promise.all([loadCatalog(), loadOverview()]);
+      } else {
+        setNotice("批量操作请求已接收，请刷新回执确认最终状态。");
+      }
+    } catch (error) {
+      setCatalogBatchError(
+        error instanceof Error
+          ? `${error.message} 相同请求重试会继续使用原幂等键。`
+          : "批量目录应用失败；相同请求重试会继续使用原幂等键。",
+      );
+    } finally {
+      setApplyingCatalogBatch(false);
     }
   }
 
@@ -1681,6 +2660,7 @@ export function AdminClient() {
             enabled: endpoint.enabled,
             readOnly: endpoint.readOnly,
             customerPriceUsdMicros: price,
+            expectedRevision: endpoint.revision,
           }),
         },
       );
@@ -1802,6 +2782,7 @@ export function AdminClient() {
               enabled: confirmAction.nextEnabled,
               readOnly: confirmAction.nextEnabled ? true : endpoint.readOnly,
               customerPriceUsdMicros: price,
+              expectedRevision: endpoint.revision,
             }),
           },
         );
@@ -1833,7 +2814,7 @@ export function AdminClient() {
         );
         setNotice(
           confirmAction.action === "activate"
-            ? `已验证并切换到 ${result.credential.label}。`
+            ? `已验证并切换到 ${result.credential.label}；下一步请到“路由与定价”重新同步 TikHub 目录。`
             : `已撤销 ${result.credential.label}；密文不会再被运行时使用。`,
         );
         await Promise.all([
@@ -2775,53 +3756,237 @@ export function AdminClient() {
                       </div>
                     )}
                   </div>
-                  <div className="admin-toolbar admin-toolbar-wide">
-                    <label>
-                      <span>搜索路由</span>
-                      <input
-                        type="search"
-                        value={catalogQuery}
-                        onChange={(event) =>
-                          setCatalogQuery(event.target.value)
+                  <section
+                    className="admin-catalog-batch"
+                    aria-labelledby="catalog-batch-title"
+                  >
+                    <div className="admin-catalog-batch-head">
+                      <div>
+                        <p className="section-kicker">
+                          ATOMIC BATCH CONTROL
+                        </p>
+                        <h3 id="catalog-batch-title">
+                          服务端选择器与批量变更
+                        </h3>
+                        <p>
+                          当前筛选同时控制下方本地列表与服务端批量预览；
+                          最终匹配数、阻断项和金额只以冻结回执为准。
+                        </p>
+                      </div>
+                      <span>
+                        {catalog.data.sync
+                          ? `代次 ${catalog.data.sync.generation}`
+                          : "目录代次不可用"}
+                      </span>
+                    </div>
+
+                    <form onSubmit={previewCatalogBatch}>
+                      <div className="admin-toolbar admin-catalog-batch-selector">
+                        <label>
+                          <span>搜索路由</span>
+                          <input
+                            type="search"
+                            maxLength={120}
+                            value={catalogQuery}
+                            onChange={(event) =>
+                              setCatalogQuery(event.target.value)
+                            }
+                            placeholder="平台、摘要或 /v1/ 路径"
+                          />
+                        </label>
+                        <label>
+                          <span>平台</span>
+                          <select
+                            value={catalogPlatform}
+                            onChange={(event) =>
+                              setCatalogPlatform(event.target.value)
+                            }
+                          >
+                            <option value="all">全部平台</option>
+                            {catalogPlatforms.map((platform) => (
+                              <option value={platform} key={platform}>
+                                {platform}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          <span>上架状态</span>
+                          <select
+                            value={catalogStatus}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              if (isCatalogFilterStatus(value)) {
+                                setCatalogStatus(value);
+                              }
+                            }}
+                          >
+                            <option value="all">全部状态</option>
+                            <option value="enabled">已上架</option>
+                            <option value="disabled">已下架</option>
+                            <option value="review">待复核</option>
+                          </select>
+                        </label>
+                        <label>
+                          <span>安全分类</span>
+                          <select
+                            value={catalogSafety}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              if (isCatalogSafetyFilter(value)) {
+                                setCatalogSafety(value);
+                              }
+                            }}
+                          >
+                            <option value="all">全部安全分类</option>
+                            <option value="safe_data_read">
+                              安全数据读取
+                            </option>
+                            <option value="ambiguous">需人工判断</option>
+                            <option value="prohibited">禁止公开</option>
+                          </select>
+                        </label>
+                        <p>
+                          本地显示{" "}
+                          <strong>{visibleEndpoints.length}</strong> /{" "}
+                          {catalog.data.count} 条
+                        </p>
+                      </div>
+
+                      <div className="admin-catalog-batch-controls">
+                        <label>
+                          <span>批量动作</span>
+                          <select
+                            value={catalogBatchAction}
+                            disabled={
+                              previewingCatalogBatch ||
+                              applyingCatalogBatch
+                            }
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              if (isCatalogBatchAction(value)) {
+                                setCatalogBatchAction(value);
+                              }
+                            }}
+                          >
+                            <option value="publish">审核并上架</option>
+                            <option value="reprice">只重算客户价</option>
+                            <option value="disable">下架匹配端点</option>
+                          </select>
+                        </label>
+                        <label>
+                          <span>成本加价（%）</span>
+                          <input
+                            inputMode="decimal"
+                            maxLength={6}
+                            disabled={
+                              catalogBatchAction === "disable" ||
+                              previewingCatalogBatch ||
+                              applyingCatalogBatch
+                            }
+                            value={catalogBatchMarkupPercent}
+                            aria-invalid={
+                              catalogBatchAction !== "disable" &&
+                              parseMarkupPercentInput(
+                                catalogBatchMarkupPercent,
+                              ) === null
+                            }
+                            onChange={(event) =>
+                              setCatalogBatchMarkupPercent(
+                                event.target.value,
+                              )
+                            }
+                          />
+                          <small>0–500%，最多 2 位小数</small>
+                        </label>
+                        <label>
+                          <span>最低客户价（USD / 次）</span>
+                          <input
+                            inputMode="decimal"
+                            maxLength={10}
+                            disabled={
+                              catalogBatchAction === "disable" ||
+                              previewingCatalogBatch ||
+                              applyingCatalogBatch
+                            }
+                            value={catalogBatchMinimumPrice}
+                            aria-invalid={
+                              catalogBatchAction !== "disable" &&
+                              parseUsdInput(
+                                catalogBatchMinimumPrice,
+                              ) === null
+                            }
+                            onChange={(event) =>
+                              setCatalogBatchMinimumPrice(
+                                event.target.value,
+                              )
+                            }
+                          />
+                          <small>$0.000001–$100，最多 6 位小数</small>
+                        </label>
+                        <div className="admin-catalog-batch-preview-copy">
+                          <span>预览规则</span>
+                          <strong>
+                            {catalogBatchActionLabel(catalogBatchAction)}
+                          </strong>
+                          <small>
+                            预览不会修改端点；应用阶段会再次校验目录代次、
+                            revision、安全分类和完整摘要。
+                          </small>
+                        </div>
+                        <button
+                          className="button button-dark"
+                          type="submit"
+                          disabled={
+                            previewingCatalogBatch ||
+                            applyingCatalogBatch ||
+                            !catalog.data.sync?.coverage ||
+                            currentCatalogBatchRequest === null
+                          }
+                        >
+                          {previewingCatalogBatch
+                            ? "正在冻结预览…"
+                            : "生成整批预览"}
+                        </button>
+                      </div>
+                    </form>
+
+                    {catalogBatchError ? (
+                      <div
+                        className="admin-catalog-batch-alert is-blocked"
+                        role="alert"
+                      >
+                        {catalogBatchError}
+                      </div>
+                    ) : null}
+
+                    {catalogBatch ? (
+                      <CatalogBatchReceipt
+                        key={`${catalogBatch.batch.id}:${catalogBatch.batch.expiresAt}`}
+                        response={catalogBatch}
+                        request={catalogBatchRequest}
+                        matchesCurrentRequest={
+                          catalogBatchRequestMatchesCurrent
                         }
-                        placeholder="平台或 /v1/ 路径"
+                        confirmation={catalogBatchConfirmation}
+                        refreshing={refreshingCatalogBatch}
+                        applying={applyingCatalogBatch}
+                        onConfirmationChange={
+                          setCatalogBatchConfirmation
+                        }
+                        onRefresh={() => void refreshCatalogBatch()}
+                        onApply={() => void applyCatalogBatch()}
                       />
-                    </label>
-                    <label>
-                      <span>平台</span>
-                      <select
-                        value={catalogPlatform}
-                        onChange={(event) =>
-                          setCatalogPlatform(event.target.value)
-                        }
-                      >
-                        <option value="all">全部平台</option>
-                        {catalogPlatforms.map((platform) => (
-                          <option value={platform} key={platform}>
-                            {platform}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      <span>上架状态</span>
-                      <select
-                        value={catalogStatus}
-                        onChange={(event) =>
-                          setCatalogStatus(event.target.value)
-                        }
-                      >
-                        <option value="all">全部</option>
-                        <option value="enabled">已上架</option>
-                        <option value="disabled">已下架</option>
-                        <option value="review">待复核</option>
-                      </select>
-                    </label>
-                    <p>
-                      显示 <strong>{visibleEndpoints.length}</strong> /{" "}
-                      {catalog.data.count} 条
-                    </p>
-                  </div>
+                    ) : (
+                      <div className="admin-catalog-batch-empty">
+                        <strong>尚未生成批量预览</strong>
+                        <p>
+                          选择平台、状态与安全分类，再冻结一份有时效的服务端快照。
+                          预览最多返回前 100 条明细。
+                        </p>
+                      </div>
+                    )}
+                  </section>
                   {visibleEndpoints.length ? (
                     <div className="admin-catalog-list">
                       {visibleEndpoints.map((endpoint) => {
@@ -2855,6 +4020,19 @@ export function AdminClient() {
                               </div>
                               <div className="admin-endpoint-flags">
                                 <span
+                                  className={`admin-safety-badge is-${endpoint.safetyClassification}`}
+                                  title={
+                                    endpoint.safetyReasons.length
+                                      ? endpoint.safetyReasons.join("；")
+                                      : "服务端未返回补充安全依据"
+                                  }
+                                >
+                                  {catalogSafetyLabel(
+                                    endpoint.safetyClassification,
+                                  )}{" "}
+                                  / policy v{endpoint.safetyPolicyVersion}
+                                </span>
+                                <span
                                   className={
                                     endpoint.presentInLatestSync
                                       ? "is-current"
@@ -2883,6 +4061,20 @@ export function AdminClient() {
                                 </span>
                               </div>
                             </div>
+                            {endpoint.safetyReasons.length ? (
+                              <div className="admin-endpoint-safety-reasons">
+                                <span>安全分类依据</span>
+                                <ul>
+                                  {endpoint.safetyReasons.map(
+                                    (reason, index) => (
+                                      <li key={`${reason}-${index}`}>
+                                        <code>{reason}</code>
+                                      </li>
+                                    ),
+                                  )}
+                                </ul>
+                              </div>
+                            ) : null}
                             {endpoint.summary ||
                             endpoint.description ||
                             endpoint.parameterSchema !== null ? (
@@ -2991,6 +4183,10 @@ export function AdminClient() {
                                   !endpoint.enabled &&
                                   (!endpoint.presentInLatestSync ||
                                     !endpoint.priceVerified ||
+                                    endpoint.safetyClassification !==
+                                      "safe_data_read" ||
+                                    endpoint.safetyPolicyVersion !==
+                                      CATALOG_SAFETY_POLICY_VERSION ||
                                     invalidPrice)
                                 }
                                 onClick={() =>

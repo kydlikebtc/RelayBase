@@ -20,6 +20,10 @@ const MAX_PROVIDER_RESPONSE_BYTES = 256 * 1024;
 const MAX_CATALOG_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_OPENAPI_RESPONSE_BYTES = 16 * 1024 * 1024;
 const MAX_PROXY_BODY_BYTES = 256 * 1024;
+const CATALOG_SAFETY_POLICY_VERSION = 1;
+const MAX_CATALOG_BATCH_TARGETS = 2_000;
+const MAX_CATALOG_BATCH_PUBLISH_TARGETS = 500;
+const CATALOG_BATCH_TTL_MINUTES = 30;
 const PAYMENT_AMOUNTS = new Set([10, 25, 50, 100]);
 const PAYMENT_CURRENCIES = new Set([
   "usdttrc20",
@@ -128,8 +132,108 @@ type CatalogRecord = {
   price_verified: number;
   enabled: number;
   read_only: number;
+  safety_classification:
+    | "safe_data_read"
+    | "ambiguous"
+    | "prohibited";
+  safety_policy_version: number;
   sync_generation: string | null;
   coverage_verified: number;
+};
+
+type CatalogSafetyClassification =
+  | "safe_data_read"
+  | "ambiguous"
+  | "prohibited";
+
+type CatalogSafetyAssessment = {
+  classification: CatalogSafetyClassification;
+  reasons: string[];
+};
+
+type CatalogBatchAction = "publish" | "reprice" | "disable";
+type CatalogBatchStatus =
+  | "preparing"
+  | "ready"
+  | "blocked"
+  | "applying"
+  | "applied"
+  | "stale"
+  | "expired";
+
+type CatalogBatchPlanRecord = {
+  id: string;
+  actor_fingerprint: string;
+  preview_idempotency_hash: string;
+  preview_request_hash: string;
+  policy_version: number;
+  action: CatalogBatchAction;
+  status: CatalogBatchStatus;
+  version: number;
+  filter_platform: string | null;
+  filter_query: string | null;
+  filter_status: string;
+  filter_safety: string;
+  selector_json: string;
+  mutation_json: string;
+  markup_bps: number | null;
+  minimum_customer_price_usd_micros: number | null;
+  catalog_generation: string;
+  credential_source: string | null;
+  credential_id: string | null;
+  credential_fingerprint: string | null;
+  credential_state_version: number | null;
+  openapi_snapshot_hash: string;
+  price_snapshot_hash: string;
+  matched_count: number;
+  selected_count: number;
+  excluded_stale_count: number;
+  excluded_unverified_count: number;
+  excluded_unsafe_count: number;
+  no_change_count: number;
+  price_increase_count: number;
+  price_decrease_count: number;
+  price_unchanged_count: number;
+  blocked_count: number;
+  upstream_total_usd_micros: number;
+  before_customer_total_usd_micros: number;
+  after_customer_total_usd_micros: number;
+  target_digest: string;
+  before_digest: string;
+  after_digest: string;
+  confirmation_text: string;
+  apply_idempotency_hash: string | null;
+  apply_request_hash: string | null;
+  apply_result_json: string | null;
+  applied_count: number | null;
+  created_at: string;
+  previewed_at: string | null;
+  expires_at: string;
+  apply_started_at: string | null;
+  applied_at: string | null;
+};
+
+type CatalogBatchItemRecord = {
+  path: string;
+  ordinal: number;
+  platform: string;
+  http_method: string;
+  summary: string | null;
+  expected_revision: number;
+  original_upstream_price_usd_micros: number;
+  original_customer_price_usd_micros: number;
+  original_price_verified: number;
+  original_enabled: number;
+  original_read_only: number;
+  original_sync_generation: string | null;
+  original_reviewed_at: string | null;
+  original_updated_at: string;
+  target_customer_price_usd_micros: number;
+  target_enabled: number;
+  target_read_only: number;
+  will_change: number;
+  blocker_code: string | null;
+  item_digest: string;
 };
 
 type PaymentOrderRecord = {
@@ -345,6 +449,29 @@ export async function handlePlatformRequest(
       request.method === "POST"
     ) {
       return await handleCatalogSync(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/admin/catalog/batches/preview" &&
+      request.method === "POST"
+    ) {
+      return await handleCatalogBatchPreview(request, env, requestId);
+    }
+
+    if (
+      /^\/api\/admin\/catalog\/batches\/[^/]+\/apply$/.test(
+        url.pathname,
+      ) &&
+      request.method === "POST"
+    ) {
+      return await handleCatalogBatchApply(request, env, requestId);
+    }
+
+    if (
+      /^\/api\/admin\/catalog\/batches\/[^/]+$/.test(url.pathname) &&
+      request.method === "GET"
+    ) {
+      return await handleCatalogBatchGet(request, env, requestId);
     }
 
     if (
@@ -2912,7 +3039,8 @@ async function handleProxyRequest(
       .prepare(
         `SELECT path, platform, http_method, upstream_price_usd_micros,
                 customer_price_usd_micros, price_verified,
-                enabled, read_only, sync_generation,
+                enabled, read_only, safety_classification,
+                safety_policy_version, sync_generation,
                 EXISTS(
                   SELECT 1
                   FROM catalog_sync_state
@@ -2937,12 +3065,22 @@ async function handleProxyRequest(
                   AS _catalog_coverage_schema,
                 (SELECT generation FROM catalog_sync_staging LIMIT 1)
                   AS _catalog_sync_staging_schema,
+                (SELECT safety_classification
+                 FROM catalog_sync_staging LIMIT 1)
+                  AS _catalog_staging_safety_schema,
                 (SELECT idempotency_hash FROM payment_orders LIMIT 1)
                   AS _payment_idempotency_schema,
                 (SELECT upstream_cost_usd_micros FROM api_calls LIMIT 1)
                   AS _upstream_cost_schema,
                 (SELECT sync_generation FROM endpoint_catalog LIMIT 1)
-                  AS _sync_generation_schema
+                  AS _sync_generation_schema,
+                (SELECT revision FROM endpoint_catalog LIMIT 1)
+                  AS _catalog_revision_schema,
+                (SELECT target_digest FROM catalog_batch_plans LIMIT 1)
+                  AS _catalog_batch_plans_schema,
+                (SELECT expected_revision
+                 FROM catalog_batch_plan_items LIMIT 1)
+                  AS _catalog_batch_items_schema
          FROM endpoint_catalog
          WHERE path = ?
            AND price_verified = 1
@@ -2982,6 +3120,20 @@ async function handleProxyRequest(
       "该端点尚未通过只读与价格审核。",
     );
   }
+  if (
+    catalog.safety_policy_version !== CATALOG_SAFETY_POLICY_VERSION ||
+    catalog.safety_classification !== "safe_data_read" ||
+    isHardProhibitedCatalogOperation(
+      catalog.path,
+      catalog.http_method as "GET" | "POST",
+    )
+  ) {
+    throw new PlatformError(
+      403,
+      "unsafe_endpoint",
+      "该端点的安全分类已经变化，必须重新同步并审核后才能调用。",
+    );
+  }
   if (request.method !== catalog.http_method) {
     throw new PlatformError(
       405,
@@ -2990,6 +3142,7 @@ async function handleProxyRequest(
     );
   }
   let upstreamBody: string | undefined;
+  let parsedUpstreamBody: unknown = null;
   if (request.method === "POST") {
     const contentType = request.headers.get("content-type") ?? "";
     if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
@@ -3008,6 +3161,7 @@ async function handleProxyRequest(
       ) {
         throw new Error("unsafe json");
       }
+      parsedUpstreamBody = parsed;
     } catch {
       throw new PlatformError(
         400,
@@ -3016,6 +3170,7 @@ async function handleProxyRequest(
       );
     }
   }
+  validateCatalogProxyInputs(url, parsedUpstreamBody);
 
   const secret = bearerToken(request);
   if (!secret || !secret.startsWith("rb_live_")) {
@@ -3529,11 +3684,18 @@ async function handlePublicCatalog(
                   customer_price_usd_micros, updated_at
            FROM endpoint_catalog
            WHERE enabled = 1 AND read_only = 1 AND price_verified = 1
+             AND safety_classification = 'safe_data_read'
+             AND safety_policy_version =
+                 ${CATALOG_SAFETY_POLICY_VERSION}
              AND platform = ?
              AND sync_generation = (
                SELECT last_success_generation
                FROM catalog_sync_state
                WHERE id = 1
+             )
+             AND EXISTS (
+               SELECT 1 FROM catalog_sync_state
+               WHERE id = 1 AND ${CATALOG_COVERAGE_WHERE}
              )
            ORDER BY platform ASC, path ASC
            LIMIT ? OFFSET ?`,
@@ -3545,10 +3707,17 @@ async function handlePublicCatalog(
                   customer_price_usd_micros, updated_at
            FROM endpoint_catalog
            WHERE enabled = 1 AND read_only = 1 AND price_verified = 1
+             AND safety_classification = 'safe_data_read'
+             AND safety_policy_version =
+                 ${CATALOG_SAFETY_POLICY_VERSION}
              AND sync_generation = (
                SELECT last_success_generation
                FROM catalog_sync_state
                WHERE id = 1
+             )
+             AND EXISTS (
+               SELECT 1 FROM catalog_sync_state
+               WHERE id = 1 AND ${CATALOG_COVERAGE_WHERE}
              )
            ORDER BY platform ASC, path ASC
            LIMIT ? OFFSET ?`,
@@ -3560,11 +3729,18 @@ async function handlePublicCatalog(
           `SELECT COUNT(*) AS count
            FROM endpoint_catalog
            WHERE enabled = 1 AND read_only = 1 AND price_verified = 1
+             AND safety_classification = 'safe_data_read'
+             AND safety_policy_version =
+                 ${CATALOG_SAFETY_POLICY_VERSION}
              AND platform = ?
              AND sync_generation = (
                SELECT last_success_generation
                FROM catalog_sync_state
                WHERE id = 1
+             )
+             AND EXISTS (
+               SELECT 1 FROM catalog_sync_state
+               WHERE id = 1 AND ${CATALOG_COVERAGE_WHERE}
              )`,
         )
         .bind(rawPlatform)
@@ -3572,10 +3748,17 @@ async function handlePublicCatalog(
         `SELECT COUNT(*) AS count
          FROM endpoint_catalog
          WHERE enabled = 1 AND read_only = 1 AND price_verified = 1
+           AND safety_classification = 'safe_data_read'
+           AND safety_policy_version =
+               ${CATALOG_SAFETY_POLICY_VERSION}
            AND sync_generation = (
              SELECT last_success_generation
              FROM catalog_sync_state
              WHERE id = 1
+           )
+           AND EXISTS (
+             SELECT 1 FROM catalog_sync_state
+             WHERE id = 1 AND ${CATALOG_COVERAGE_WHERE}
            )`,
       );
   const rows = await query.all<{
@@ -3651,6 +3834,8 @@ async function handleCatalogList(
       `SELECT path, platform, http_method, summary, description,
               parameter_schema_json, upstream_price_usd_micros,
               customer_price_usd_micros, price_verified, enabled, read_only,
+              safety_classification, safety_reasons_json,
+              safety_policy_version, revision,
               source_updated_at, sync_generation, reviewed_at, updated_at,
               sync_generation = (
                 SELECT last_success_generation
@@ -3658,8 +3843,7 @@ async function handleCatalogList(
                 WHERE id = 1
               ) AS present_in_latest_sync
        FROM endpoint_catalog
-       ORDER BY enabled DESC, reviewed_at IS NULL DESC,
-                platform ASC, path ASC
+       ORDER BY platform ASC, path ASC
        LIMIT ? OFFSET ?`,
     )
     .bind(limit, offset)
@@ -3675,6 +3859,10 @@ async function handleCatalogList(
       price_verified: number;
       enabled: number;
       read_only: number;
+      safety_classification: CatalogSafetyClassification;
+      safety_reasons_json: string | null;
+      safety_policy_version: number;
+      revision: number;
       source_updated_at: string | null;
       sync_generation: string | null;
       present_in_latest_sync: number | null;
@@ -3735,6 +3923,10 @@ async function handleCatalogList(
     priceVerified: row.price_verified === 1,
     enabled: row.enabled === 1,
     readOnly: row.read_only === 1,
+    safetyClassification: row.safety_classification,
+    safetyReasons: safeStoredStringArray(row.safety_reasons_json),
+    safetyPolicyVersion: row.safety_policy_version,
+    revision: row.revision,
     sourceUpdatedAt: row.source_updated_at,
     presentInLatestSync: row.present_in_latest_sync === 1,
     reviewedAt: row.reviewed_at,
@@ -3789,6 +3981,1395 @@ async function handleCatalogList(
                 : null,
           }
         : null,
+    },
+    200,
+    requestId,
+  );
+}
+
+type NormalizedCatalogBatchPreview = {
+  action: CatalogBatchAction;
+  expectedCatalogGeneration: string;
+  selection: {
+    platform: string | null;
+    query: string;
+    status: "all" | "enabled" | "disabled" | "review";
+    safety:
+      | "all"
+      | "safe_data_read"
+      | "ambiguous"
+      | "prohibited";
+  };
+  pricing: {
+    markupBps: number;
+    minimumCustomerPriceUsdMicros: number;
+  } | null;
+};
+
+type CatalogBatchSourceRow = {
+  path: string;
+  platform: string;
+  http_method: "GET" | "POST";
+  summary: string | null;
+  upstream_price_usd_micros: number;
+  customer_price_usd_micros: number;
+  price_verified: number;
+  enabled: number;
+  read_only: number;
+  safety_classification: CatalogSafetyClassification;
+  safety_policy_version: number;
+  revision: number;
+  sync_generation: string | null;
+  reviewed_at: string | null;
+  updated_at: string;
+};
+
+type CatalogBatchSyncRecord = {
+  last_success_generation: string;
+  credential_source: string | null;
+  credential_id: string | null;
+  credential_fingerprint: string | null;
+  credential_state_version: number | null;
+  openapi_snapshot_hash: string;
+  price_snapshot_hash: string;
+  coverage_verified: number;
+  sync_locked: number;
+};
+
+function normalizeCatalogBatchPreview(
+  body: unknown,
+): NormalizedCatalogBatchPreview {
+  if (!isPlainRecord(body)) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_batch",
+      "批量目录预览请求格式无效。",
+    );
+  }
+  const action = body.action;
+  if (
+    action !== "publish" &&
+    action !== "reprice" &&
+    action !== "disable"
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_batch_action",
+      "批量目录操作仅支持 publish、reprice 或 disable。",
+    );
+  }
+  if (
+    typeof body.expectedCatalogGeneration !== "string" ||
+    !/^sync_[A-Za-z0-9_-]{16,80}$/.test(
+      body.expectedCatalogGeneration,
+    )
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_generation",
+      "必须提交当前目录同步代次。",
+    );
+  }
+  if (!isPlainRecord(body.selection)) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_batch_selection",
+      "批量目录筛选条件无效。",
+    );
+  }
+  const platform =
+    body.selection.platform === null
+      ? null
+      : typeof body.selection.platform === "string"
+        ? body.selection.platform.trim().toLowerCase()
+        : "";
+  if (
+    platform !== null &&
+    !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(platform)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_platform",
+      "目录平台筛选条件无效。",
+    );
+  }
+  const query =
+    typeof body.selection.query === "string"
+      ? body.selection.query.replace(/\s+/g, " ").trim().toLowerCase()
+      : "";
+  if (
+    query.length > 120 ||
+    /[\u0000-\u001F\u007F]/.test(query)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_query",
+      "目录搜索条件无效。",
+    );
+  }
+  const status = body.selection.status;
+  if (
+    status !== "all" &&
+    status !== "enabled" &&
+    status !== "disabled" &&
+    status !== "review"
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_status",
+      "目录状态筛选条件无效。",
+    );
+  }
+  const safety = body.selection.safety;
+  if (
+    safety !== "all" &&
+    safety !== "safe_data_read" &&
+    safety !== "ambiguous" &&
+    safety !== "prohibited"
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_safety",
+      "目录安全分类筛选条件无效。",
+    );
+  }
+  let pricing: NormalizedCatalogBatchPreview["pricing"] = null;
+  if (action === "publish" || action === "reprice") {
+    if (!isPlainRecord(body.pricing)) {
+      throw new PlatformError(
+        400,
+        "invalid_catalog_batch_pricing",
+        "批量上架或调价必须提交定价规则。",
+      );
+    }
+    const markupBps = body.pricing.markupBps;
+    const minimumCustomerPriceUsdMicros =
+      body.pricing.minimumCustomerPriceUsdMicros;
+    if (
+      !Number.isSafeInteger(markupBps) ||
+      (markupBps as number) < 0 ||
+      (markupBps as number) > 50_000 ||
+      !Number.isSafeInteger(minimumCustomerPriceUsdMicros) ||
+      (minimumCustomerPriceUsdMicros as number) < 1 ||
+      (minimumCustomerPriceUsdMicros as number) > 100_000_000
+    ) {
+      throw new PlatformError(
+        400,
+        "invalid_catalog_batch_pricing",
+        "加价比例或最低客户价格无效。",
+      );
+    }
+    pricing = {
+      markupBps: markupBps as number,
+      minimumCustomerPriceUsdMicros:
+        minimumCustomerPriceUsdMicros as number,
+    };
+  } else if (body.pricing != null) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_batch_pricing",
+      "批量下架不能同时提交定价规则。",
+    );
+  }
+  return {
+    action,
+    expectedCatalogGeneration: body.expectedCatalogGeneration,
+    selection: { platform, query, status, safety },
+    pricing,
+  };
+}
+
+async function handleCatalogBatchPreview(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  requireAdminSecret(request, env, "catalog");
+  const idempotencyKey = requireIdempotencyKey(request);
+  const body = normalizeCatalogBatchPreview(
+    await readJsonBody<unknown>(request, MAX_DASHBOARD_BODY_BYTES),
+  );
+  const supplied = bearerToken(request);
+  if (!supplied) {
+    throw new PlatformError(401, "admin_unauthorized", "管理员凭证无效。");
+  }
+  const actorFingerprint = await sha256Hex(supplied);
+  const previewIdempotencyHash = await sha256Hex(
+    `catalog-preview:${actorFingerprint}:${idempotencyKey}`,
+  );
+  const canonicalRequest = JSON.stringify(sortObjectDeep(body));
+  const previewRequestHash = await sha256Hex(canonicalRequest);
+  const db = requireDb(env);
+  const replay = await catalogBatchPlanByPreviewIdempotency(
+    db,
+    previewIdempotencyHash,
+  );
+  if (replay) {
+    if (
+      replay.actor_fingerprint !== actorFingerprint ||
+      replay.preview_request_hash !== previewRequestHash
+    ) {
+      throw new PlatformError(
+        409,
+        "catalog_batch_idempotency_conflict",
+        "该批量预览幂等键已经用于其他请求。",
+      );
+    }
+    if (replay.status !== "preparing") {
+      return await catalogBatchResponse(
+        db,
+        replay,
+        requestId,
+        true,
+        100,
+        0,
+      );
+    }
+    const abandoned = await db
+      .prepare(
+        `DELETE FROM catalog_batch_plans
+         WHERE id = ? AND status = 'preparing' AND version = 0
+           AND datetime(created_at) <= datetime('now', '-2 minutes')`,
+      )
+      .bind(replay.id)
+      .run();
+    if (Number(abandoned.meta?.changes ?? 0) !== 1) {
+      const current = await catalogBatchPlanByPreviewIdempotency(
+        db,
+        previewIdempotencyHash,
+      );
+      if (current && current.status !== "preparing") {
+        return await catalogBatchResponse(
+          db,
+          current,
+          requestId,
+          true,
+          100,
+          0,
+        );
+      }
+      throw new PlatformError(
+        409,
+        "catalog_batch_preview_in_progress",
+        "相同批量预览正在生成，请稍后使用相同幂等键重试。",
+      );
+    }
+  }
+
+  const sync = await db
+    .prepare(
+      `SELECT last_success_generation, credential_source, credential_id,
+              credential_fingerprint, credential_state_version,
+              openapi_snapshot_hash, price_snapshot_hash,
+              CASE WHEN ${CATALOG_COVERAGE_WHERE} THEN 1 ELSE 0 END
+                AS coverage_verified,
+              EXISTS(
+                SELECT 1 FROM catalog_sync_locks
+                WHERE id = 1
+                  AND datetime(locked_at) >= datetime('now', '-15 minutes')
+              ) AS sync_locked
+       FROM catalog_sync_state
+       WHERE id = 1`,
+    )
+    .first<CatalogBatchSyncRecord>();
+  if (
+    !sync ||
+    sync.last_success_generation !== body.expectedCatalogGeneration ||
+    sync.coverage_verified !== 1
+  ) {
+    throw new PlatformError(
+      409,
+      "catalog_batch_snapshot_stale",
+      "目录同步代次或覆盖证明已经变化，请刷新后重新生成预览。",
+    );
+  }
+  if (sync.sync_locked === 1) {
+    throw new PlatformError(
+      409,
+      "catalog_sync_in_progress",
+      "目录正在同步，请完成同步后再生成批量预览。",
+    );
+  }
+
+  const clauses: string[] = ["1 = 1"];
+  const bindings: unknown[] = [];
+  if (body.selection.platform !== null) {
+    clauses.push("platform = ?");
+    bindings.push(body.selection.platform);
+  }
+  if (body.selection.query) {
+    const escaped = body.selection.query
+      .replaceAll("\\", "\\\\")
+      .replaceAll("%", "\\%")
+      .replaceAll("_", "\\_");
+    clauses.push(
+      `(lower(path) LIKE ? ESCAPE '\\' OR
+        lower(platform) LIKE ? ESCAPE '\\' OR
+        lower(COALESCE(summary, '')) LIKE ? ESCAPE '\\')`,
+    );
+    bindings.push(`%${escaped}%`, `%${escaped}%`, `%${escaped}%`);
+  }
+  if (body.selection.status === "enabled") {
+    clauses.push("enabled = 1");
+  } else if (body.selection.status === "disabled") {
+    clauses.push("enabled = 0");
+  } else if (body.selection.status === "review") {
+    clauses.push(
+      `(reviewed_at IS NULL OR sync_generation IS NULL OR
+        sync_generation != ? OR price_verified != 1 OR
+        safety_classification != 'safe_data_read' OR
+        safety_policy_version != ?)`,
+    );
+    bindings.push(
+      body.expectedCatalogGeneration,
+      CATALOG_SAFETY_POLICY_VERSION,
+    );
+  }
+  if (body.selection.safety !== "all") {
+    clauses.push("safety_classification = ?");
+    bindings.push(body.selection.safety);
+  }
+  const maxTargets =
+    body.action === "publish"
+      ? MAX_CATALOG_BATCH_PUBLISH_TARGETS
+      : MAX_CATALOG_BATCH_TARGETS;
+  const rows = await db
+    .prepare(
+      `SELECT path, platform, http_method, summary,
+              upstream_price_usd_micros, customer_price_usd_micros,
+              price_verified, enabled, read_only, safety_classification,
+              safety_policy_version, revision, sync_generation,
+              reviewed_at, updated_at
+       FROM endpoint_catalog
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY platform ASC, path ASC
+       LIMIT ?`,
+    )
+    .bind(...bindings, maxTargets + 1)
+    .all<CatalogBatchSourceRow>();
+  const sourceRows = rows.results ?? [];
+  if (sourceRows.length > maxTargets) {
+    throw new PlatformError(
+      409,
+      "catalog_batch_target_limit",
+      `本次操作超过 ${maxTargets} 个端点，请缩小服务端筛选范围后重试。`,
+    );
+  }
+
+  const planned = await Promise.all(
+    sourceRows.map(async (row, ordinal) => {
+      let blockerCode: string | null = null;
+      if (body.action !== "disable") {
+        if (row.sync_generation !== body.expectedCatalogGeneration) {
+          blockerCode = "stale_endpoint";
+        } else if (row.price_verified !== 1) {
+          blockerCode = "price_unverified";
+        } else if (
+          row.safety_classification !== "safe_data_read" ||
+          row.safety_policy_version !== CATALOG_SAFETY_POLICY_VERSION ||
+          isHardProhibitedCatalogOperation(row.path, row.http_method)
+        ) {
+          blockerCode = "unsafe_operation";
+        }
+      }
+      let targetPrice = row.customer_price_usd_micros;
+      if (body.pricing) {
+        const markupPrice = Math.ceil(
+          (row.upstream_price_usd_micros *
+            (10_000 + body.pricing.markupBps)) /
+            10_000,
+        );
+        targetPrice = Math.max(
+          row.upstream_price_usd_micros,
+          body.pricing.minimumCustomerPriceUsdMicros,
+          markupPrice,
+        );
+        if (
+          !Number.isSafeInteger(targetPrice) ||
+          targetPrice < row.upstream_price_usd_micros ||
+          targetPrice < 1 ||
+          targetPrice > 100_000_000
+        ) {
+          blockerCode ??= "price_out_of_range";
+        }
+      }
+      const targetEnabled =
+        body.action === "publish"
+          ? 1
+          : body.action === "disable"
+            ? 0
+            : row.enabled;
+      const targetReadOnly =
+        body.action === "publish" ? 1 : row.read_only;
+      const willChange =
+        blockerCode == null &&
+        (targetPrice !== row.customer_price_usd_micros ||
+          targetEnabled !== row.enabled ||
+          targetReadOnly !== row.read_only);
+      const before = {
+        path: row.path,
+        revision: row.revision,
+        upstreamPriceUsdMicros: row.upstream_price_usd_micros,
+        customerPriceUsdMicros: row.customer_price_usd_micros,
+        priceVerified: row.price_verified === 1,
+        enabled: row.enabled === 1,
+        readOnly: row.read_only === 1,
+        syncGeneration: row.sync_generation,
+        reviewedAt: row.reviewed_at,
+        updatedAt: row.updated_at,
+      };
+      const after = {
+        customerPriceUsdMicros: targetPrice,
+        enabled: targetEnabled === 1,
+        readOnly: targetReadOnly === 1,
+      };
+      const itemDigest = await sha256Hex(
+        JSON.stringify(
+          sortObjectDeep({
+            ordinal,
+            platform: row.platform,
+            method: row.http_method,
+            before,
+            after,
+            willChange,
+            blockerCode,
+          }),
+        ),
+      );
+      return {
+        row,
+        ordinal,
+        targetPrice,
+        targetEnabled,
+        targetReadOnly,
+        willChange,
+        blockerCode,
+        before,
+        after,
+        itemDigest,
+      };
+    }),
+  );
+  const targetDigest = await sha256Hex(
+    JSON.stringify(
+      planned.map((item) => ({
+        path: item.row.path,
+        revision: item.row.revision,
+        itemDigest: item.itemDigest,
+      })),
+    ),
+  );
+  const beforeDigest = await sha256Hex(
+    JSON.stringify(planned.map((item) => item.before)),
+  );
+  const afterDigest = await sha256Hex(
+    JSON.stringify(
+      planned.map((item) => ({
+        path: item.row.path,
+        ...item.after,
+      })),
+    ),
+  );
+  const matchedCount = planned.length;
+  const selectedCount = planned.filter((item) => item.willChange).length;
+  const blockedCount = planned.filter(
+    (item) => item.blockerCode != null,
+  ).length;
+  const staleCount = planned.filter(
+    (item) => item.blockerCode === "stale_endpoint",
+  ).length;
+  const unverifiedCount = planned.filter(
+    (item) => item.blockerCode === "price_unverified",
+  ).length;
+  const unsafeCount = planned.filter(
+    (item) => item.blockerCode === "unsafe_operation",
+  ).length;
+  const noChangeCount = planned.filter(
+    (item) => item.blockerCode == null && !item.willChange,
+  ).length;
+  const priceIncreaseCount = planned.filter(
+    (item) =>
+      item.targetPrice > item.row.customer_price_usd_micros,
+  ).length;
+  const priceDecreaseCount = planned.filter(
+    (item) =>
+      item.targetPrice < item.row.customer_price_usd_micros,
+  ).length;
+  const priceUnchangedCount =
+    matchedCount - priceIncreaseCount - priceDecreaseCount;
+  const upstreamTotal = planned.reduce(
+    (total, item) => total + item.row.upstream_price_usd_micros,
+    0,
+  );
+  const beforeCustomerTotal = planned.reduce(
+    (total, item) => total + item.row.customer_price_usd_micros,
+    0,
+  );
+  const afterCustomerTotal = planned.reduce(
+    (total, item) => total + item.targetPrice,
+    0,
+  );
+  const planId = `cbp_${randomBase64Url(18)}`;
+  const expiresAt = new Date(
+    Date.now() + CATALOG_BATCH_TTL_MINUTES * 60_000,
+  ).toISOString();
+  const finalStatus: CatalogBatchStatus =
+    blockedCount > 0 || matchedCount === 0 || selectedCount === 0
+      ? "blocked"
+      : "ready";
+  const confirmationText =
+    `APPLY ${body.action.toUpperCase()} ${selectedCount}/${matchedCount} ` +
+    `${targetDigest.slice(0, 12)} ` +
+    `${body.expectedCatalogGeneration.slice(-12)}`;
+  const selectorJson = JSON.stringify(sortObjectDeep(body.selection));
+  const mutationJson = JSON.stringify(
+    sortObjectDeep({ action: body.action, pricing: body.pricing }),
+  );
+  try {
+    await db
+      .prepare(
+        `INSERT INTO catalog_batch_plans
+         (id, actor_fingerprint, preview_idempotency_hash,
+          preview_request_hash, policy_version, action, status, version,
+          filter_platform, filter_query, filter_status, filter_safety,
+          selector_json, mutation_json, markup_bps,
+          minimum_customer_price_usd_micros, catalog_generation,
+          credential_source, credential_id, credential_fingerprint,
+          credential_state_version, openapi_snapshot_hash,
+          price_snapshot_hash, matched_count, selected_count,
+          excluded_stale_count, excluded_unverified_count,
+          excluded_unsafe_count, no_change_count, price_increase_count,
+          price_decrease_count, price_unchanged_count, blocked_count,
+          upstream_total_usd_micros,
+          before_customer_total_usd_micros,
+          after_customer_total_usd_micros, target_digest, before_digest,
+          after_digest, confirmation_text, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'preparing', 0, ?, ?, ?, ?, ?, ?, ?,
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                 ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        planId,
+        actorFingerprint,
+        previewIdempotencyHash,
+        previewRequestHash,
+        CATALOG_SAFETY_POLICY_VERSION,
+        body.action,
+        body.selection.platform,
+        body.selection.query || null,
+        body.selection.status,
+        body.selection.safety,
+        selectorJson,
+        mutationJson,
+        body.pricing?.markupBps ?? null,
+        body.pricing?.minimumCustomerPriceUsdMicros ?? null,
+        body.expectedCatalogGeneration,
+        sync.credential_source,
+        sync.credential_id,
+        sync.credential_fingerprint,
+        sync.credential_state_version,
+        sync.openapi_snapshot_hash,
+        sync.price_snapshot_hash,
+        matchedCount,
+        selectedCount,
+        staleCount,
+        unverifiedCount,
+        unsafeCount,
+        noChangeCount,
+        priceIncreaseCount,
+        priceDecreaseCount,
+        priceUnchangedCount,
+        blockedCount,
+        upstreamTotal,
+        beforeCustomerTotal,
+        afterCustomerTotal,
+        targetDigest,
+        beforeDigest,
+        afterDigest,
+        confirmationText,
+        expiresAt,
+      )
+      .run();
+  } catch {
+    const concurrent = await catalogBatchPlanByPreviewIdempotency(
+      db,
+      previewIdempotencyHash,
+    );
+    if (
+      concurrent &&
+      concurrent.actor_fingerprint === actorFingerprint &&
+      concurrent.preview_request_hash === previewRequestHash
+    ) {
+      if (concurrent.status === "preparing") {
+        throw new PlatformError(
+          409,
+          "catalog_batch_preview_in_progress",
+          "相同批量预览正在生成，请稍后使用相同幂等键重试。",
+        );
+      }
+      return await catalogBatchResponse(
+        db,
+        concurrent,
+        requestId,
+        true,
+        100,
+        0,
+      );
+    }
+    throw new PlatformError(
+      409,
+      "catalog_batch_idempotency_conflict",
+      "该批量预览幂等键已经用于其他请求。",
+    );
+  }
+
+  try {
+    for (let offset = 0; offset < planned.length; offset += 50) {
+      await db.batch(
+        planned.slice(offset, offset + 50).map((item) =>
+          db
+            .prepare(
+              `INSERT INTO catalog_batch_plan_items
+               (id, plan_id, path, ordinal, platform, http_method, summary,
+                expected_revision, original_upstream_price_usd_micros,
+                original_customer_price_usd_micros,
+                original_price_verified, original_enabled,
+                original_read_only, original_sync_generation,
+                original_reviewed_at, original_updated_at,
+                target_customer_price_usd_micros, target_enabled,
+                target_read_only, will_change, blocker_code, item_digest)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?, ?)`,
+            )
+            .bind(
+              `${planId}:${item.ordinal}`,
+              planId,
+              item.row.path,
+              item.ordinal,
+              item.row.platform,
+              item.row.http_method,
+              item.row.summary,
+              item.row.revision,
+              item.row.upstream_price_usd_micros,
+              item.row.customer_price_usd_micros,
+              item.row.price_verified,
+              item.row.enabled,
+              item.row.read_only,
+              item.row.sync_generation,
+              item.row.reviewed_at,
+              item.row.updated_at,
+              item.targetPrice,
+              item.targetEnabled,
+              item.targetReadOnly,
+              item.willChange ? 1 : 0,
+              item.blockerCode,
+              item.itemDigest,
+            ),
+        ),
+      );
+    }
+    const previewAuditId = `aud_${(
+      await sha256Hex(`catalog.batch_previewed:${planId}`)
+    ).slice(0, 32)}`;
+    const previewedAt = new Date().toISOString();
+    const finalized = await db.batch([
+      db
+        .prepare(
+          `UPDATE catalog_batch_plans
+           SET status = ?, version = 1, previewed_at = ?
+           WHERE id = ? AND status = 'preparing' AND version = 0
+             AND matched_count = (
+               SELECT COUNT(*) FROM catalog_batch_plan_items
+               WHERE plan_id = ?
+             )
+             AND matched_count = (
+               SELECT COUNT(*)
+               FROM catalog_batch_plan_items i
+               JOIN endpoint_catalog e ON e.path = i.path
+               WHERE i.plan_id = ?
+                 AND e.revision = i.expected_revision
+                 AND e.http_method = i.http_method
+                 AND e.upstream_price_usd_micros =
+                     i.original_upstream_price_usd_micros
+                 AND e.customer_price_usd_micros =
+                     i.original_customer_price_usd_micros
+                 AND e.price_verified = i.original_price_verified
+                 AND e.enabled = i.original_enabled
+                 AND e.read_only = i.original_read_only
+                 AND e.sync_generation IS i.original_sync_generation
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM catalog_sync_locks
+               WHERE id = 1
+                 AND datetime(locked_at) >= datetime('now', '-15 minutes')
+             )
+             AND EXISTS (
+               SELECT 1 FROM catalog_sync_state s
+               WHERE s.id = 1
+                 AND s.last_success_generation =
+                     catalog_batch_plans.catalog_generation
+                 AND s.credential_source IS
+                     catalog_batch_plans.credential_source
+                 AND s.credential_id IS
+                     catalog_batch_plans.credential_id
+                 AND s.credential_fingerprint IS
+                     catalog_batch_plans.credential_fingerprint
+                 AND s.credential_state_version IS
+                     catalog_batch_plans.credential_state_version
+                 AND s.openapi_snapshot_hash =
+                     catalog_batch_plans.openapi_snapshot_hash
+                 AND s.price_snapshot_hash =
+                     catalog_batch_plans.price_snapshot_hash
+                 AND ${CATALOG_COVERAGE_WHERE}
+             )`,
+        )
+        .bind(finalStatus, previewedAt, planId, planId, planId),
+      db
+        .prepare(
+          `INSERT OR IGNORE INTO admin_audit_logs
+           (id, actor_fingerprint, action, target_type, target_id,
+            details_json, created_at)
+           SELECT ?, actor_fingerprint, 'catalog.batch_previewed',
+                  'catalog_batch_plan', id, ?, ?
+           FROM catalog_batch_plans
+           WHERE id = ? AND status = ? AND version = 1`,
+        )
+        .bind(
+          previewAuditId,
+          JSON.stringify({
+            action: body.action,
+            matchedCount,
+            selectedCount,
+            blockedCount,
+            targetDigest,
+            catalogGeneration: body.expectedCatalogGeneration,
+          }),
+          previewedAt,
+          planId,
+          finalStatus,
+        ),
+    ]);
+    if (
+      Number(finalized[0]?.meta?.changes ?? 0) !== 1 ||
+      Number(finalized[1]?.meta?.changes ?? 0) !== 1
+    ) {
+      await db
+        .prepare(
+          `UPDATE catalog_batch_plans
+           SET status = 'stale', version = version + 1
+           WHERE id = ? AND status = 'preparing'`,
+        )
+        .bind(planId)
+        .run();
+      throw new PlatformError(
+        409,
+        "catalog_batch_snapshot_stale",
+        "目录在生成预览期间发生变化，请刷新后重试。",
+      );
+    }
+  } catch (error) {
+    if (!(error instanceof PlatformError)) {
+      await db
+        .prepare(
+          `DELETE FROM catalog_batch_plans
+           WHERE id = ? AND status = 'preparing'`,
+        )
+        .bind(planId)
+        .run()
+        .catch(() => undefined);
+    }
+    throw error;
+  }
+  const plan = await catalogBatchPlanById(db, planId, actorFingerprint);
+  if (!plan) {
+    throw new PlatformError(
+      500,
+      "catalog_batch_preview_failed",
+      "批量目录预览保存失败。",
+    );
+  }
+  return await catalogBatchResponse(db, plan, requestId, false, 100, 0);
+}
+
+async function handleCatalogBatchGet(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  requireAdminSecret(request, env, "catalog");
+  const supplied = bearerToken(request);
+  if (!supplied) {
+    throw new PlatformError(401, "admin_unauthorized", "管理员凭证无效。");
+  }
+  const actorFingerprint = await sha256Hex(supplied);
+  const url = new URL(request.url);
+  const planId = normalizeCatalogBatchPlanId(
+    url.pathname.split("/").at(-1) ?? "",
+  );
+  const limit = Number(url.searchParams.get("limit") ?? "100");
+  const offset = Number(url.searchParams.get("offset") ?? "0");
+  if (
+    url.searchParams.getAll("limit").length > 1 ||
+    url.searchParams.getAll("offset").length > 1 ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 200 ||
+    !Number.isSafeInteger(offset) ||
+    offset < 0 ||
+    offset > MAX_CATALOG_BATCH_TARGETS
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_pagination",
+      "批量预览分页参数无效。",
+    );
+  }
+  const db = requireDb(env);
+  const plan = await catalogBatchPlanById(db, planId, actorFingerprint);
+  if (!plan) {
+    throw new PlatformError(
+      404,
+      "catalog_batch_not_found",
+      "没有找到这个批量目录预览。",
+    );
+  }
+  return await catalogBatchResponse(
+    db,
+    plan,
+    requestId,
+    false,
+    limit,
+    offset,
+  );
+}
+
+async function handleCatalogBatchApply(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  requireAdminSecret(request, env, "catalog");
+  const idempotencyKey = requireIdempotencyKey(request);
+  const supplied = bearerToken(request);
+  if (!supplied) {
+    throw new PlatformError(401, "admin_unauthorized", "管理员凭证无效。");
+  }
+  const actorFingerprint = await sha256Hex(supplied);
+  const url = new URL(request.url);
+  const parts = url.pathname.split("/");
+  const planId = normalizeCatalogBatchPlanId(parts.at(-2) ?? "");
+  const raw = await readJsonBody<unknown>(
+    request,
+    MAX_DASHBOARD_BODY_BYTES,
+  );
+  if (
+    !isPlainRecord(raw) ||
+    !Number.isSafeInteger(raw.expectedVersion) ||
+    (raw.expectedVersion as number) < 1 ||
+    typeof raw.previewDigest !== "string" ||
+    !/^[0-9a-f]{64}$/.test(raw.previewDigest) ||
+    typeof raw.confirmation !== "string" ||
+    raw.confirmation.length > 240
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_batch_confirmation",
+      "批量目录应用确认信息无效。",
+    );
+  }
+  const normalizedApply = {
+    planId,
+    expectedVersion: raw.expectedVersion as number,
+    previewDigest: raw.previewDigest,
+    confirmation: raw.confirmation,
+  };
+  const applyRequestHash = await sha256Hex(
+    JSON.stringify(sortObjectDeep(normalizedApply)),
+  );
+  const applyIdempotencyHash = await sha256Hex(
+    `catalog-apply:${actorFingerprint}:${idempotencyKey}`,
+  );
+  const db = requireDb(env);
+  const existingApplyKey = await db
+    .prepare(
+      `SELECT id, actor_fingerprint, apply_request_hash, status
+       FROM catalog_batch_plans
+       WHERE apply_idempotency_hash = ?`,
+    )
+    .bind(applyIdempotencyHash)
+    .first<{
+      id: string;
+      actor_fingerprint: string;
+      apply_request_hash: string | null;
+      status: string;
+    }>();
+  if (
+    existingApplyKey &&
+    (existingApplyKey.id !== planId ||
+      existingApplyKey.actor_fingerprint !== actorFingerprint ||
+      existingApplyKey.apply_request_hash !== applyRequestHash)
+  ) {
+    throw new PlatformError(
+      409,
+      "catalog_batch_idempotency_conflict",
+      "该批量应用幂等键已经用于其他请求。",
+    );
+  }
+  let plan = await catalogBatchPlanById(db, planId, actorFingerprint);
+  if (!plan) {
+    throw new PlatformError(
+      404,
+      "catalog_batch_not_found",
+      "没有找到这个批量目录预览。",
+    );
+  }
+  if (plan.status === "applied") {
+    if (
+      plan.apply_idempotency_hash === applyIdempotencyHash &&
+      plan.apply_request_hash === applyRequestHash
+    ) {
+      return await catalogBatchResponse(
+        db,
+        plan,
+        requestId,
+        true,
+        100,
+        0,
+      );
+    }
+    throw new PlatformError(
+      409,
+      "catalog_batch_already_applied",
+      "这个批量目录预览已经由其他请求应用。",
+    );
+  }
+  if (
+    plan.version !== normalizedApply.expectedVersion ||
+    plan.target_digest !== normalizedApply.previewDigest ||
+    plan.confirmation_text !== normalizedApply.confirmation
+  ) {
+    throw new PlatformError(
+      409,
+      "catalog_batch_confirmation_conflict",
+      "批量目录预览版本、摘要或确认文本不匹配。",
+    );
+  }
+  if (plan.status !== "ready" || plan.blocked_count !== 0) {
+    throw new PlatformError(
+      409,
+      "catalog_batch_not_applicable",
+      "这个批量目录预览当前不能应用。",
+    );
+  }
+  if (Date.parse(plan.expires_at) <= Date.now()) {
+    await db
+      .prepare(
+        `UPDATE catalog_batch_plans
+         SET status = 'expired', version = version + 1
+         WHERE id = ? AND status = 'ready' AND version = ?`,
+      )
+      .bind(plan.id, plan.version)
+      .run();
+    throw new PlatformError(
+      410,
+      "catalog_batch_expired",
+      "这个批量目录预览已经过期，请重新生成。",
+    );
+  }
+  const appliedAt = new Date().toISOString();
+  const resultPayload = {
+    batchId: plan.id,
+    action: plan.action,
+    matched: plan.matched_count,
+    changed: plan.selected_count,
+    targetDigest: plan.target_digest,
+    catalogGeneration: plan.catalog_generation,
+    appliedAt,
+  };
+  const strictSourceClause =
+    plan.action === "disable"
+      ? "1 = 1"
+      : `NOT EXISTS (
+           SELECT 1 FROM catalog_sync_locks
+           WHERE id = 1
+             AND datetime(locked_at) >= datetime('now', '-15 minutes')
+         )
+         AND EXISTS (
+           SELECT 1 FROM catalog_sync_state s
+           WHERE s.id = 1
+             AND s.last_success_generation =
+                 catalog_batch_plans.catalog_generation
+             AND s.credential_source IS
+                 catalog_batch_plans.credential_source
+             AND s.credential_id IS catalog_batch_plans.credential_id
+             AND s.credential_fingerprint IS
+                 catalog_batch_plans.credential_fingerprint
+             AND s.credential_state_version IS
+                 catalog_batch_plans.credential_state_version
+             AND s.openapi_snapshot_hash =
+                 catalog_batch_plans.openapi_snapshot_hash
+             AND s.price_snapshot_hash =
+                 catalog_batch_plans.price_snapshot_hash
+             AND ${CATALOG_COVERAGE_WHERE}
+         )`;
+  const auditId = `aud_${(
+    await sha256Hex(`catalog.batch_applied:${plan.id}`)
+  ).slice(0, 32)}`;
+  const applyResults = await db.batch([
+    db
+      .prepare(
+        `UPDATE catalog_batch_plans
+         SET status = 'applying', version = version + 1,
+             apply_idempotency_hash = ?, apply_request_hash = ?,
+             apply_started_at = ?
+         WHERE id = ? AND actor_fingerprint = ?
+           AND status = 'ready' AND version = ?
+           AND policy_version = ${CATALOG_SAFETY_POLICY_VERSION}
+           AND target_digest = ? AND confirmation_text = ?
+           AND blocked_count = 0 AND selected_count > 0
+           AND datetime(expires_at) > datetime(?)
+           AND ${strictSourceClause}
+           AND matched_count = (
+             SELECT COUNT(*) FROM catalog_batch_plan_items
+             WHERE plan_id = catalog_batch_plans.id
+           )
+           AND matched_count = (
+             SELECT COUNT(*)
+             FROM catalog_batch_plan_items i
+             JOIN endpoint_catalog e ON e.path = i.path
+             WHERE i.plan_id = catalog_batch_plans.id
+               AND e.revision = i.expected_revision
+               AND e.http_method = i.http_method
+               AND e.upstream_price_usd_micros =
+                   i.original_upstream_price_usd_micros
+               AND e.customer_price_usd_micros =
+                   i.original_customer_price_usd_micros
+               AND e.price_verified = i.original_price_verified
+               AND e.enabled = i.original_enabled
+               AND e.read_only = i.original_read_only
+               AND e.sync_generation IS i.original_sync_generation
+               AND (
+                 catalog_batch_plans.action = 'disable'
+                 OR (
+                   e.safety_classification = 'safe_data_read'
+                   AND e.safety_policy_version =
+                       ${CATALOG_SAFETY_POLICY_VERSION}
+                 )
+               )
+           )`,
+      )
+      .bind(
+        applyIdempotencyHash,
+        applyRequestHash,
+        appliedAt,
+        plan.id,
+        actorFingerprint,
+        plan.version,
+        plan.target_digest,
+        plan.confirmation_text,
+        appliedAt,
+      ),
+    db
+      .prepare(
+        `UPDATE endpoint_catalog
+         SET customer_price_usd_micros = (
+               SELECT i.target_customer_price_usd_micros
+               FROM catalog_batch_plan_items i
+               WHERE i.plan_id = ? AND i.path = endpoint_catalog.path
+             ),
+             enabled = (
+               SELECT i.target_enabled
+               FROM catalog_batch_plan_items i
+               WHERE i.plan_id = ? AND i.path = endpoint_catalog.path
+             ),
+             read_only = (
+               SELECT i.target_read_only
+               FROM catalog_batch_plan_items i
+               WHERE i.plan_id = ? AND i.path = endpoint_catalog.path
+             ),
+             reviewed_at = CASE
+               WHEN (
+                 SELECT action FROM catalog_batch_plans WHERE id = ?
+               ) = 'publish'
+               THEN ?
+               ELSE reviewed_at
+             END,
+             revision = revision + 1,
+             updated_at = ?
+         WHERE path IN (
+           SELECT i.path FROM catalog_batch_plan_items i
+           WHERE i.plan_id = ? AND i.will_change = 1
+         )
+           AND EXISTS (
+             SELECT 1 FROM catalog_batch_plans p
+             WHERE p.id = ? AND p.status = 'applying'
+               AND p.apply_idempotency_hash = ?
+               AND p.apply_request_hash = ?
+           )`,
+      )
+      .bind(
+        plan.id,
+        plan.id,
+        plan.id,
+        plan.id,
+        appliedAt,
+        appliedAt,
+        plan.id,
+        plan.id,
+        applyIdempotencyHash,
+        applyRequestHash,
+      ),
+    db
+      .prepare(
+        `UPDATE catalog_batch_plans
+         SET status = 'applied', version = version + 1,
+             apply_result_json = ?, applied_count = selected_count,
+             applied_at = ?
+         WHERE id = ? AND status = 'applying'
+           AND apply_idempotency_hash = ? AND apply_request_hash = ?
+           AND selected_count = (
+             SELECT COUNT(*)
+             FROM catalog_batch_plan_items i
+             JOIN endpoint_catalog e ON e.path = i.path
+             WHERE i.plan_id = catalog_batch_plans.id
+               AND i.will_change = 1
+               AND e.revision = i.expected_revision + 1
+               AND e.customer_price_usd_micros =
+                   i.target_customer_price_usd_micros
+               AND e.enabled = i.target_enabled
+               AND e.read_only = i.target_read_only
+           )`,
+      )
+      .bind(
+        JSON.stringify(resultPayload),
+        appliedAt,
+        plan.id,
+        applyIdempotencyHash,
+        applyRequestHash,
+      ),
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO admin_audit_logs
+         (id, actor_fingerprint, action, target_type, target_id,
+          details_json, created_at)
+         SELECT ?, actor_fingerprint, 'catalog.batch_applied',
+                'catalog_batch_plan', id, ?, ?
+         FROM catalog_batch_plans
+         WHERE id = ? AND status = 'applied'
+           AND apply_idempotency_hash = ? AND apply_request_hash = ?`,
+      )
+      .bind(
+        auditId,
+        JSON.stringify({
+          action: plan.action,
+          matchedCount: plan.matched_count,
+          selectedCount: plan.selected_count,
+          targetDigest: plan.target_digest,
+          beforeDigest: plan.before_digest,
+          afterDigest: plan.after_digest,
+          catalogGeneration: plan.catalog_generation,
+          credentialFingerprint: plan.credential_fingerprint,
+          openApiSnapshotHash: plan.openapi_snapshot_hash,
+          priceSnapshotHash: plan.price_snapshot_hash,
+          policyVersion: plan.policy_version,
+          applyRequestHash,
+        }),
+        appliedAt,
+        plan.id,
+        applyIdempotencyHash,
+        applyRequestHash,
+      ),
+  ]);
+  if (
+    Number(applyResults[0]?.meta?.changes ?? 0) !== 1 ||
+    Number(applyResults[1]?.meta?.changes ?? 0) !== plan.selected_count ||
+    Number(applyResults[2]?.meta?.changes ?? 0) !== 1 ||
+    Number(applyResults[3]?.meta?.changes ?? 0) !== 1
+  ) {
+    plan = await catalogBatchPlanById(db, plan.id, actorFingerprint);
+    if (
+      plan?.status === "applied" &&
+      plan.apply_idempotency_hash === applyIdempotencyHash &&
+      plan.apply_request_hash === applyRequestHash
+    ) {
+      return await catalogBatchResponse(
+        db,
+        plan,
+        requestId,
+        true,
+        100,
+        0,
+      );
+    }
+    if (plan?.status === "ready") {
+      await db
+        .prepare(
+          `UPDATE catalog_batch_plans
+           SET status = 'stale', version = version + 1
+           WHERE id = ? AND status = 'ready' AND version = ?`,
+        )
+        .bind(plan.id, plan.version)
+        .run();
+    }
+    throw new PlatformError(
+      409,
+      "catalog_batch_apply_conflict",
+      "目录、数据源或预览目标已经变化，整批未应用，请重新生成预览。",
+    );
+  }
+  plan = await catalogBatchPlanById(db, plan.id, actorFingerprint);
+  if (!plan || plan.status !== "applied") {
+    throw new PlatformError(
+      500,
+      "catalog_batch_apply_failed",
+      "批量目录应用结果无法确认。",
+    );
+  }
+  return await catalogBatchResponse(db, plan, requestId, false, 100, 0);
+}
+
+function normalizeCatalogBatchPlanId(value: string): string {
+  if (!/^cbp_[A-Za-z0-9_-]{20,80}$/.test(value)) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_batch_id",
+      "批量目录预览编号无效。",
+    );
+  }
+  return value;
+}
+
+async function catalogBatchPlanById(
+  db: D1Database,
+  id: string,
+  actorFingerprint: string,
+): Promise<CatalogBatchPlanRecord | null> {
+  return await db
+    .prepare(
+      `SELECT * FROM catalog_batch_plans
+       WHERE id = ? AND actor_fingerprint = ?`,
+    )
+    .bind(id, actorFingerprint)
+    .first<CatalogBatchPlanRecord>();
+}
+
+async function catalogBatchPlanByPreviewIdempotency(
+  db: D1Database,
+  previewIdempotencyHash: string,
+): Promise<CatalogBatchPlanRecord | null> {
+  return await db
+    .prepare(
+      `SELECT * FROM catalog_batch_plans
+       WHERE preview_idempotency_hash = ?`,
+    )
+    .bind(previewIdempotencyHash)
+    .first<CatalogBatchPlanRecord>();
+}
+
+async function catalogBatchResponse(
+  db: D1Database,
+  plan: CatalogBatchPlanRecord,
+  requestId: string,
+  replayed: boolean,
+  limit: number,
+  offset: number,
+): Promise<Response> {
+  const itemsResult = await db
+    .prepare(
+      `SELECT path, ordinal, platform, http_method, summary,
+              expected_revision, original_upstream_price_usd_micros,
+              original_customer_price_usd_micros, original_price_verified,
+              original_enabled, original_read_only,
+              original_sync_generation, original_reviewed_at,
+              original_updated_at, target_customer_price_usd_micros,
+              target_enabled, target_read_only, will_change, blocker_code,
+              item_digest
+       FROM catalog_batch_plan_items
+       WHERE plan_id = ?
+       ORDER BY ordinal ASC
+       LIMIT ? OFFSET ?`,
+    )
+    .bind(plan.id, limit, offset)
+    .all<CatalogBatchItemRecord>();
+  const items = (itemsResult.results ?? []).map((item) => ({
+    path: item.path,
+    platform: item.platform,
+    method: item.http_method,
+    summary: item.summary,
+    expectedRevision: item.expected_revision,
+    before: {
+      upstreamPriceUsdMicros: item.original_upstream_price_usd_micros,
+      customerPriceUsdMicros: item.original_customer_price_usd_micros,
+      priceVerified: item.original_price_verified === 1,
+      enabled: item.original_enabled === 1,
+      readOnly: item.original_read_only === 1,
+      syncGeneration: item.original_sync_generation,
+      reviewedAt: item.original_reviewed_at,
+      updatedAt: item.original_updated_at,
+    },
+    after: {
+      customerPriceUsdMicros: item.target_customer_price_usd_micros,
+      enabled: item.target_enabled === 1,
+      readOnly: item.target_read_only === 1,
+    },
+    willChange: item.will_change === 1,
+    blockerCode: item.blocker_code,
+    itemDigest: item.item_digest,
+  }));
+  const nextOffset =
+    offset + items.length < plan.matched_count
+      ? offset + items.length
+      : null;
+  let applyResult: unknown = null;
+  if (plan.apply_result_json) {
+    try {
+      applyResult = JSON.parse(plan.apply_result_json) as unknown;
+    } catch {
+      throw new PlatformError(
+        500,
+        "catalog_batch_result_invalid",
+        "批量目录应用回执损坏。",
+      );
+    }
+  }
+  return jsonResponse(
+    {
+      replayed,
+      batch: {
+        id: plan.id,
+        status: plan.status,
+        version: plan.version,
+        action: plan.action,
+        catalogGeneration: plan.catalog_generation,
+        counts: {
+          matched: plan.matched_count,
+          selected: plan.selected_count,
+          blocked: plan.blocked_count,
+          stale: plan.excluded_stale_count,
+          unverified: plan.excluded_unverified_count,
+          unsafe: plan.excluded_unsafe_count,
+          noChange: plan.no_change_count,
+          priceIncrease: plan.price_increase_count,
+          priceDecrease: plan.price_decrease_count,
+          priceUnchanged: plan.price_unchanged_count,
+        },
+        totals: {
+          upstream: plan.upstream_total_usd_micros,
+          beforeCustomer: plan.before_customer_total_usd_micros,
+          afterCustomer: plan.after_customer_total_usd_micros,
+        },
+        targetDigest: plan.target_digest,
+        beforeDigest: plan.before_digest,
+        afterDigest: plan.after_digest,
+        confirmationText: plan.confirmation_text,
+        previewedAt: plan.previewed_at,
+        expiresAt: plan.expires_at,
+        appliedAt: plan.applied_at,
+        applyResult,
+      },
+      items,
+      offset,
+      nextOffset,
     },
     200,
     requestId,
@@ -5096,8 +6677,7 @@ async function handleUpstreamCredentialCreate(
     encryptionKey,
     id,
   );
-  const created = await db
-    .prepare(
+  const createStatement = db.prepare(
       `INSERT INTO upstream_credentials
        (id, provider, label, encrypted_secret, secret_hash,
         verified_scopes_json, expires_at, verified_at, created_at)
@@ -5111,7 +6691,7 @@ async function handleUpstreamCredentialCreate(
        AND (
          SELECT COUNT(*)
          FROM upstream_credentials
-         WHERE provider = 'tikhub'
+         WHERE provider = 'tikhub' AND revoked_at IS NULL
        ) < 100`,
     )
     .bind(
@@ -5123,19 +6703,12 @@ async function handleUpstreamCredentialCreate(
       verification?.expiresAt ?? null,
       body.activate ? 1 : 0,
       secretHash,
-    )
-    .run();
-  if (Number(created.meta?.changes ?? 0) !== 1) {
-    throw new PlatformError(
-      409,
-      "upstream_credential_exists",
-      "相同 TikHub API Key 已经存在。",
     );
-  }
-  await writeAdminAudit(db, request, {
+  const createAudit = await prepareAdminAuditStatement(db, request, {
     action: "upstream_credential.created",
     targetType: "upstream_credential",
     targetId: id,
+    upstreamCredentialExists: { id, secretHash },
     details: {
       provider: "tikhub",
       label,
@@ -5143,6 +6716,33 @@ async function handleUpstreamCredentialCreate(
       activateRequested: body.activate,
     },
   });
+  const created = await db.batch([createStatement, createAudit]);
+  if (
+    Number(created[0]?.meta?.changes ?? 0) !== 1 ||
+    Number(created[1]?.meta?.changes ?? 0) !== 1
+  ) {
+    const duplicate = await db
+      .prepare(
+        `SELECT 1 AS present
+         FROM upstream_credentials
+         WHERE provider = 'tikhub' AND secret_hash = ?
+         LIMIT 1`,
+      )
+      .bind(secretHash)
+      .first<{ present: number }>();
+    if (duplicate) {
+      throw new PlatformError(
+        409,
+        "upstream_credential_exists",
+        "相同 TikHub API Key 已经存在。",
+      );
+    }
+    throw new PlatformError(
+      409,
+      "upstream_credential_limit",
+      "当前未撤销的 TikHub 凭据已达到 100 条安全上限。",
+    );
+  }
 
   let activationConflict = false;
   if (body.activate) {
@@ -5152,6 +6752,7 @@ async function handleUpstreamCredentialCreate(
         request,
         id,
         expectedVersion,
+        verification as TikHubCredentialVerification,
       );
     } catch (error) {
       if (
@@ -5261,33 +6862,26 @@ async function handleUpstreamCredentialUpdate(
       existing.id,
     );
     const verification = await verifyTikHubApiKey(apiKey, env);
-    const storedVerification = await db
-      .prepare(
-        `UPDATE upstream_credentials
-         SET verified_scopes_json = ?, expires_at = ?,
-             verified_at = CURRENT_TIMESTAMP
-         WHERE id = ? AND provider = 'tikhub' AND revoked_at IS NULL`,
-      )
-      .bind(
-        JSON.stringify(verification.scopes),
-        verification.expiresAt,
-        id,
-      )
-      .run();
-    if (Number(storedVerification.meta?.changes ?? 0) !== 1) {
-      throw new PlatformError(
-        409,
-        "upstream_credential_update_conflict",
-        "TikHub 凭据状态已发生变化，请刷新后重试。",
-      );
-    }
     await activateManagedTikHubCredential(
       db,
       request,
       id,
       expectedVersion,
+      verification,
     );
   } else {
+    const revokedAt = new Date().toISOString();
+    const revokeAudit = await prepareAdminAuditStatement(db, request, {
+      action: "upstream_credential.revoked",
+      targetType: "upstream_credential",
+      targetId: id,
+      upstreamCredentialRevocation: { id, revokedAt },
+      details: {
+        provider: "tikhub",
+        label: existing.label,
+        fingerprint: existing.secret_hash.slice(0, 16),
+      },
+    });
     if (existing.status === "active") {
       const revokedActive = await db.batch([
         db
@@ -5302,7 +6896,7 @@ async function handleUpstreamCredentialUpdate(
         db
           .prepare(
             `UPDATE upstream_credentials
-             SET revoked_at = CURRENT_TIMESTAMP,
+             SET revoked_at = ?,
                  encrypted_secret = 'revoked'
              WHERE id = ? AND provider = 'tikhub' AND revoked_at IS NULL
                AND EXISTS (
@@ -5311,7 +6905,7 @@ async function handleUpstreamCredentialUpdate(
                    AND active_credential_id IS NULL AND version = ?
                )`,
           )
-          .bind(id, expectedVersion + 1),
+          .bind(revokedAt, id, expectedVersion + 1),
         db
           .prepare(
             `DELETE FROM catalog_sync_state
@@ -5323,10 +6917,12 @@ async function handleUpstreamCredentialUpdate(
                )`,
           )
           .bind(expectedVersion + 1),
+        revokeAudit,
       ]);
       if (
         Number(revokedActive[0]?.meta?.changes ?? 0) !== 1 ||
-        Number(revokedActive[1]?.meta?.changes ?? 0) !== 1
+        Number(revokedActive[1]?.meta?.changes ?? 0) !== 1 ||
+        Number(revokedActive[3]?.meta?.changes ?? 0) !== 1
       ) {
         throw new PlatformError(
           409,
@@ -5335,10 +6931,11 @@ async function handleUpstreamCredentialUpdate(
         );
       }
     } else {
-      const revoked = await db
-        .prepare(
+      const revoked = await db.batch([
+        db
+          .prepare(
           `UPDATE upstream_credentials
-           SET revoked_at = CURRENT_TIMESTAMP,
+           SET revoked_at = ?,
                encrypted_secret = 'revoked'
            WHERE id = ? AND provider = 'tikhub' AND revoked_at IS NULL
              AND EXISTS (
@@ -5349,10 +6946,14 @@ async function handleUpstreamCredentialUpdate(
                    active_credential_id != ?
                  )
              )`,
-        )
-        .bind(id, expectedVersion, id)
-        .run();
-      if (Number(revoked.meta?.changes ?? 0) !== 1) {
+          )
+          .bind(revokedAt, id, expectedVersion, id),
+        revokeAudit,
+      ]);
+      if (
+        Number(revoked[0]?.meta?.changes ?? 0) !== 1 ||
+        Number(revoked[1]?.meta?.changes ?? 0) !== 1
+      ) {
         throw new PlatformError(
           409,
           "upstream_credential_update_conflict",
@@ -5360,16 +6961,6 @@ async function handleUpstreamCredentialUpdate(
         );
       }
     }
-    await writeAdminAudit(db, request, {
-      action: "upstream_credential.revoked",
-      targetType: "upstream_credential",
-      targetId: id,
-      details: {
-        provider: "tikhub",
-        label: existing.label,
-        fingerprint: existing.secret_hash.slice(0, 16),
-      },
-    });
   }
 
   const updated = await managedTikHubCredentialById(db, id);
@@ -5708,8 +7299,10 @@ async function handleCatalogSync(
                 description, parameter_schema_json,
                 upstream_price_usd_micros,
                 suggested_customer_price_usd_micros,
-                price_verified, looks_read_only, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+                price_verified, looks_read_only, safety_classification,
+                safety_reasons_json, safety_policy_version, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       CURRENT_TIMESTAMP)`,
             )
             .bind(
               `${syncGeneration}:${offset + batchIndex}`,
@@ -5724,6 +7317,9 @@ async function handleCatalogSync(
               customerPrice,
               entry.priceVerified ? 1 : 0,
               entry.looksReadOnly ? 1 : 0,
+              entry.safetyClassification,
+              JSON.stringify(entry.safetyReasons),
+              entry.safetyPolicyVersion,
             );
         });
       await db.batch(statements);
@@ -5761,6 +7357,29 @@ async function handleCatalogSync(
     }
     const managedCredentialFlag =
       credential.source === "managed" ? 1 : 0;
+    const syncAudit = await prepareAdminAuditStatement(db, request, {
+      action: "catalog.synced",
+      targetType: "catalog_generation",
+      targetId: syncGeneration,
+      catalogSyncGeneration: syncGeneration,
+      details: {
+        synced,
+        openApiVersion,
+        openApiOperations: openApi.size,
+        rawPriceRows: priceCatalog.rawRecordCount,
+        normalizedPrices: prices.length,
+        openApiPriceMapped: coverageBreakdown.openApiPriceMapped,
+        priceOnly: coverageBreakdown.priceOnly,
+        openApiOnly: coverageBreakdown.openApiOnly,
+        scopeExcluded: coverageBreakdown.scopeExcluded,
+        priced: pricedEntries,
+        positivePrice: positivePriceEntries,
+        zeroPrice: zeroPriceEntries,
+        awaitingPrice: awaitingPriceEntries,
+        openApiSnapshotHash,
+        priceSnapshotHash,
+      },
+    });
     const finalization = await db.batch([
       db
         .prepare(
@@ -5768,12 +7387,15 @@ async function handleCatalogSync(
            (path, platform, http_method, summary, description,
             parameter_schema_json, upstream_price_usd_micros,
             customer_price_usd_micros, price_verified, enabled, read_only,
-            source_updated_at, sync_generation, created_at, updated_at)
+            safety_classification, safety_reasons_json,
+            safety_policy_version, revision, source_updated_at,
+            sync_generation, created_at, updated_at)
            SELECT s.path, s.platform, s.http_method, s.summary,
                   s.description, s.parameter_schema_json,
                   s.upstream_price_usd_micros,
                   s.suggested_customer_price_usd_micros,
-                  s.price_verified, 0, s.looks_read_only,
+                  s.price_verified, 0, 0, s.safety_classification,
+                  s.safety_reasons_json, s.safety_policy_version, 0,
                   CURRENT_TIMESTAMP, s.generation,
                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
            FROM catalog_sync_staging s
@@ -5796,6 +7418,9 @@ async function handleCatalogSync(
              parameter_schema_json = excluded.parameter_schema_json,
              upstream_price_usd_micros = excluded.upstream_price_usd_micros,
              price_verified = excluded.price_verified,
+             safety_classification = excluded.safety_classification,
+             safety_reasons_json = excluded.safety_reasons_json,
+             safety_policy_version = excluded.safety_policy_version,
              customer_price_usd_micros =
                endpoint_catalog.customer_price_usd_micros,
              enabled = CASE
@@ -5803,11 +7428,21 @@ async function handleCatalogSync(
                  OR endpoint_catalog.http_method != excluded.http_method
                  OR endpoint_catalog.upstream_price_usd_micros !=
                     excluded.upstream_price_usd_micros
+                 OR endpoint_catalog.safety_classification !=
+                    excluded.safety_classification
+                 OR endpoint_catalog.safety_policy_version !=
+                    excluded.safety_policy_version
+                 OR excluded.safety_classification = 'prohibited'
                THEN 0
                ELSE endpoint_catalog.enabled
              END,
              read_only = CASE
-               WHEN excluded.read_only = 0 THEN 0
+               WHEN endpoint_catalog.safety_classification !=
+                      excluded.safety_classification
+                 OR endpoint_catalog.safety_policy_version !=
+                      excluded.safety_policy_version
+                 OR excluded.safety_classification = 'prohibited'
+               THEN 0
                ELSE endpoint_catalog.read_only
              END,
              reviewed_at = CASE
@@ -5815,10 +7450,15 @@ async function handleCatalogSync(
                  OR endpoint_catalog.http_method != excluded.http_method
                  OR endpoint_catalog.upstream_price_usd_micros !=
                     excluded.upstream_price_usd_micros
-                 OR excluded.read_only = 0
+                 OR endpoint_catalog.safety_classification !=
+                    excluded.safety_classification
+                 OR endpoint_catalog.safety_policy_version !=
+                    excluded.safety_policy_version
+                 OR excluded.safety_classification = 'prohibited'
                THEN NULL
                ELSE endpoint_catalog.reviewed_at
              END,
+             revision = endpoint_catalog.revision + 1,
              sync_generation = excluded.sync_generation,
              source_updated_at = CURRENT_TIMESTAMP,
              updated_at = CURRENT_TIMESTAMP`,
@@ -5834,7 +7474,8 @@ async function handleCatalogSync(
         .prepare(
           `UPDATE endpoint_catalog
            SET enabled = 0, reviewed_at = NULL, source_updated_at = NULL,
-               sync_generation = NULL, updated_at = CURRENT_TIMESTAMP
+               sync_generation = NULL, revision = revision + 1,
+               updated_at = CURRENT_TIMESTAMP
            WHERE NOT EXISTS (
              SELECT 1
              FROM catalog_sync_staging s
@@ -5933,6 +7574,7 @@ async function handleCatalogSync(
           managedCredentialFlag,
           credential.id,
         ),
+      syncAudit,
       db
         .prepare(
           `DELETE FROM catalog_sync_staging
@@ -5940,6 +7582,16 @@ async function handleCatalogSync(
         )
         .bind(syncGeneration),
     ]);
+    if (
+      Number(finalization[2]?.meta?.changes ?? 0) !== 1 ||
+      Number(finalization[3]?.meta?.changes ?? 0) !== 1
+    ) {
+      throw new PlatformError(
+        409,
+        "catalog_sync_lease_lost",
+        "目录同步发布或审计未能原子确认，本次快照不可用。",
+      );
+    }
     const published = await db
       .prepare(
         `SELECT last_success_generation, credential_source,
@@ -5969,30 +7621,6 @@ async function handleCatalogSync(
         "目录同步租约已失效，本次快照未发布。",
       );
     }
-    await writeAdminAudit(db, request, {
-      action: "catalog.synced",
-      targetType: "catalog_generation",
-      targetId: syncGeneration,
-      details: {
-        synced,
-        openApiVersion,
-        openApiOperations: openApi.size,
-        rawPriceRows: priceCatalog.rawRecordCount,
-        normalizedPrices: prices.length,
-        openApiPriceMapped: coverageBreakdown.openApiPriceMapped,
-        priceOnly: coverageBreakdown.priceOnly,
-        openApiOnly: coverageBreakdown.openApiOnly,
-        scopeExcluded: coverageBreakdown.scopeExcluded,
-        priced: pricedEntries,
-        positivePrice: positivePriceEntries,
-        zeroPrice: zeroPriceEntries,
-        awaitingPrice: awaitingPriceEntries,
-        openApiSnapshotHash,
-        priceSnapshotHash,
-        disabledMissing: Number(finalization[1]?.meta?.changes ?? 0),
-      },
-    });
-
     return jsonResponse(
       {
         synced,
@@ -6045,6 +7673,7 @@ async function handleCatalogUpdate(
     enabled?: unknown;
     readOnly?: unknown;
     customerPriceUsdMicros?: unknown;
+    expectedRevision?: unknown;
   }>(request, MAX_DASHBOARD_BODY_BYTES);
   if (typeof body.path !== "string") {
     throw new PlatformError(400, "invalid_endpoint", "端点路径无效。");
@@ -6052,12 +7681,14 @@ async function handleCatalogUpdate(
   const path = normalizeCatalogPath(body.path);
   if (
     typeof body.enabled !== "boolean" ||
-    typeof body.readOnly !== "boolean"
+    typeof body.readOnly !== "boolean" ||
+    !Number.isSafeInteger(body.expectedRevision) ||
+    (body.expectedRevision as number) < 0
   ) {
     throw new PlatformError(
       400,
       "invalid_endpoint_review",
-      "必须明确设置 enabled 与 readOnly。",
+      "必须明确设置 enabled、readOnly 与当前 revision。",
     );
   }
   if (body.enabled && !body.readOnly) {
@@ -6082,8 +7713,10 @@ async function handleCatalogUpdate(
   const db = requireDb(env);
   const existing = await db
     .prepare(
-      `SELECT http_method, upstream_price_usd_micros, price_verified,
-              sync_generation,
+      `SELECT http_method, upstream_price_usd_micros,
+              customer_price_usd_micros, price_verified, enabled,
+              read_only, safety_classification, safety_policy_version,
+              revision, sync_generation,
               (
                 SELECT last_success_generation
                 FROM catalog_sync_state
@@ -6095,8 +7728,14 @@ async function handleCatalogUpdate(
     .bind(path)
     .first<{
       upstream_price_usd_micros: number;
+      customer_price_usd_micros: number;
       http_method: string;
       price_verified: number;
+      enabled: number;
+      read_only: number;
+      safety_classification: CatalogSafetyClassification;
+      safety_policy_version: number;
+      revision: number;
       sync_generation: string | null;
       last_success_generation: string | null;
     }>();
@@ -6137,10 +7776,12 @@ async function handleCatalogUpdate(
   }
   if (
     body.readOnly &&
-    !looksLikeReadOnlyOperation(
-      path,
-      existing.http_method as "GET" | "POST",
-    )
+    (existing.safety_classification !== "safe_data_read" ||
+      existing.safety_policy_version !== CATALOG_SAFETY_POLICY_VERSION ||
+      isHardProhibitedCatalogOperation(
+        path,
+        existing.http_method as "GET" | "POST",
+      ))
   ) {
     throw new PlatformError(
       403,
@@ -6155,15 +7796,20 @@ async function handleCatalogUpdate(
       "该端点尚未从 TikHub 价格目录获得可验证价格，不能启用。",
     );
   }
-  const result = await db
-    .prepare(
+  const nextRevision = existing.revision + 1;
+  const updateStatement = db.prepare(
       `UPDATE endpoint_catalog
        SET enabled = ?, read_only = ?, customer_price_usd_micros = ?,
-           reviewed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+           reviewed_at = CURRENT_TIMESTAMP, revision = revision + 1,
+           updated_at = CURRENT_TIMESTAMP
        WHERE path = ?
+         AND revision = ?
          AND http_method = ?
          AND upstream_price_usd_micros = ?
+         AND customer_price_usd_micros = ?
          AND price_verified = ?
+         AND enabled = ?
+         AND read_only = ?
          AND sync_generation IS ?
          AND ? >= upstream_price_usd_micros
          AND (
@@ -6183,36 +7829,59 @@ async function handleCatalogUpdate(
       body.readOnly ? 1 : 0,
       price,
       path,
+      body.expectedRevision,
       existing.http_method,
       existing.upstream_price_usd_micros,
+      existing.customer_price_usd_micros,
       existing.price_verified,
+      existing.enabled,
+      existing.read_only,
       existing.sync_generation,
       price,
       body.enabled ? 1 : 0,
-    )
-    .run();
-  if (Number(result.meta?.changes ?? 0) !== 1) {
+    );
+  const auditStatement = await prepareAdminAuditStatement(db, request, {
+    action: "catalog.endpoint_updated",
+    targetType: "catalog_endpoint",
+    targetId: path,
+    catalogEndpointRevision: { path, revision: nextRevision },
+    details: {
+      before: {
+        revision: existing.revision,
+        enabled: existing.enabled === 1,
+        readOnly: existing.read_only === 1,
+        customerPriceUsdMicros: existing.customer_price_usd_micros,
+      },
+      after: {
+        revision: nextRevision,
+        enabled: body.enabled,
+        readOnly: body.readOnly,
+        customerPriceUsdMicros: price,
+      },
+      safetyClassification: existing.safety_classification,
+      upstreamPriceUsdMicros: existing.upstream_price_usd_micros,
+      syncGeneration: existing.sync_generation,
+    },
+  });
+  const results = await db.batch([updateStatement, auditStatement]);
+  if (
+    Number(results[0]?.meta?.changes ?? 0) !== 1 ||
+    Number(results[1]?.meta?.changes ?? 0) !== 1
+  ) {
     throw new PlatformError(
       409,
       "catalog_update_conflict",
       "目录在审核期间发生变化，请刷新后重新确认成本与状态。",
     );
   }
-  await writeAdminAudit(db, request, {
-    action: "catalog.endpoint_updated",
-    targetType: "catalog_endpoint",
-    targetId: path,
-    details: {
+  return jsonResponse(
+    {
+      ok: true,
+      path,
       enabled: body.enabled,
       readOnly: body.readOnly,
-      customerPriceUsdMicros: price,
-      upstreamPriceUsdMicros: existing.upstream_price_usd_micros,
-      syncGeneration: existing.sync_generation,
+      revision: nextRevision,
     },
-  });
-
-  return jsonResponse(
-    { ok: true, path, enabled: body.enabled, readOnly: body.readOnly },
     200,
     requestId,
   );
@@ -6890,7 +8559,12 @@ async function managedTikHubCredentialsSnapshot(
          JOIN upstream_credential_state s
            ON s.provider = c.provider
          WHERE c.provider = 'tikhub'
-         ORDER BY c.created_at DESC, c.id DESC
+         ORDER BY CASE
+                    WHEN s.active_credential_id = c.id THEN 0
+                    WHEN c.revoked_at IS NULL THEN 1
+                    ELSE 2
+                  END,
+                  c.created_at DESC, c.id DESC
          LIMIT 100`,
       )
       .all<ManagedUpstreamCredentialRecord>();
@@ -7017,6 +8691,7 @@ async function activateManagedTikHubCredential(
   request: Request,
   id: string,
   expectedVersion: number,
+  verification: TikHubCredentialVerification,
 ): Promise<void> {
   const existing = await managedTikHubCredentialById(db, id);
   if (!existing) {
@@ -7033,42 +8708,22 @@ async function activateManagedTikHubCredential(
       "已撤销的 TikHub 凭据不能再次使用。",
     );
   }
-  const activated = await db
-    .prepare(
-      `UPDATE upstream_credential_state
-       SET managed_enabled = 1, active_credential_id = ?,
-           version = version + 1, updated_at = CURRENT_TIMESTAMP
-       WHERE provider = 'tikhub' AND version = ?
-         AND EXISTS (
-           SELECT 1 FROM upstream_credentials
-           WHERE id = ? AND provider = 'tikhub' AND revoked_at IS NULL
-         )`,
-    )
-    .bind(id, expectedVersion, id)
-    .run();
-  if (Number(activated.meta?.changes ?? 0) !== 1) {
-    throw new PlatformError(
-      409,
-      "upstream_credential_update_conflict",
-      "TikHub 活动凭据已发生变化，请刷新后重试。",
-    );
-  }
-  await db
-    .prepare(
-      `DELETE FROM catalog_sync_state
-       WHERE id = 1
-         AND EXISTS (
-           SELECT 1 FROM upstream_credential_state
-           WHERE provider = 'tikhub' AND managed_enabled = 1
-             AND active_credential_id = ? AND version = ?
-         )`,
-    )
-    .bind(id, expectedVersion + 1)
-    .run();
-  await writeAdminAudit(db, request, {
+  const nextVersion = expectedVersion + 1;
+  const activatedAt = new Date().toISOString();
+  const verifiedScopesJson = JSON.stringify(verification.scopes);
+  const activationAudit = await prepareAdminAuditStatement(db, request, {
     action: "upstream_credential.activated",
     targetType: "upstream_credential",
     targetId: id,
+    upstreamCredentialActivation: {
+      id,
+      stateVersion: nextVersion,
+      updatedAt: activatedAt,
+      verifiedAt: activatedAt,
+      verifiedScopesJson,
+      expiresAt: verification.expiresAt,
+      secretHash: existing.secret_hash,
+    },
     details: {
       provider: "tikhub",
       label: existing.label,
@@ -7076,6 +8731,74 @@ async function activateManagedTikHubCredential(
       previousStateVersion: expectedVersion,
     },
   });
+  const activated = await db.batch([
+    db
+      .prepare(
+        `UPDATE upstream_credentials
+         SET verified_scopes_json = ?, expires_at = ?, verified_at = ?
+         WHERE id = ? AND provider = 'tikhub' AND revoked_at IS NULL
+           AND secret_hash = ?
+           AND EXISTS (
+             SELECT 1 FROM upstream_credential_state
+             WHERE provider = 'tikhub' AND version = ?
+           )`,
+      )
+      .bind(
+        verifiedScopesJson,
+        verification.expiresAt,
+        activatedAt,
+        id,
+        existing.secret_hash,
+        expectedVersion,
+      ),
+    db
+      .prepare(
+      `UPDATE upstream_credential_state
+       SET managed_enabled = 1, active_credential_id = ?,
+           version = version + 1, updated_at = ?
+       WHERE provider = 'tikhub' AND version = ?
+         AND EXISTS (
+           SELECT 1 FROM upstream_credentials
+           WHERE id = ? AND provider = 'tikhub' AND revoked_at IS NULL
+             AND secret_hash = ? AND verified_scopes_json = ?
+             AND expires_at IS ? AND verified_at = ?
+         )`,
+      )
+      .bind(
+        id,
+        activatedAt,
+        expectedVersion,
+        id,
+        existing.secret_hash,
+        verifiedScopesJson,
+        verification.expiresAt,
+        activatedAt,
+      ),
+    db
+      .prepare(
+        `DELETE FROM catalog_sync_state
+         WHERE id = 1
+           AND EXISTS (
+             SELECT 1 FROM upstream_credential_state
+             WHERE provider = 'tikhub' AND managed_enabled = 1
+               AND active_credential_id = ? AND version = ?
+               AND updated_at = ?
+           )`,
+      )
+      .bind(id, nextVersion, activatedAt),
+    activationAudit,
+  ]);
+  if (
+    Number(activated[0]?.meta?.changes ?? 0) !== 1 ||
+    Number(activated[1]?.meta?.changes ?? 0) !== 1 ||
+    Number(activated[3]?.meta?.changes ?? 0) !== 1
+  ) {
+    throw new PlatformError(
+      409,
+      "upstream_credential_update_conflict",
+      "TikHub 活动凭据已发生变化，请刷新后重试。",
+    );
+  }
 }
 
 function sanitizeUpstreamCredentialLabel(value: unknown): string {
@@ -7220,17 +8943,44 @@ async function verifyTikHubApiKey(
   env: PlatformEnv,
 ): Promise<TikHubCredentialVerification> {
   const upstreamBase = normalizeUpstreamBase(env.TIKHUB_BASE_URL);
-  let response: Response;
-  try {
-    response = await fetch(`${upstreamBase}/tikhub/user/get_user_info`, {
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        accept: "application/json",
-      },
-      redirect: "error",
-      signal: AbortSignal.timeout(10_000),
-    });
-  } catch {
+  let response: Response | null = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const candidate = await fetch(
+        `${upstreamBase}/tikhub/user/get_user_info`,
+        {
+          headers: {
+            authorization: `Bearer ${apiKey}`,
+            accept: "application/json",
+          },
+          redirect: "error",
+          signal: AbortSignal.timeout(
+            clampInteger(
+              env.UPSTREAM_TIMEOUT_MS,
+              30_000,
+              30_000,
+              60_000,
+            ),
+          ),
+        },
+      );
+      const transient =
+        candidate.status === 408 ||
+        candidate.status === 429 ||
+        candidate.status >= 500;
+      if (!transient || attempt === 2) {
+        response = candidate;
+        break;
+      }
+      await candidate.body?.cancel("retry transient verification");
+    } catch {
+      if (attempt === 2) break;
+    }
+    await new Promise((resolve) =>
+      setTimeout(resolve, 250 * 2 ** attempt),
+    );
+  }
+  if (!response) {
     throw new PlatformError(
       502,
       "upstream_credential_verification_failed",
@@ -7637,6 +9387,8 @@ async function operationalReadiness(env: PlatformEnv) {
                FROM endpoint_catalog
                WHERE enabled = 1 AND read_only = 1
                  AND price_verified = 1
+                 AND safety_classification = 'safe_data_read'
+                 AND safety_policy_version = ${CATALOG_SAFETY_POLICY_VERSION}
                  AND sync_generation = (
                    SELECT last_success_generation
                    FROM catalog_sync_state
@@ -7680,6 +9432,9 @@ async function operationalReadiness(env: PlatformEnv) {
                AS catalog_coverage_schema,
              (SELECT generation FROM catalog_sync_staging LIMIT 1)
                AS catalog_sync_staging_schema,
+             (SELECT safety_classification
+              FROM catalog_sync_staging LIMIT 1)
+               AS catalog_staging_safety_schema,
              (SELECT idempotency_hash FROM payment_orders LIMIT 1)
                AS payment_idempotency_schema,
              (SELECT upstream_cost_usd_micros FROM api_calls LIMIT 1)
@@ -7690,6 +9445,15 @@ async function operationalReadiness(env: PlatformEnv) {
                AS http_method_schema,
              (SELECT price_verified FROM endpoint_catalog LIMIT 1)
                AS price_verified_schema,
+             (SELECT safety_classification FROM endpoint_catalog LIMIT 1)
+               AS catalog_safety_schema,
+             (SELECT revision FROM endpoint_catalog LIMIT 1)
+               AS catalog_revision_schema,
+             (SELECT target_digest FROM catalog_batch_plans LIMIT 1)
+               AS catalog_batch_plans_schema,
+             (SELECT expected_revision
+              FROM catalog_batch_plan_items LIMIT 1)
+               AS catalog_batch_items_schema,
              (SELECT provider FROM auth_identities LIMIT 1)
                AS auth_identities_schema,
              (SELECT provider FROM auth_sessions LIMIT 1)
@@ -8391,6 +10155,9 @@ type CatalogSyncEntry = {
   upstreamPriceUsdMicros: number;
   priceVerified: boolean;
   looksReadOnly: boolean;
+  safetyClassification: CatalogSafetyClassification;
+  safetyReasons: string[];
+  safetyPolicyVersion: number;
 };
 
 type CatalogPriceEntry = {
@@ -8648,15 +10415,27 @@ function extractOpenApiCatalog(
       try {
         const path = normalizeCatalogPath(rawPath);
         const httpMethod = method.toUpperCase() as "GET" | "POST";
+        const pathParameters = Array.isArray(pathItem.parameters)
+          ? pathItem.parameters
+          : [];
+        const operationParameters = Array.isArray(operation.parameters)
+          ? operation.parameters
+          : [];
+        const mergedParameters = [
+          ...pathParameters,
+          ...operationParameters,
+        ];
         const schemaPayload = {
-          parameters: Array.isArray(operation.parameters)
-            ? operation.parameters
-            : [],
+          parameters: mergedParameters,
           requestBody: isPlainRecord(operation.requestBody)
             ? operation.requestBody
             : null,
         };
         const serializedSchema = JSON.stringify(schemaPayload);
+        const safety = classifyCatalogSafety(path, httpMethod, {
+          ...operation,
+          parameters: mergedParameters,
+        });
         const entry = {
           path,
           platform: path.split("/")[2] || "other",
@@ -8667,7 +10446,10 @@ function extractOpenApiCatalog(
             serializedSchema.length <= 16_384
               ? serializedSchema
               : JSON.stringify({ truncated: true }),
-          looksReadOnly: looksLikeReadOnlyOperation(path, httpMethod),
+          looksReadOnly: safety.classification === "safe_data_read",
+          safetyClassification: safety.classification,
+          safetyReasons: safety.reasons,
+          safetyPolicyVersion: CATALOG_SAFETY_POLICY_VERSION,
         };
         if (selected == null || httpMethod === "GET") selected = entry;
       } catch {
@@ -8760,6 +10542,28 @@ function safeStoredJson(value: string | null): unknown {
   }
 }
 
+function safeStoredStringArray(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length > 32 ||
+      !parsed.every(
+        (item) =>
+          typeof item === "string" &&
+          item.length > 0 &&
+          item.length <= 160,
+      )
+    ) {
+      return [];
+    }
+    return parsed;
+  } catch {
+    return [];
+  }
+}
+
 function normalizeCatalogPath(value: string): string {
   try {
     let path = value.trim();
@@ -8792,51 +10596,285 @@ function normalizeCatalogPath(value: string): string {
 }
 
 function looksLikeReadOnlyPath(path: string): boolean {
-  const normalized = path.toLowerCase();
-  const blockedSignals = [
-    "/creator/",
-    "publish_",
-    "create_",
-    "delete_",
-    "remove_",
-    "send_",
-    "reply_",
-    "increase_",
-    "follow_",
-    "unfollow_",
-    "like_",
-    "login",
-    "captcha",
-    "verify_code",
-    "temp_email",
-    "signature",
-    "sign_url",
-    "get_guest_cookie",
-    "register_device",
-    "generate_ms_token",
-    "update_",
-    "upload_",
-    "set_cookie",
-    "/tikhub/",
-    "/demo/",
-    "encrypt_",
-    "decrypt_",
-    "add_",
-    "open_",
-  ];
-  return !blockedSignals.some((signal) => normalized.includes(signal));
+  return !catalogHardBlockedSignals(path).length;
 }
 
-function looksLikeReadOnlyOperation(
+function canonicalCatalogInputField(value: string): string {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .replace(/_+/g, "_")
+    .toLowerCase();
+}
+
+function catalogInputFieldRisk(
+  value: string,
+): "prohibited" | "ambiguous" | null {
+  const canonical = canonicalCatalogInputField(value);
+  const compact = canonical.replaceAll("_", "");
+  const allowedTokens = new Set([
+    "pagination_token",
+    "page_token",
+    "cursor_token",
+    "continuation_token",
+    "next_token",
+  ]);
+  const allowedTokenCompacts = new Set(
+    [...allowedTokens].map((field) => field.replaceAll("_", "")),
+  );
+  if (
+    allowedTokens.has(canonical) ||
+    allowedTokenCompacts.has(compact)
+  ) {
+    return null;
+  }
+  const sensitive = new Set([
+    "cookie",
+    "cookies",
+    "session",
+    "session_id",
+    "access_token",
+    "refresh_token",
+    "auth_token",
+    "authorization",
+    "password",
+    "secret",
+    "api_key",
+    "private_key",
+    "proxy",
+    "proxy_url",
+    "proxy_username",
+    "proxy_password",
+    "ms_token",
+    "device_id",
+  ]);
+  const sensitiveCompacts = new Set(
+    [...sensitive].map((field) => field.replaceAll("_", "")),
+  );
+  if (sensitive.has(canonical) || sensitiveCompacts.has(compact)) {
+    return "prohibited";
+  }
+  const segments = canonical.split("_").filter(Boolean);
+  const prohibitedSegments = new Set([
+    "cookie",
+    "cookies",
+    "session",
+    "password",
+    "secret",
+    "proxy",
+    "authorization",
+    "device",
+  ]);
+  if (
+    segments.some((segment) => prohibitedSegments.has(segment)) ||
+    /(?:^|_)(?:api|private)_key$/.test(canonical) ||
+    /(?:^|_)(?:access|refresh|auth|ms|device)_token$/.test(canonical) ||
+    /(?:^|_)device_id$/.test(canonical)
+  ) {
+    return "prohibited";
+  }
+  return segments.includes("token") ? "ambiguous" : null;
+}
+
+function catalogInputRisks(value: unknown): {
+  prohibited: string[];
+  ambiguous: string[];
+} {
+  const prohibited = new Set<string>();
+  const ambiguous = new Set<string>();
+  const visit = (input: unknown, depth: number): void => {
+    if (depth > 32) {
+      ambiguous.add("input_schema_too_deep");
+      return;
+    }
+    if (Array.isArray(input)) {
+      for (const item of input) visit(item, depth + 1);
+      return;
+    }
+    if (!isPlainRecord(input)) return;
+    for (const [key, child] of Object.entries(input)) {
+      const keyRisk = catalogInputFieldRisk(key);
+      if (keyRisk === "prohibited") {
+        prohibited.add(
+          `sensitive_input:${canonicalCatalogInputField(key)}`,
+        );
+      } else if (keyRisk === "ambiguous") {
+        ambiguous.add("generic_token_input");
+      }
+      if (
+        canonicalCatalogInputField(key) === "name" &&
+        typeof child === "string"
+      ) {
+        const valueRisk = catalogInputFieldRisk(child);
+        if (valueRisk === "prohibited") {
+          prohibited.add(
+            `sensitive_input:${canonicalCatalogInputField(child)}`,
+          );
+        } else if (valueRisk === "ambiguous") {
+          ambiguous.add("generic_token_input");
+        }
+      }
+      visit(child, depth + 1);
+    }
+  };
+  visit(value, 0);
+  return {
+    prohibited: [...prohibited].sort().slice(0, 8),
+    ambiguous: [...ambiguous].sort().slice(0, 8),
+  };
+}
+
+function catalogHardBlockedSignals(path: string): string[] {
+  const normalized = path.toLowerCase();
+  const operation = canonicalCatalogInputField(
+    normalized.split("/").pop() ?? "",
+  );
+  const reasons: string[] = [];
+  if (/^\/v1\/(?:tikhub|demo)\//.test(normalized)) {
+    reasons.push("control_namespace");
+  }
+  reasons.push(...catalogOperationWriteSignals(operation));
+  if (
+    /^(?:check_?in|sign_?in)(?:_|$)/.test(operation) ||
+    /(?:captcha|verify_code|temp_email|get_guest_cookie|set_cookie|register_device|generate_ms_token|signature|sign_url|encrypt_|decrypt_)/.test(
+      operation,
+    )
+  ) {
+    reasons.push("sensitive_utility");
+  }
+  return reasons;
+}
+
+function catalogOperationWriteSignals(operation: string): string[] {
+  const normalized = canonicalCatalogInputField(operation);
+  const writeAction =
+    "(?:publish|create|delete|remove|send|reply|increase|follow|unfollow|" +
+    "like|unlike|favorite|unfavorite|collect|uncollect|update|upload|" +
+    "set|add|open|close|bind|unbind|modify|edit|submit|register|login|" +
+    "logout|purchase|checkout|pay|withdraw|transfer|recharge|claim|" +
+    "redeem|subscribe|unsubscribe|block|unblock|report|pin|unpin|comment|" +
+    "repost|retweet|share|vote|react|message|join|leave|invite|approve|" +
+    "cancel|bookmark|star)";
+  const prefix = normalized.match(
+    new RegExp(`^(${writeAction})(?:_|$)`),
+  );
+  const chained = normalized.match(
+    new RegExp(`_(?:(?:and_)?then|and)_(${writeAction})(?:_|$)`),
+  );
+  return [
+    ...(prefix ? [`write_action:${prefix[1]}`] : []),
+    ...(chained ? [`chained_write_action:${chained[1]}`] : []),
+  ];
+}
+
+function isHardProhibitedCatalogOperation(
   path: string,
   method: "GET" | "POST",
 ): boolean {
-  if (!looksLikeReadOnlyPath(path)) return false;
-  if (method === "GET") return true;
-  const operation = path.split("/").pop()?.toLowerCase() ?? "";
-  return /^(fetch|get|search|query|batch_fetch|batch_get|parse|resolve|calculate|check|list)_/.test(
-    operation,
-  );
+  if (method !== "GET" && method !== "POST") return true;
+  return catalogHardBlockedSignals(path).length > 0;
+}
+
+function classifyCatalogSafety(
+  path: string,
+  method: "GET" | "POST",
+  operation?: Record<string, unknown>,
+): CatalogSafetyAssessment {
+  const pathSignals = catalogHardBlockedSignals(path);
+  if (pathSignals.length > 0) {
+    return {
+      classification: "prohibited",
+      reasons: pathSignals.slice(0, 8),
+    };
+  }
+  let inputMetadata = "";
+  let summaryMetadata = "";
+  let operationId = "";
+  if (operation) {
+    try {
+      inputMetadata = JSON.stringify({
+        parameters: operation.parameters ?? null,
+        requestBody: operation.requestBody ?? null,
+      }).toLowerCase();
+      summaryMetadata =
+        typeof operation.summary === "string"
+          ? operation.summary.trim().toLowerCase()
+          : "";
+      operationId =
+        typeof operation.operationId === "string"
+          ? operation.operationId.trim()
+          : "";
+    } catch {
+      return {
+        classification: "ambiguous",
+        reasons: ["operation_metadata_unreadable"],
+      };
+    }
+  }
+  const operationIdWriteSignals =
+    catalogOperationWriteSignals(operationId);
+  if (operationIdWriteSignals.length > 0) {
+    return {
+      classification: "prohibited",
+      reasons: operationIdWriteSignals.slice(0, 8),
+    };
+  }
+  if (
+    /^(?:publish|create|delete|remove|send|reply|follow|unfollow|like|upload|login|withdraw|pay|发布|创建|删除|关注|点赞|上传|登录|提现|支付)(?:\b|[：:，,\s])/.test(
+      summaryMetadata,
+    )
+  ) {
+    return {
+      classification: "prohibited",
+      reasons: ["mutation_summary"],
+    };
+  }
+  const summaryWriteSignals =
+    catalogOperationWriteSignals(summaryMetadata);
+  if (summaryWriteSignals.length > 0) {
+    return {
+      classification: "prohibited",
+      reasons: ["mutation_summary", ...summaryWriteSignals].slice(0, 8),
+    };
+  }
+  const inputRisks = catalogInputRisks({
+    parameters: operation?.parameters ?? null,
+    requestBody: operation?.requestBody ?? null,
+  });
+  if (inputRisks.prohibited.length > 0) {
+    return {
+      classification: "prohibited",
+      reasons: inputRisks.prohibited,
+    };
+  }
+  const ambiguousReasons: string[] = [];
+  if (!operation) ambiguousReasons.push("openapi_metadata_missing");
+  if (inputMetadata.includes('"$ref"')) {
+    ambiguousReasons.push("unresolved_schema_reference");
+  }
+  ambiguousReasons.push(...inputRisks.ambiguous);
+  const operationName = path.split("/").pop()?.toLowerCase() ?? "";
+  const canonicalOperationId =
+    canonicalCatalogInputField(operationId);
+  const safeVerb =
+    /^(?:batch_(?:fetch|get|search|query)|fetch|get|search|query|list|parse|resolve|calculate|check|analyze|analyse|extract)(?:_|$)/.test(
+      operationName,
+    ) ||
+    /^(?:batch_(?:fetch|get|search|query)|fetch|get|search|query|list|parse|resolve|calculate|check|analyze|analyse|extract)(?:[_-]|$)/.test(
+      canonicalOperationId,
+    );
+  if (!safeVerb) ambiguousReasons.push("operation_not_allowlisted");
+  if (ambiguousReasons.length > 0) {
+    return {
+      classification: "ambiguous",
+      reasons: [...new Set(ambiguousReasons)],
+    };
+  }
+  return {
+    classification: "safe_data_read",
+    reasons: [`allowlisted_${method.toLowerCase()}_data_read`],
+  };
 }
 
 function normalizeUpstreamBase(value?: string): string {
@@ -8886,6 +10924,48 @@ function validateProxyPath(path: string): void {
       "账户、Cookie、发布、互动或其他非只读端点不在开放范围内。",
     );
   }
+}
+
+function validateCatalogProxyInputs(
+  url: URL,
+  body: unknown,
+): void {
+  const rejectUnsafeInput = (raw: string): void => {
+    if (catalogInputFieldRisk(raw) == null) return;
+    throw new PlatformError(
+      403,
+      "unsafe_proxy_input",
+      "公开数据接口不接受 Cookie、会话、令牌、密钥、设备或代理凭据。",
+    );
+  };
+  for (const name of url.searchParams.keys()) {
+    rejectUnsafeInput(name);
+  }
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 32) {
+      throw new PlatformError(
+        400,
+        "invalid_json",
+        "POST 请求体嵌套层级超过安全上限。",
+      );
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    if (!isPlainRecord(value)) return;
+    for (const [key, child] of Object.entries(value)) {
+      rejectUnsafeInput(key);
+      if (
+        canonicalCatalogInputField(key) === "name" &&
+        typeof child === "string"
+      ) {
+        rejectUnsafeInput(child);
+      }
+      visit(child, depth + 1);
+    }
+  };
+  if (body !== null) visit(body, 0);
 }
 
 function validateCatalogPathSyntax(path: string): void {
@@ -8975,6 +11055,28 @@ async function prepareAdminAuditStatement(
       action: string;
       requestHash: string;
     };
+    catalogEndpointRevision?: {
+      path: string;
+      revision: number;
+    };
+    catalogSyncGeneration?: string;
+    upstreamCredentialExists?: {
+      id: string;
+      secretHash: string;
+    };
+    upstreamCredentialActivation?: {
+      id: string;
+      stateVersion: number;
+      updatedAt: string;
+      verifiedAt: string;
+      verifiedScopesJson: string;
+      expiresAt: string | null;
+      secretHash: string;
+    };
+    upstreamCredentialRevocation?: {
+      id: string;
+      revokedAt: string;
+    };
   },
 ): Promise<D1PreparedStatement> {
   const supplied = bearerToken(request);
@@ -8989,10 +11091,23 @@ async function prepareAdminAuditStatement(
       "管理员操作审计信息超过安全上限。",
     );
   }
-  const auditId = input.idempotencyKey
+  const causalKey =
+    input.idempotencyKey ??
+    (input.catalogEndpointRevision
+      ? `revision:${input.catalogEndpointRevision.path}:${input.catalogEndpointRevision.revision}`
+      : input.catalogSyncGeneration
+        ? `generation:${input.catalogSyncGeneration}`
+        : input.upstreamCredentialExists
+          ? `credential:${input.upstreamCredentialExists.id}:${input.upstreamCredentialExists.secretHash}`
+          : input.upstreamCredentialActivation
+            ? `activation:${input.upstreamCredentialActivation.id}:${input.upstreamCredentialActivation.stateVersion}`
+            : input.upstreamCredentialRevocation
+              ? `revocation:${input.upstreamCredentialRevocation.id}:${input.upstreamCredentialRevocation.revokedAt}`
+              : null);
+  const auditId = causalKey
     ? `aud_${(
         await sha256Hex(
-          `${input.action}:${input.targetType}:${input.targetId}:${input.idempotencyKey}`,
+          `${input.action}:${input.targetType}:${input.targetId}:${causalKey}`,
         )
       ).slice(0, 32)}`
     : `aud_${randomBase64Url(18)}`;
@@ -9024,6 +11139,108 @@ async function prepareAdminAuditStatement(
         input.paymentReviewResolution.caseId,
         input.paymentReviewResolution.action,
         input.paymentReviewResolution.requestHash,
+      );
+  }
+  if (input.catalogEndpointRevision) {
+    return db
+      .prepare(
+        `INSERT OR IGNORE INTO admin_audit_logs
+         (id, actor_fingerprint, action, target_type, target_id,
+          details_json, created_at)
+         SELECT ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+         WHERE EXISTS (
+           SELECT 1
+           FROM endpoint_catalog
+           WHERE path = ? AND revision = ?
+         )`,
+      )
+      .bind(
+        ...values,
+        input.catalogEndpointRevision.path,
+        input.catalogEndpointRevision.revision,
+      );
+  }
+  if (input.catalogSyncGeneration) {
+    return db
+      .prepare(
+        `INSERT OR IGNORE INTO admin_audit_logs
+         (id, actor_fingerprint, action, target_type, target_id,
+          details_json, created_at)
+         SELECT ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+         WHERE EXISTS (
+           SELECT 1 FROM catalog_sync_state
+           WHERE id = 1 AND last_success_generation = ?
+         )`,
+      )
+      .bind(...values, input.catalogSyncGeneration);
+  }
+  if (input.upstreamCredentialExists) {
+    return db
+      .prepare(
+        `INSERT OR IGNORE INTO admin_audit_logs
+         (id, actor_fingerprint, action, target_type, target_id,
+          details_json, created_at)
+         SELECT ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+         WHERE EXISTS (
+           SELECT 1 FROM upstream_credentials
+           WHERE id = ? AND provider = 'tikhub' AND secret_hash = ?
+         )`,
+      )
+      .bind(
+        ...values,
+        input.upstreamCredentialExists.id,
+        input.upstreamCredentialExists.secretHash,
+      );
+  }
+  if (input.upstreamCredentialActivation) {
+    return db
+      .prepare(
+        `INSERT OR IGNORE INTO admin_audit_logs
+         (id, actor_fingerprint, action, target_type, target_id,
+          details_json, created_at)
+         SELECT ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+         WHERE EXISTS (
+           SELECT 1
+           FROM upstream_credential_state s
+           JOIN upstream_credentials c
+             ON c.provider = s.provider
+            AND c.id = s.active_credential_id
+           WHERE s.provider = 'tikhub' AND s.managed_enabled = 1
+             AND s.active_credential_id = ? AND s.version = ?
+             AND s.updated_at = ?
+             AND c.revoked_at IS NULL AND c.secret_hash = ?
+             AND c.verified_scopes_json = ? AND c.expires_at IS ?
+             AND c.verified_at = ?
+         )`,
+      )
+      .bind(
+        ...values,
+        input.upstreamCredentialActivation.id,
+        input.upstreamCredentialActivation.stateVersion,
+        input.upstreamCredentialActivation.updatedAt,
+        input.upstreamCredentialActivation.secretHash,
+        input.upstreamCredentialActivation.verifiedScopesJson,
+        input.upstreamCredentialActivation.expiresAt,
+        input.upstreamCredentialActivation.verifiedAt,
+      );
+  }
+  if (input.upstreamCredentialRevocation) {
+    return db
+      .prepare(
+        `INSERT OR IGNORE INTO admin_audit_logs
+         (id, actor_fingerprint, action, target_type, target_id,
+          details_json, created_at)
+         SELECT ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+         WHERE EXISTS (
+           SELECT 1 FROM upstream_credentials
+           WHERE id = ? AND provider = 'tikhub'
+             AND revoked_at = ? AND encrypted_secret = 'revoked'
+         )`,
+      )
+      .bind(
+        ...values,
+        input.upstreamCredentialRevocation.id,
+        input.upstreamCredentialRevocation.revokedAt,
       );
   }
   return db

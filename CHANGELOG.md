@@ -9,6 +9,43 @@ RelayBase 的用户可见变化、计费语义、安全边界与数据库迁移�
 
 - 待下一轮迭代记录。
 
+## [0.3.0-preview.4] - 2026-07-23
+
+### Added
+
+- 管理后台“路由与定价”新增服务端批量预览、精确确认和原子应用流程，可按平台、
+  搜索、状态和安全分类批量上架、重算客户价或下架；预览和应用各自支持幂等重放。
+- D1 迁移 `0012` 增加端点 revision、`safe_data_read` / `ambiguous` /
+  `prohibited` 安全分类，以及持久化批量计划、不可变目标项、前后摘要和应用回执。
+- 管理 API 新增 `POST /api/admin/catalog/batches/preview`、
+  `GET /api/admin/catalog/batches/{id}` 和
+  `POST /api/admin/catalog/batches/{id}/apply`。
+
+### Changed
+
+- 新同步端点一律以禁用、未人工复核状态写入；机器安全分类不再复用 `read_only`
+  字段。明确写动作、控制面端点或接收 Cookie、会话、令牌、密钥和代理凭据的操作
+  不能进入公开代理；驼峰、连字符、嵌套参数和敏感字段前后缀使用同一规范化规则。
+- 单端点目录更新要求 `expectedRevision` 并在更新、审计同一事务中比较旧价格、
+  状态、代次和 revision，避免多个管理员静默互相覆盖。
+- TikHub Key 在线验证对临时网络、限流和服务端错误最多尝试 3 次，单次超时按
+  `UPSTREAM_TIMEOUT_MS` 限制在 30–60 秒；创建、激活和撤销的状态变化与管理员
+  审计改为原子提交。
+- 未撤销 TikHub 凭据才计入 100 条运营上限；达到上限与相同 Key 重复现在返回
+  不同错误。
+
+### Security
+
+- 批量应用绑定管理员指纹、目录代次、活动 TikHub 凭据编号/指纹/状态版本、
+  OpenAPI 与价格快照哈希和每行 revision。任一 CAS 不匹配时整批零变更并要求
+  重新预览。
+- 批量应用要求独立稳定的 `Idempotency-Key`、64 位目标摘要、预览 version 和
+  服务端生成的完整确认文本；成功回执可重放但不会重复增加 revision 或审计。
+- 公开目录与真实代理统一要求当前安全策略和完整覆盖证明；批量预览中断后使用
+  D1 时间判定并原子恢复，目录同步发布与其管理员审计在同一事务落库。
+- 迁移 `0012` 会把旧目录安全下架并标记为需重新同步，防止历史启发式只读状态被
+  当作新安全策略的人工批准。
+
 ## [0.3.0-preview.3] - 2026-07-23
 
 ### Added
@@ -136,7 +173,8 @@ RelayBase 的用户可见变化、计费语义、安全边界与数据库迁移�
 
 - RelayBase 初始市场页、安全沙盒、基础 TikHub 代理、客户 API Key 与预付余额原型。
 
-[Unreleased]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.3...HEAD
+[Unreleased]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.4...HEAD
+[0.3.0-preview.4]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.3...v0.3.0-preview.4
 [0.3.0-preview.3]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.2...v0.3.0-preview.3
 [0.3.0-preview.2]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.1...v0.3.0-preview.2
 [0.3.0-preview.1]: https://github.com/kydlikebtc/RelayBase/releases/tag/v0.3.0-preview.1
