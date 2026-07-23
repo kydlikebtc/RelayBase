@@ -2329,6 +2329,463 @@ test("holds paid failures for review and safely recovers a verified orphan payme
   assert.equal(credits.balance, 2000000);
 });
 
+test("does not let a prepared rejection overwrite concurrent arrival evidence", async (t) => {
+  const db = new PausableBatchD1();
+  t.after(() => db.close());
+  await migrate(db);
+  db.raw
+    .prepare(
+      `INSERT INTO users (id, email, display_name)
+       VALUES ('usr-reject-race', 'reject-race@example.com',
+               'Reject Race')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO payment_orders
+       (id, user_id, provider, provider_payment_id, amount_usd_micros,
+        pay_currency, pay_amount, status)
+       VALUES ('pay_reject_race', 'usr-reject-race', 'nowpayments',
+               'np-reject-race', 10000000, 'usdttrc20', '10',
+               'manual_review')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO payment_review_cases
+       (id, order_id, provider_payment_id, reason, status, actually_paid,
+        pay_currency, evidence_json)
+       VALUES ('prv_reject_race_case', 'pay_reject_race',
+               'np-reject-race', 'provider_data_mismatch', 'open', '0',
+               'usdttrc20', ?)`,
+    )
+    .run(
+      JSON.stringify({
+        paymentId: "np-reject-race",
+        parentPaymentId: null,
+        orderId: "pay_reject_race",
+        paymentStatus: "failed",
+        priceAmount: "10",
+        priceCurrency: "usd",
+        payAmount: "10",
+        actuallyPaid: "0",
+        payCurrency: "usdttrc20",
+      }),
+    );
+  const initialEvidence = db.raw
+    .prepare(
+      `SELECT evidence_json
+       FROM payment_review_cases
+       WHERE id = 'prv_reject_race_case'`,
+    )
+    .get().evidence_json;
+
+  const ipnSecret = "reject-race-ipn-secret";
+  const adminSecret = "reject-race-admin-secret-32-characters";
+  const env = baseEnv({
+    DB: db,
+    NOWPAYMENTS_API_KEY: "provider-test-key",
+    NOWPAYMENTS_IPN_SECRET: ipnSecret,
+    PAYMENT_ADMIN_SECRET: adminSecret,
+  });
+  let providerRead = 0;
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    providerRead += 1;
+    const hasFunds = providerRead === 3;
+    return Response.json({
+      payment_id: "np-reject-race",
+      payment_status: hasFunds ? "finished" : "failed",
+      order_id: "pay_reject_race",
+      price_amount: 10,
+      price_currency: "usd",
+      pay_amount: "10",
+      actually_paid: hasFunds ? "10" : "0",
+      pay_currency: "usdttrc20",
+    });
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const gate = db.pauseNextBatch((statements) =>
+    statements.some((statement) =>
+      statement.sql.includes("SET status = 'resolved', resolution_action"),
+    ),
+  );
+  t.after(() => gate.release());
+  const preparedReject = fetchWorker(
+    "/api/admin/payment-reviews/resolve",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${adminSecret}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        caseId: "prv_reject_race_case",
+        action: "reject",
+        note: "Provider reported a terminal zero-funds payment.",
+      }),
+    },
+    env,
+  );
+  await gate.paused;
+
+  const sendWebhook = (paymentStatus, sequence) => {
+    const payload = {
+      payment_id: "np-reject-race",
+      payment_status: paymentStatus,
+      order_id: "pay_reject_race",
+      sequence,
+    };
+    return fetchWorker(
+      "/api/payments/nowpayments/ipn",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-nowpayments-sig": nowPaymentsSignature(ipnSecret, payload),
+        },
+        body: JSON.stringify(payload),
+      },
+      env,
+    );
+  };
+  const staleEvidenceGate = db.pauseNextBatch((statements) =>
+    statements.some((statement) =>
+      statement.sql.includes("INSERT INTO payment_review_cases"),
+    ),
+  );
+  t.after(() => staleEvidenceGate.release());
+  const delayedZeroObservation = sendWebhook("failed", 1);
+  await staleEvidenceGate.paused;
+
+  const freshFundsObservation = await sendWebhook("finished", 2);
+  assert.equal(freshFundsObservation.status, 200);
+  staleEvidenceGate.release();
+  assert.equal((await delayedZeroObservation).status, 200);
+
+  gate.release();
+  const rejected = await preparedReject;
+  assert.equal(rejected.status, 409);
+  assert.equal(
+    (await rejected.json()).error.code,
+    "payment_review_evidence_changed",
+  );
+
+  const review = db.raw
+    .prepare(
+      `SELECT status, reason, actually_paid, evidence_json,
+              resolution_action, resolved_at
+       FROM payment_review_cases
+       WHERE id = 'prv_reject_race_case'`,
+    )
+    .get();
+  assert.equal(review.status, "open");
+  assert.equal(review.reason, "provider_data_mismatch");
+  assert.equal(review.actually_paid, "0");
+  assert.match(review.evidence_json, /"observationId":"obs_[^"]+"/);
+  assert.match(review.evidence_json, /"actuallyPaid":"0"/);
+  assert.notEqual(review.evidence_json, initialEvidence);
+  assert.equal(review.resolution_action, null);
+  assert.equal(review.resolved_at, null);
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT status FROM payment_orders WHERE id = 'pay_reject_race'`,
+      )
+      .get().status,
+    "manual_review",
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM balance_ledger
+         WHERE user_id = 'usr-reject-race'`,
+      )
+      .get().count,
+    0,
+  );
+});
+
+test("does not reopen a rejected case from a delayed zero-funds observation", async (t) => {
+  const db = new PausableBatchD1();
+  t.after(() => db.close());
+  await migrate(db);
+  db.raw
+    .prepare(
+      `INSERT INTO users (id, email, display_name)
+       VALUES ('usr-zero-delay', 'zero-delay@example.com', 'Zero Delay')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO payment_orders
+       (id, user_id, provider, provider_payment_id, amount_usd_micros,
+        pay_currency, pay_amount, status)
+       VALUES ('pay_zero_delay', 'usr-zero-delay', 'nowpayments',
+               'np-zero-delay', 10000000, 'usdttrc20', '10',
+               'manual_review')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO payment_review_cases
+       (id, order_id, provider_payment_id, reason, status, actually_paid,
+        pay_currency, evidence_json)
+       VALUES ('prv_zero_delay_case', 'pay_zero_delay', 'np-zero-delay',
+               'provider_data_mismatch', 'open', '0', 'usdttrc20', '{}')`,
+    )
+    .run();
+
+  const ipnSecret = "zero-delay-ipn-secret";
+  const adminSecret = "zero-delay-admin-secret-32-characters";
+  const env = baseEnv({
+    DB: db,
+    NOWPAYMENTS_API_KEY: "provider-test-key",
+    NOWPAYMENTS_IPN_SECRET: ipnSecret,
+    PAYMENT_ADMIN_SECRET: adminSecret,
+  });
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    Response.json({
+      payment_id: "np-zero-delay",
+      payment_status: "failed",
+      order_id: "pay_zero_delay",
+      price_amount: 10,
+      price_currency: "usd",
+      pay_amount: "10",
+      actually_paid: "0",
+      pay_currency: "usdttrc20",
+    });
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const staleEvidenceGate = db.pauseNextBatch((statements) =>
+    statements.some((statement) =>
+      statement.sql.includes("INSERT INTO payment_review_cases"),
+    ),
+  );
+  t.after(() => staleEvidenceGate.release());
+  const payload = {
+    payment_id: "np-zero-delay",
+    payment_status: "failed",
+    order_id: "pay_zero_delay",
+  };
+  const delayedObservation = fetchWorker(
+    "/api/payments/nowpayments/ipn",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-nowpayments-sig": nowPaymentsSignature(ipnSecret, payload),
+      },
+      body: JSON.stringify(payload),
+    },
+    env,
+  );
+  await staleEvidenceGate.paused;
+
+  const rejected = await fetchWorker(
+    "/api/admin/payment-reviews/resolve",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${adminSecret}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        caseId: "prv_zero_delay_case",
+        action: "reject",
+        note: "Provider still confirms terminal zero-funds status.",
+      }),
+    },
+    env,
+  );
+  assert.equal(rejected.status, 200);
+  staleEvidenceGate.release();
+  assert.equal((await delayedObservation).status, 200);
+
+  const review = db.raw
+    .prepare(
+      `SELECT status, resolution_action
+       FROM payment_review_cases
+       WHERE id = 'prv_zero_delay_case'`,
+    )
+    .get();
+  assert.equal(review.status, "resolved");
+  assert.equal(review.resolution_action, "reject");
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT status
+         FROM payment_orders
+         WHERE id = 'pay_zero_delay'`,
+      )
+      .get().status,
+    "manual_resolved",
+  );
+});
+
+test("does not let a stale rejection undo a concurrent provider refund", async (t) => {
+  const db = new PausableBatchD1();
+  t.after(() => db.close());
+  await migrate(db);
+  db.raw
+    .prepare(
+      `INSERT INTO users (id, email, display_name)
+       VALUES ('usr-reject-refund', 'reject-refund@example.com',
+               'Reject Refund')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO payment_orders
+       (id, user_id, provider, provider_payment_id, amount_usd_micros,
+        pay_currency, pay_amount, status, credited_usd_micros)
+       VALUES ('pay_reject_refund', 'usr-reject-refund', 'nowpayments',
+               'np-reject-refund', 10000000, 'usdttrc20', '10',
+               'manual_review', 10000000)`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO balance_ledger
+       (id, user_id, entry_type, delta_usd_micros, reference_id)
+       VALUES ('led-reject-refund', 'usr-reject-refund',
+               'payment_credit', 10000000,
+               'nowpayments:np-reject-refund:credit')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO payment_review_cases
+       (id, order_id, provider_payment_id, reason, status, actually_paid,
+        pay_currency, evidence_json)
+       VALUES ('prv_reject_refund_case', 'pay_reject_refund',
+               'np-reject-refund', 'provider_data_mismatch', 'open', '0',
+               'usdttrc20', '{}')`,
+    )
+    .run();
+
+  const ipnSecret = "reject-refund-ipn-secret";
+  const adminSecret = "reject-refund-admin-secret-32-characters";
+  const env = baseEnv({
+    DB: db,
+    NOWPAYMENTS_API_KEY: "provider-test-key",
+    NOWPAYMENTS_IPN_SECRET: ipnSecret,
+    PAYMENT_ADMIN_SECRET: adminSecret,
+  });
+  let providerRead = 0;
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    providerRead += 1;
+    const refunded = providerRead > 1;
+    return Response.json({
+      payment_id: "np-reject-refund",
+      payment_status: refunded ? "refunded" : "failed",
+      order_id: "pay_reject_refund",
+      price_amount: 10,
+      price_currency: "usd",
+      pay_amount: "10",
+      actually_paid: refunded ? "10" : "0",
+      pay_currency: "usdttrc20",
+    });
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const gate = db.pauseNextBatch((statements) =>
+    statements.some((statement) =>
+      statement.sql.includes("SET status = 'resolved', resolution_action"),
+    ),
+  );
+  t.after(() => gate.release());
+  const preparedReject = fetchWorker(
+    "/api/admin/payment-reviews/resolve",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${adminSecret}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        caseId: "prv_reject_refund_case",
+        action: "reject",
+        note: "This stale request must not undo a concurrent refund.",
+      }),
+    },
+    env,
+  );
+  await gate.paused;
+
+  const payload = {
+    payment_id: "np-reject-refund",
+    payment_status: "refunded",
+    order_id: "pay_reject_refund",
+  };
+  const refundWebhook = await fetchWorker(
+    "/api/payments/nowpayments/ipn",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-nowpayments-sig": nowPaymentsSignature(ipnSecret, payload),
+      },
+      body: JSON.stringify(payload),
+    },
+    env,
+  );
+  assert.equal(refundWebhook.status, 200);
+  gate.release();
+
+  const rejected = await preparedReject;
+  assert.equal(rejected.status, 409);
+  const review = db.raw
+    .prepare(
+      `SELECT status, resolution_action
+       FROM payment_review_cases
+       WHERE id = 'prv_reject_refund_case'`,
+    )
+    .get();
+  assert.equal(review.status, "resolved");
+  assert.equal(review.resolution_action, "refund_confirmed");
+  const order = db.raw
+    .prepare(
+      `SELECT status, credited_usd_micros
+       FROM payment_orders
+       WHERE id = 'pay_reject_refund'`,
+    )
+    .get();
+  assert.equal(order.status, "refunded");
+  assert.equal(order.credited_usd_micros, 0);
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COALESCE(SUM(delta_usd_micros), 0) AS balance
+         FROM balance_ledger
+         WHERE user_id = 'usr-reject-refund'`,
+      )
+      .get().balance,
+    0,
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM admin_audit_logs
+         WHERE action = 'payment_review.reject'
+           AND target_id = 'prv_reject_refund_case'`,
+      )
+      .get().count,
+    0,
+  );
+});
+
 test("reopens a rejected payment review when provider later reports funds", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
@@ -2422,6 +2879,393 @@ test("reopens a rejected payment review when provider later reports funds", asyn
       )
       .get().status,
     "manual_review",
+  );
+});
+
+test("polls recent zero-credit rejections on a bounded interval and reopens late funds", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  db.raw
+    .prepare(
+      `INSERT INTO users (id, email, display_name)
+       VALUES ('usr-rejected-poll', 'rejected-poll@example.com',
+               'Rejected Poll')`,
+    )
+    .run();
+  for (const [suffix, resolvedAt] of [
+    ["funded", "datetime('now', '-7 hours')"],
+    ["zero", "datetime('now', '-7 hours')"],
+    ["fresh", "datetime('now', '-5 hours')"],
+    ["old", "datetime('now', '-8 days')"],
+  ]) {
+    db.raw
+      .prepare(
+        `INSERT INTO payment_orders
+         (id, user_id, provider, provider_payment_id, amount_usd_micros,
+          pay_currency, pay_amount, status, credited_usd_micros)
+         VALUES (?, 'usr-rejected-poll', 'nowpayments', ?, 10000000,
+                 'usdttrc20', '10', 'manual_resolved', 0)`,
+      )
+      .run(`pay-rejected-${suffix}`, `np-rejected-${suffix}`);
+    db.raw
+      .prepare(
+        `INSERT INTO payment_review_cases
+         (id, order_id, provider_payment_id, reason, status, evidence_json,
+          resolution_action, resolution_request_hash, resolution_note,
+          resolution_reference, resolved_at)
+         VALUES (?, ?, ?, 'provider_data_mismatch', 'resolved', '{}',
+                 'reject', ?, 'Provider reported zero funds.',
+                 ?, ${resolvedAt})`,
+      )
+      .run(
+        `prv_rejected_${suffix}_case`,
+        `pay-rejected-${suffix}`,
+        `np-rejected-${suffix}`,
+        `rejected-${suffix}-hash`,
+        `nowpayments:np-rejected-${suffix}:failed`,
+      );
+  }
+
+  const env = baseEnv({
+    DB: db,
+    NOWPAYMENTS_API_KEY: "provider-test-key",
+    RECONCILIATION_SECRET: "rejected-poll-reconcile-secret-32-minimum",
+  });
+  const providerReads = [];
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const paymentId = new URL(
+      typeof input === "string" || input instanceof URL ? input : input.url,
+    ).pathname.split("/").at(-1);
+    providerReads.push(paymentId);
+    if (paymentId !== "np-rejected-funded" &&
+        paymentId !== "np-rejected-zero") {
+      throw new Error(`unexpected rejected payment poll: ${paymentId}`);
+    }
+    const funded = paymentId === "np-rejected-funded";
+    return Response.json({
+      payment_id: paymentId,
+      payment_status: funded ? "finished" : "failed",
+      order_id: funded ? "pay-rejected-funded" : "pay-rejected-zero",
+      price_amount: 10,
+      price_currency: "usd",
+      pay_amount: "10",
+      actually_paid: funded ? "1" : "0",
+      pay_currency: "usdttrc20",
+    });
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const reconcile = () =>
+    fetchWorker(
+      "/api/admin/reconcile",
+      {
+        method: "POST",
+        headers: {
+          authorization:
+            "Bearer rejected-poll-reconcile-secret-32-minimum",
+        },
+      },
+      env,
+    );
+  const [first, concurrent] = await Promise.all([
+    reconcile(),
+    reconcile(),
+  ]);
+  assert.equal(first.status, 200);
+  assert.equal(concurrent.status, 200);
+  const firstResult = await first.json();
+  const concurrentResult = await concurrent.json();
+  assert.equal(
+    firstResult.payments.rejectedPolled +
+      concurrentResult.payments.rejectedPolled,
+    2,
+  );
+  assert.deepEqual(
+    [...providerReads].sort(),
+    ["np-rejected-funded", "np-rejected-zero"],
+  );
+
+  const fundedReview = db.raw
+    .prepare(
+      `SELECT status, reason, resolution_action
+       FROM payment_review_cases
+       WHERE id = 'prv_rejected_funded_case'`,
+    )
+    .get();
+  assert.equal(fundedReview.status, "open");
+  assert.equal(fundedReview.reason, "funds_after_manual_rejection");
+  assert.equal(fundedReview.resolution_action, null);
+  const zeroReview = db.raw
+    .prepare(
+      `SELECT status, resolution_action
+       FROM payment_review_cases
+       WHERE id = 'prv_rejected_zero_case'`,
+    )
+    .get();
+  assert.equal(zeroReview.status, "resolved");
+  assert.equal(zeroReview.resolution_action, "reject");
+  assert.ok(
+    db.raw
+      .prepare(
+        `SELECT 1 AS present
+         FROM operation_heartbeats
+         WHERE name = 'payment-rejected-status:np-rejected-zero'`,
+      )
+      .get()?.present,
+  );
+
+  const replay = await reconcile();
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).payments.rejectedPolled, 0);
+  assert.equal(providerReads.length, 2);
+});
+
+test("does not infer a parent rejection from a child review sharing its order", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  db.raw
+    .prepare(
+      `INSERT INTO users (id, email, display_name)
+       VALUES ('usr-parent-child', 'parent-child@example.com',
+               'Parent Child')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO payment_orders
+       (id, user_id, provider, provider_payment_id, amount_usd_micros,
+        pay_currency, pay_amount, status, credited_usd_micros)
+       VALUES ('pay-parent-child', 'usr-parent-child', 'nowpayments',
+               'np-parent-safe', 10000000, 'usdttrc20', '10',
+               'manual_resolved', 10000000)`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO balance_ledger
+       (id, user_id, entry_type, delta_usd_micros, reference_id)
+       VALUES ('led-parent-safe', 'usr-parent-child', 'payment_credit',
+               10000000, 'nowpayments:np-parent-safe:credit')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO payment_review_cases
+       (id, order_id, provider_payment_id, parent_payment_id, reason,
+        status, evidence_json, resolution_action, resolution_request_hash,
+        resolution_note, resolution_reference, resolved_at)
+       VALUES ('prv_child_rejected_case', 'pay-parent-child',
+               'np-child-rejected', 'np-parent-safe', 'repeated_deposit',
+               'resolved', '{}', 'reject', 'child-rejected-hash',
+               'Child payment had no funds.',
+               'nowpayments:np-child-rejected:failed', CURRENT_TIMESTAMP)`,
+    )
+    .run();
+
+  const env = baseEnv({
+    DB: db,
+    NOWPAYMENTS_API_KEY: "provider-test-key",
+    RECONCILIATION_SECRET: "parent-child-reconcile-secret-32-minimum",
+  });
+  const providerReads = [];
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const paymentId = new URL(
+      typeof input === "string" || input instanceof URL ? input : input.url,
+    ).pathname.split("/").at(-1);
+    providerReads.push(paymentId);
+    assert.equal(paymentId, "np-parent-safe");
+    return Response.json({
+      payment_id: "np-parent-safe",
+      payment_status: "finished",
+      order_id: "pay-parent-child",
+      price_amount: 10,
+      price_currency: "usd",
+      pay_amount: "10",
+      actually_paid: "10",
+      pay_currency: "usdttrc20",
+    });
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const reconciliation = await fetchWorker(
+    "/api/admin/reconcile",
+    {
+      method: "POST",
+      headers: {
+        authorization:
+          "Bearer parent-child-reconcile-secret-32-minimum",
+      },
+    },
+    env,
+  );
+  assert.equal(reconciliation.status, 200);
+  const result = await reconciliation.json();
+  assert.equal(result.payments.creditedPolled, 1);
+  assert.equal(result.payments.rejectedPolled, 0);
+  assert.deepEqual(providerReads, ["np-parent-safe"]);
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM payment_review_cases
+         WHERE provider_payment_id = 'np-parent-safe'`,
+      )
+      .get().count,
+    0,
+  );
+  const childReview = db.raw
+    .prepare(
+      `SELECT status, resolution_action
+       FROM payment_review_cases
+       WHERE id = 'prv_child_rejected_case'`,
+    )
+    .get();
+  assert.equal(childReview.status, "resolved");
+  assert.equal(childReview.resolution_action, "reject");
+});
+
+test("polls and reverses a refunded parent while its child review is still open", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  db.raw
+    .prepare(
+      `INSERT INTO users (id, email, display_name)
+       VALUES ('usr-open-child-refund', 'open-child-refund@example.com',
+               'Open Child Refund')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO payment_orders
+       (id, user_id, provider, provider_payment_id, amount_usd_micros,
+        pay_currency, pay_amount, status, credited_usd_micros)
+       VALUES ('pay-open-child-refund', 'usr-open-child-refund',
+               'nowpayments', 'np-open-child-parent', 10000000,
+               'usdttrc20', '10', 'manual_review', 10000000)`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO balance_ledger
+       (id, user_id, entry_type, delta_usd_micros, reference_id)
+       VALUES ('led-open-child-parent', 'usr-open-child-refund',
+               'payment_credit', 10000000,
+               'nowpayments:np-open-child-parent:credit')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO payment_review_cases
+       (id, order_id, provider_payment_id, parent_payment_id, reason,
+        status, actually_paid, pay_currency, evidence_json)
+       VALUES ('prv_open_child_refund_case', 'pay-open-child-refund',
+               'np-open-child-payment', 'np-open-child-parent',
+               'repeated_deposit', 'open', '10', 'usdttrc20', '{}')`,
+    )
+    .run();
+
+  const env = baseEnv({
+    DB: db,
+    NOWPAYMENTS_API_KEY: "provider-test-key",
+    RECONCILIATION_SECRET:
+      "open-child-refund-reconcile-secret-32-minimum",
+  });
+  const providerReads = [];
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const paymentId = new URL(
+      typeof input === "string" || input instanceof URL ? input : input.url,
+    ).pathname.split("/").at(-1);
+    providerReads.push(paymentId);
+    assert.equal(paymentId, "np-open-child-parent");
+    return Response.json({
+      payment_id: paymentId,
+      payment_status: "refunded",
+      order_id: "pay-open-child-refund",
+      price_amount: 10,
+      price_currency: "usd",
+      pay_amount: "10",
+      actually_paid: "10",
+      pay_currency: "usdttrc20",
+    });
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const reconciliation = await fetchWorker(
+    "/api/admin/reconcile",
+    {
+      method: "POST",
+      headers: {
+        authorization:
+          "Bearer open-child-refund-reconcile-secret-32-minimum",
+      },
+    },
+    env,
+  );
+  assert.equal(reconciliation.status, 200);
+  assert.equal((await reconciliation.json()).payments.creditedPolled, 1);
+  assert.deepEqual(providerReads, ["np-open-child-parent"]);
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COALESCE(SUM(delta_usd_micros), 0) AS balance
+         FROM balance_ledger
+         WHERE user_id = 'usr-open-child-refund'`,
+      )
+      .get().balance,
+    0,
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT status, credited_usd_micros
+         FROM payment_orders
+         WHERE id = 'pay-open-child-refund'`,
+      )
+      .get().status,
+    "refunded",
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT credited_usd_micros
+         FROM payment_orders
+         WHERE id = 'pay-open-child-refund'`,
+      )
+      .get().credited_usd_micros,
+    0,
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT status
+         FROM payment_review_cases
+         WHERE id = 'prv_open_child_refund_case'`,
+      )
+      .get().status,
+    "open",
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM balance_ledger
+         WHERE reference_id =
+               'nowpayments:np-open-child-parent:reversal'`,
+      )
+      .get().count,
+    1,
   );
 });
 
