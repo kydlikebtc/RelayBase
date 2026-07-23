@@ -162,6 +162,7 @@ const migrationFiles = [
   "drizzle/0009_conscious_unicorn.sql",
   "drizzle/0010_solid_wasp.sql",
   "drizzle/0011_eminent_molten_man.sql",
+  "drizzle/0012_mute_wasp.sql",
 ];
 
 async function migrate(db, names = migrationFiles) {
@@ -179,7 +180,7 @@ function enableCatalogEndpoint(
   customerPriceUsdMicros = 2000,
   upstreamApiKey = "upstream-key",
 ) {
-  const generation = "sync-test-complete";
+  const generation = "sync_test_complete_0001";
   const credentialFingerprint = createHash("sha256")
     .update(upstreamApiKey)
     .digest("hex")
@@ -232,6 +233,9 @@ function enableCatalogEndpoint(
        SET enabled = 1, read_only = 1,
            customer_price_usd_micros = ?,
            price_verified = 1, http_method = 'GET',
+           safety_classification = 'safe_data_read',
+           safety_reasons_json = '["test_fixture"]',
+           safety_policy_version = 1,
            sync_generation = ?, reviewed_at = CURRENT_TIMESTAMP
        WHERE path = ?`,
     )
@@ -498,7 +502,7 @@ test("upgrades populated payment events through the auth and review migrations",
 test("adds catalog coverage evidence without changing the previous live generation", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
-  await migrate(db, migrationFiles.slice(0, -1));
+  await migrate(db, migrationFiles.slice(0, 11));
   const upstreamKey = "upstream-key";
   const credentialFingerprint = createHash("sha256")
     .update(upstreamKey)
@@ -514,7 +518,7 @@ test("adds catalog coverage evidence without changing the previous live generati
     )
     .run(credentialFingerprint);
 
-  await migrate(db, migrationFiles.slice(-1));
+  await migrate(db, migrationFiles.slice(11));
   const state = db.raw
     .prepare(
       `SELECT last_success_generation, credential_fingerprint,
@@ -536,12 +540,30 @@ test("adds catalog coverage evidence without changing the previous live generati
     db.raw.prepare("PRAGMA foreign_key_check").all().length,
     0,
   );
+  const migratedEndpoint = db.raw
+    .prepare(
+      `SELECT enabled, read_only, safety_classification,
+              safety_reasons_json, safety_policy_version, revision
+       FROM endpoint_catalog
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    )
+    .get();
+  assert.deepEqual({ ...migratedEndpoint }, {
+    enabled: 0,
+    read_only: 0,
+    safety_classification: "ambiguous",
+    safety_reasons_json: '["migration_requires_resync"]',
+    safety_policy_version: 1,
+    revision: 0,
+  });
 
   db.raw
     .prepare(
       `UPDATE endpoint_catalog
        SET enabled = 1, read_only = 1, price_verified = 1,
            http_method = 'GET',
+           safety_classification = 'safe_data_read',
+           safety_policy_version = 1,
            sync_generation = 'sync-before-coverage',
            reviewed_at = CURRENT_TIMESTAMP
        WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
@@ -709,12 +731,31 @@ test("encrypts, verifies, rotates and fail-closes managed TikHub credentials", a
 
   const nativeFetch = globalThis.fetch;
   const upstreamAuthorizations = [];
+  let credentialVerificationAttempts = 0;
+  let forceActivationRace = false;
   globalThis.fetch = async (input, init) => {
     const url = new URL(
       typeof input === "string" || input instanceof URL ? input : input.url,
     );
     upstreamAuthorizations.push(new Headers(init?.headers).get("authorization"));
     if (url.pathname === "/api/v1/tikhub/user/get_user_info") {
+      credentialVerificationAttempts += 1;
+      if (credentialVerificationAttempts < 3) {
+        return Response.json(
+          { message: "temporary upstream failure" },
+          { status: 503 },
+        );
+      }
+      if (forceActivationRace) {
+        forceActivationRace = false;
+        db.raw
+          .prepare(
+            `UPDATE upstream_credential_state
+             SET version = version + 1
+             WHERE provider = 'tikhub'`,
+          )
+          .run();
+      }
       return Response.json({
         code: 200,
         router: url.pathname,
@@ -785,6 +826,7 @@ test("encrypts, verifies, rotates and fail-closes managed TikHub credentials", a
   );
   assert.equal(activateResponse.status, 200);
   assert.equal((await activateResponse.json()).credential.status, "active");
+  assert.equal(credentialVerificationAttempts, 3);
   assert.equal(
     upstreamAuthorizations.at(-1),
     `Bearer ${managedApiKey}`,
@@ -841,6 +883,65 @@ test("encrypts, verifies, rotates and fail-closes managed TikHub credentials", a
   assert.doesNotMatch(managedListText, /encrypted_secret|secret_hash/);
   assert.doesNotMatch(managedListText, new RegExp(stored.encrypted_secret));
 
+  const standbyResponse = await fetchWorker(
+    "/api/admin/upstream-credentials",
+    {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({
+        label: "TikHub standby",
+        apiKey: "tikhub-managed-secret-value-0002",
+        activate: false,
+        expectedVersion: 1,
+      }),
+    },
+    env,
+  );
+  assert.equal(standbyResponse.status, 201);
+  const standby = await standbyResponse.json();
+  forceActivationRace = true;
+  const racedActivation = await fetchWorker(
+    "/api/admin/upstream-credentials",
+    {
+      method: "PATCH",
+      headers: adminHeaders,
+      body: JSON.stringify({
+        id: standby.credential.id,
+        action: "activate",
+        expectedVersion: 1,
+      }),
+    },
+    env,
+  );
+  assert.equal(racedActivation.status, 409);
+  assert.equal(
+    (await racedActivation.json()).error.code,
+    "upstream_credential_update_conflict",
+  );
+  const racedCredential = db.raw
+    .prepare(
+      `SELECT verified_scopes_json, expires_at, verified_at
+       FROM upstream_credentials
+       WHERE id = ?`,
+    )
+    .get(standby.credential.id);
+  assert.deepEqual({ ...racedCredential }, {
+    verified_scopes_json: null,
+    expires_at: null,
+    verified_at: null,
+  });
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM admin_audit_logs
+         WHERE action = 'upstream_credential.activated'
+           AND target_id = ?`,
+      )
+      .get(standby.credential.id).count,
+    0,
+  );
+
   const wrongKeyEnv = {
     ...env,
     TIKHUB_CREDENTIALS_ENCRYPTION_KEY: Buffer.alloc(32, 8).toString(
@@ -885,7 +986,7 @@ test("encrypts, verifies, rotates and fail-closes managed TikHub credentials", a
       body: JSON.stringify({
         id: created.credential.id,
         action: "revoke",
-        expectedVersion: 1,
+        expectedVersion: 2,
       }),
     },
     env,
@@ -906,7 +1007,7 @@ test("encrypts, verifies, rotates and fail-closes managed TikHub credentials", a
   assert.equal(afterRevokeData.activeSource, "none");
   assert.equal(afterRevokeData.activeCredentialId, null);
   assert.equal(afterRevokeData.activeFingerprint, null);
-  assert.equal(afterRevokeData.stateVersion, 2);
+  assert.equal(afterRevokeData.stateVersion, 3);
 
   const failClosedReadiness = await fetchWorker("/api/readiness", {}, env);
   assert.equal(failClosedReadiness.status, 503);
@@ -977,6 +1078,7 @@ test("validates browser and admin JSON without coercion", async (t) => {
         enabled: false,
         readOnly: true,
         customerPriceUsdMicros: "2000",
+        expectedRevision: 0,
       }),
     },
     env,
@@ -1000,6 +1102,7 @@ test("validates browser and admin JSON without coercion", async (t) => {
         enabled: false,
         readOnly: true,
         customerPriceUsdMicros: 2000,
+        expectedRevision: 0,
       }),
     },
     env,
@@ -3768,7 +3871,7 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
 
   const removed = db.raw
     .prepare(
-      `SELECT enabled, source_updated_at, sync_generation
+      `SELECT enabled, source_updated_at, sync_generation, revision
        FROM endpoint_catalog
        WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
     )
@@ -3790,6 +3893,7 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
         enabled: true,
         readOnly: true,
         customerPriceUsdMicros: 2000,
+        expectedRevision: removed.revision,
       }),
     },
     env,
@@ -3800,6 +3904,12 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
     "endpoint_not_in_latest_catalog",
   );
 
+  const currentRevision = db.raw
+    .prepare(
+      `SELECT revision FROM endpoint_catalog
+       WHERE path = '/v1/youtube/web/fetch_video'`,
+    )
+    .get().revision;
   const enableCurrent = await fetchWorker(
     "/api/admin/catalog",
     {
@@ -3813,11 +3923,46 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
         enabled: true,
         readOnly: true,
         customerPriceUsdMicros: 2000,
+        expectedRevision: currentRevision,
       }),
     },
     env,
   );
   assert.equal(enableCurrent.status, 200);
+  assert.equal((await enableCurrent.json()).revision, currentRevision + 1);
+
+  const staleDisable = await fetchWorker(
+    "/api/admin/catalog",
+    {
+      method: "PATCH",
+      headers: {
+        authorization: `Bearer ${catalogSecret}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        path: "/v1/youtube/web/fetch_video",
+        enabled: false,
+        readOnly: true,
+        customerPriceUsdMicros: 2000,
+        expectedRevision: currentRevision,
+      }),
+    },
+    env,
+  );
+  assert.equal(staleDisable.status, 409);
+  assert.equal(
+    (await staleDisable.json()).error.code,
+    "catalog_update_conflict",
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT enabled FROM endpoint_catalog
+         WHERE path = '/v1/youtube/web/fetch_video'`,
+      )
+      .get().enabled,
+    1,
+  );
 
   const publicCatalog = await fetchWorker(
     "/api/catalog?limit=1&offset=0",
@@ -3947,7 +4092,9 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
 
   const rows = db.raw
     .prepare(
-      `SELECT path, upstream_price_usd_micros, price_verified
+      `SELECT path, upstream_price_usd_micros, price_verified,
+              enabled, read_only, safety_classification,
+              safety_policy_version, revision
        FROM endpoint_catalog
        WHERE path IN (
          '/v1/ios_shortcut/shortcut',
@@ -3962,11 +4109,21 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
       path: "/v1/ios_shortcut/shortcut",
       upstream_price_usd_micros: 0,
       price_verified: 1,
+      enabled: 0,
+      read_only: 0,
+      safety_classification: "ambiguous",
+      safety_policy_version: 1,
+      revision: 0,
     },
     {
       path: "/v1/youtube/web/fetch_video",
       upstream_price_usd_micros: 1000,
       price_verified: 1,
+      enabled: 0,
+      read_only: 0,
+      safety_classification: "safe_data_read",
+      safety_policy_version: 1,
+      revision: 0,
     },
   ]);
 
@@ -4029,6 +4186,265 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
   assert.equal(adminCatalogData.sync.coverage.positivePrices, 1);
   assert.equal(adminCatalogData.sync.coverage.zeroPrices, 1);
   assert.equal(adminCatalogData.sync.coverage.awaitingPrice, 1);
+});
+
+test("classifies TikHub data reads without trusting mutation or credential inputs", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const catalogSecret = "catalog-safety-secret-32-characters-minimum";
+  const env = baseEnv({
+    DB: db,
+    TIKHUB_API_KEY: "upstream-key",
+    CATALOG_SYNC_SECRET: catalogSecret,
+  });
+  const nativeFetch = globalThis.fetch;
+  let proxyReads = 0;
+  globalThis.fetch = async (input) => {
+    const url = new URL(
+      typeof input === "string" || input instanceof URL ? input : input.url,
+    );
+    if (url.pathname === "/openapi.json") {
+      return Response.json({
+        openapi: "3.1.0",
+        info: { title: "TikHub API", version: "safety-test" },
+        paths: {
+          "/api/v1/douyin/creator/fetch_creator_activity_list": {
+            get: {
+              summary: "Fetch creator activity list",
+              parameters: [
+                {
+                  name: "creator_id",
+                  in: "query",
+                  schema: { type: "string" },
+                },
+              ],
+            },
+          },
+          "/api/v1/instagram/v2/fetch_post_comments": {
+            get: {
+              summary: "Fetch public post comments",
+              parameters: [],
+            },
+          },
+          "/api/v1/example/web/fetch_public_profile": {
+            parameters: [
+              {
+                name: "headers[Authorization]",
+                in: "query",
+                schema: { type: "string" },
+              },
+            ],
+            get: {
+              summary: "Fetch public profile",
+              parameters: [],
+            },
+          },
+          "/api/v1/example/web/fetch_then_repost": {
+            get: {
+              summary: "Fetch and then repost an item",
+              parameters: [],
+            },
+          },
+          "/api/v1/tiktok/creator/get_account_insights_overview": {
+            post: {
+              summary: "Get account insights",
+              requestBody: {
+                content: {
+                  "application/json": {
+                    schema: {
+                      type: "object",
+                      properties: {
+                        cookie: { type: "string" },
+                        proxyUrl: { type: "string" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+    }
+    if (url.pathname === "/api/v1/tikhub/user/get_all_endpoints_info") {
+      return Response.json({
+        data: [
+          {
+            endpoint_uri:
+              "/api/v1/douyin/creator/fetch_creator_activity_list",
+            endpoint_cost: 0.001,
+          },
+          {
+            endpoint_uri: "/api/v1/instagram/v2/fetch_post_comments",
+            endpoint_cost: 0.001,
+          },
+          {
+            endpoint_uri: "/api/v1/example/web/fetch_public_profile",
+            endpoint_cost: 0.001,
+          },
+          {
+            endpoint_uri: "/api/v1/example/web/fetch_then_repost",
+            endpoint_cost: 0.001,
+          },
+          {
+            endpoint_uri:
+              "/api/v1/tiktok/creator/get_account_insights_overview",
+            endpoint_cost: 0.002,
+          },
+        ],
+      });
+    }
+    proxyReads += 1;
+    return Response.json({ ok: true });
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const synced = await fetchWorker(
+    "/api/admin/catalog/sync",
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${catalogSecret}` },
+    },
+    env,
+  );
+  assert.equal(synced.status, 200);
+  const rows = db.raw
+    .prepare(
+      `SELECT path, enabled, read_only, safety_classification,
+              safety_reasons_json
+       FROM endpoint_catalog
+       WHERE sync_generation = (
+         SELECT last_success_generation FROM catalog_sync_state WHERE id = 1
+       )
+       ORDER BY path`,
+    )
+    .all()
+    .map((row) => ({ ...row }));
+  assert.equal(rows.length, 5);
+  assert.deepEqual(
+    rows.map((row) => ({
+      path: row.path,
+      enabled: row.enabled,
+      read_only: row.read_only,
+      safety_classification: row.safety_classification,
+    })),
+    [
+      {
+        path: "/v1/douyin/creator/fetch_creator_activity_list",
+        enabled: 0,
+        read_only: 0,
+        safety_classification: "safe_data_read",
+      },
+      {
+        path: "/v1/example/web/fetch_public_profile",
+        enabled: 0,
+        read_only: 0,
+        safety_classification: "prohibited",
+      },
+      {
+        path: "/v1/example/web/fetch_then_repost",
+        enabled: 0,
+        read_only: 0,
+        safety_classification: "prohibited",
+      },
+      {
+        path: "/v1/instagram/v2/fetch_post_comments",
+        enabled: 0,
+        read_only: 0,
+        safety_classification: "safe_data_read",
+      },
+      {
+        path: "/v1/tiktok/creator/get_account_insights_overview",
+        enabled: 0,
+        read_only: 0,
+        safety_classification: "prohibited",
+      },
+    ],
+  );
+  assert.match(
+    rows.find(
+      (row) =>
+        row.path ===
+        "/v1/tiktok/creator/get_account_insights_overview",
+    ).safety_reasons_json,
+    /sensitive_input:(cookie|proxy)/,
+  );
+  assert.match(
+    rows.find(
+      (row) => row.path === "/v1/example/web/fetch_public_profile",
+    ).safety_reasons_json,
+    /sensitive_input:headers_authorization/,
+  );
+  assert.match(
+    rows.find(
+      (row) => row.path === "/v1/example/web/fetch_then_repost",
+    ).safety_reasons_json,
+    /chained_write_action:repost/,
+  );
+
+  const generation = db.raw
+    .prepare(
+      `SELECT last_success_generation AS generation
+       FROM catalog_sync_state WHERE id = 1`,
+    )
+    .get().generation;
+  db.raw
+    .prepare(
+      `UPDATE endpoint_catalog
+       SET enabled = 1, read_only = 1, reviewed_at = CURRENT_TIMESTAMP
+       WHERE path IN (
+         '/v1/douyin/creator/fetch_creator_activity_list',
+         '/v1/tiktok/creator/get_account_insights_overview'
+       )`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO operation_heartbeats
+       (name, last_success_at, details_json)
+       VALUES ('reconciliation', CURRENT_TIMESTAMP, '{}')`,
+    )
+    .run();
+  const liveEnv = {
+    ...env,
+    RESELLER_AUTHORIZED: "true",
+    LEGAL_REVIEW_CONFIRMED: "true",
+    RECONCILIATION_SECRET: "safety-reconcile-secret-32-minimum",
+  };
+  assert.match(generation, /^sync_/);
+  const prohibited = await fetchWorker(
+    "/v1/tiktok/creator/get_account_insights_overview",
+    {
+      method: "POST",
+      headers: {
+        authorization: "Bearer customer-key-does-not-matter",
+        "content-type": "application/json",
+        "idempotency-key": "safety-proxy-request-0001",
+      },
+      body: "{}",
+    },
+    liveEnv,
+  );
+  assert.equal(prohibited.status, 403);
+  assert.equal((await prohibited.json()).error.code, "unsafe_endpoint");
+  const unsafeInput = await fetchWorker(
+    "/v1/douyin/creator/fetch_creator_activity_list?accessToken=customer-cookie",
+    {
+      headers: {
+        authorization: "Bearer customer-key-does-not-matter",
+      },
+    },
+    liveEnv,
+  );
+  assert.equal(unsafeInput.status, 403);
+  assert.equal(
+    (await unsafeInput.json()).error.code,
+    "unsafe_proxy_input",
+  );
+  assert.equal(proxyReads, 0);
 });
 
 test("rejects conflicting duplicate TikHub prices without replacing the live catalog", async (t) => {
@@ -4819,6 +5235,461 @@ test("publishes reviewed catalog prices and creates idempotent recoverable payme
   const dashboardData = await dashboard.json();
   assert.equal(dashboardData.payments[0].payAddress, createdPayment.payAddress);
   assert.match(dashboardData.payments[0].invoiceUrl, /^https:\/\/nowpayments\.io\//);
+});
+
+test("freezes, atomically applies and replays catalog batch plans", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  enableCatalogEndpoint(db);
+  db.raw
+    .prepare(
+      `UPDATE endpoint_catalog
+       SET enabled = 0, read_only = 0, reviewed_at = NULL,
+           revision = 7
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    )
+    .run();
+  const catalogSecret = "catalog-batch-secret-32-characters-minimum";
+  const env = baseEnv({
+    DB: db,
+    CATALOG_SYNC_SECRET: catalogSecret,
+  });
+  const previewHeaders = {
+    authorization: `Bearer ${catalogSecret}`,
+    "content-type": "application/json",
+    "idempotency-key": "catalog-preview-stable-0001",
+  };
+  const previewBody = {
+    action: "publish",
+    expectedCatalogGeneration: "sync_test_complete_0001",
+    selection: {
+      platform: "tiktok",
+      query: "fetch_user_profile",
+      status: "disabled",
+      safety: "safe_data_read",
+    },
+    pricing: {
+      markupBps: 1000,
+      minimumCustomerPriceUsdMicros: 1,
+    },
+  };
+  const recoveryHeaders = {
+    ...previewHeaders,
+    "idempotency-key": "catalog-preview-recovery-0001",
+  };
+  const interrupted = await fetchWorker(
+    "/api/admin/catalog/batches/preview",
+    {
+      method: "POST",
+      headers: recoveryHeaders,
+      body: JSON.stringify(previewBody),
+    },
+    env,
+  );
+  assert.equal(interrupted.status, 200);
+  const interruptedData = await interrupted.json();
+  db.raw
+    .prepare(
+      `UPDATE catalog_batch_plans
+       SET status = 'preparing', version = 0, previewed_at = NULL,
+           created_at = datetime('now', '-3 minutes')
+       WHERE id = ?`,
+    )
+    .run(interruptedData.batch.id);
+  const recoveredPreview = await fetchWorker(
+    "/api/admin/catalog/batches/preview",
+    {
+      method: "POST",
+      headers: recoveryHeaders,
+      body: JSON.stringify(previewBody),
+    },
+    env,
+  );
+  assert.equal(
+    recoveredPreview.status,
+    200,
+    await recoveredPreview.clone().text(),
+  );
+  const recoveredPreviewData = await recoveredPreview.json();
+  assert.equal(recoveredPreviewData.replayed, false);
+  assert.equal(recoveredPreviewData.batch.status, "ready");
+  assert.notEqual(
+    recoveredPreviewData.batch.id,
+    interruptedData.batch.id,
+  );
+
+  const preview = await fetchWorker(
+    "/api/admin/catalog/batches/preview",
+    {
+      method: "POST",
+      headers: previewHeaders,
+      body: JSON.stringify(previewBody),
+    },
+    env,
+  );
+  assert.equal(preview.status, 200, await preview.clone().text());
+  const previewData = await preview.json();
+  assert.equal(previewData.replayed, false);
+  assert.equal(previewData.batch.status, "ready");
+  assert.equal(previewData.batch.version, 1);
+  assert.deepEqual(previewData.batch.counts, {
+    matched: 1,
+    selected: 1,
+    blocked: 0,
+    stale: 0,
+    unverified: 0,
+    unsafe: 0,
+    noChange: 0,
+    priceIncrease: 0,
+    priceDecrease: 1,
+    priceUnchanged: 0,
+  });
+  assert.equal(previewData.items[0].expectedRevision, 7);
+  assert.equal(previewData.items[0].before.enabled, false);
+  assert.equal(previewData.items[0].after.enabled, true);
+  assert.match(previewData.batch.targetDigest, /^[0-9a-f]{64}$/);
+
+  const replayPreview = await fetchWorker(
+    "/api/admin/catalog/batches/preview",
+    {
+      method: "POST",
+      headers: previewHeaders,
+      body: JSON.stringify(previewBody),
+    },
+    env,
+  );
+  assert.equal(replayPreview.status, 200);
+  assert.equal((await replayPreview.json()).replayed, true);
+  const previewConflict = await fetchWorker(
+    "/api/admin/catalog/batches/preview",
+    {
+      method: "POST",
+      headers: previewHeaders,
+      body: JSON.stringify({
+        ...previewBody,
+        pricing: { ...previewBody.pricing, markupBps: 2000 },
+      }),
+    },
+    env,
+  );
+  assert.equal(previewConflict.status, 409);
+  assert.equal(
+    (await previewConflict.json()).error.code,
+    "catalog_batch_idempotency_conflict",
+  );
+
+  const applyHeaders = {
+    authorization: `Bearer ${catalogSecret}`,
+    "content-type": "application/json",
+    "idempotency-key": "catalog-apply-stable-0001",
+  };
+  const applyBody = {
+    expectedVersion: previewData.batch.version,
+    previewDigest: previewData.batch.targetDigest,
+    confirmation: previewData.batch.confirmationText,
+  };
+  const applied = await fetchWorker(
+    `/api/admin/catalog/batches/${previewData.batch.id}/apply`,
+    {
+      method: "POST",
+      headers: applyHeaders,
+      body: JSON.stringify(applyBody),
+    },
+    env,
+  );
+  assert.equal(applied.status, 200);
+  const appliedData = await applied.json();
+  assert.equal(appliedData.replayed, false);
+  assert.equal(appliedData.batch.status, "applied");
+  assert.equal(appliedData.batch.version, 3);
+  const endpoint = db.raw
+    .prepare(
+      `SELECT customer_price_usd_micros, enabled, read_only, revision
+       FROM endpoint_catalog
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    )
+    .get();
+  assert.equal(endpoint.customer_price_usd_micros, 1100);
+  assert.equal(endpoint.enabled, 1);
+  assert.equal(endpoint.read_only, 1);
+  assert.equal(endpoint.revision, 8);
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count FROM admin_audit_logs
+         WHERE action = 'catalog.batch_applied'
+           AND target_id = ?`,
+      )
+      .get(previewData.batch.id).count,
+    1,
+  );
+
+  const replayApply = await fetchWorker(
+    `/api/admin/catalog/batches/${previewData.batch.id}/apply`,
+    {
+      method: "POST",
+      headers: applyHeaders,
+      body: JSON.stringify(applyBody),
+    },
+    env,
+  );
+  assert.equal(replayApply.status, 200);
+  assert.equal((await replayApply.json()).replayed, true);
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT revision FROM endpoint_catalog
+         WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+      )
+      .get().revision,
+    8,
+  );
+});
+
+test("blocks unsafe batch publication and rejects stale all-or-nothing plans", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  enableCatalogEndpoint(db);
+  db.raw
+    .prepare(
+      `UPDATE endpoint_catalog
+       SET enabled = 0, read_only = 0, reviewed_at = NULL,
+           revision = 11
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO endpoint_catalog
+       (path, platform, http_method, upstream_price_usd_micros,
+        customer_price_usd_micros, price_verified, enabled, read_only,
+        safety_classification, safety_reasons_json,
+        safety_policy_version, revision, sync_generation,
+        created_at, updated_at)
+       VALUES ('/v1/tiktok/web/process_video', 'tiktok', 'POST',
+               1000, 2000, 1, 0, 0, 'ambiguous',
+               '["operation_not_allowlisted"]', 1, 4,
+               'sync_test_complete_0001', CURRENT_TIMESTAMP,
+               CURRENT_TIMESTAMP)`,
+    )
+    .run();
+  const catalogSecret = "catalog-batch-stale-secret-32-minimum";
+  const env = baseEnv({
+    DB: db,
+    CATALOG_SYNC_SECRET: catalogSecret,
+  });
+  const preview = await fetchWorker(
+    "/api/admin/catalog/batches/preview",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${catalogSecret}`,
+        "content-type": "application/json",
+        "idempotency-key": "catalog-preview-blocked-0001",
+      },
+      body: JSON.stringify({
+        action: "publish",
+        expectedCatalogGeneration: "sync_test_complete_0001",
+        selection: {
+          platform: "tiktok",
+          query: "",
+          status: "disabled",
+          safety: "all",
+        },
+        pricing: {
+          markupBps: 1000,
+          minimumCustomerPriceUsdMicros: 1,
+        },
+      }),
+    },
+    env,
+  );
+  assert.equal(preview.status, 200, await preview.clone().text());
+  const blocked = await preview.json();
+  assert.equal(blocked.batch.status, "blocked");
+  assert.equal(blocked.batch.counts.matched, 2);
+  assert.equal(blocked.batch.counts.blocked, 1);
+  assert.equal(blocked.batch.counts.unsafe, 1);
+
+  const applyBlocked = await fetchWorker(
+    `/api/admin/catalog/batches/${blocked.batch.id}/apply`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${catalogSecret}`,
+        "content-type": "application/json",
+        "idempotency-key": "catalog-apply-blocked-0001",
+      },
+      body: JSON.stringify({
+        expectedVersion: blocked.batch.version,
+        previewDigest: blocked.batch.targetDigest,
+        confirmation: blocked.batch.confirmationText,
+      }),
+    },
+    env,
+  );
+  assert.equal(applyBlocked.status, 409);
+  assert.equal(
+    (await applyBlocked.json()).error.code,
+    "catalog_batch_not_applicable",
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count FROM endpoint_catalog WHERE enabled = 1`,
+      )
+      .get().count,
+    0,
+  );
+
+  const credentialPreview = await fetchWorker(
+    "/api/admin/catalog/batches/preview",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${catalogSecret}`,
+        "content-type": "application/json",
+        "idempotency-key": "catalog-preview-credential-stale-0001",
+      },
+      body: JSON.stringify({
+        action: "publish",
+        expectedCatalogGeneration: "sync_test_complete_0001",
+        selection: {
+          platform: "tiktok",
+          query: "fetch_user_profile",
+          status: "disabled",
+          safety: "safe_data_read",
+        },
+        pricing: {
+          markupBps: 1000,
+          minimumCustomerPriceUsdMicros: 1,
+        },
+      }),
+    },
+    env,
+  );
+  assert.equal(credentialPreview.status, 200);
+  const credentialPlan = await credentialPreview.json();
+  db.raw
+    .prepare(
+      `UPDATE catalog_sync_state
+       SET credential_fingerprint = ?
+       WHERE id = 1`,
+    )
+    .run("f".repeat(16));
+  const credentialConflict = await fetchWorker(
+    `/api/admin/catalog/batches/${credentialPlan.batch.id}/apply`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${catalogSecret}`,
+        "content-type": "application/json",
+        "idempotency-key": "catalog-apply-credential-stale-0001",
+      },
+      body: JSON.stringify({
+        expectedVersion: credentialPlan.batch.version,
+        previewDigest: credentialPlan.batch.targetDigest,
+        confirmation: credentialPlan.batch.confirmationText,
+      }),
+    },
+    env,
+  );
+  assert.equal(credentialConflict.status, 409);
+  assert.equal(
+    (await credentialConflict.json()).error.code,
+    "catalog_batch_apply_conflict",
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT enabled FROM endpoint_catalog
+         WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+      )
+      .get().enabled,
+    0,
+  );
+  db.raw
+    .prepare(
+      `UPDATE catalog_sync_state
+       SET credential_fingerprint = ?
+       WHERE id = 1`,
+    )
+    .run(
+      createHash("sha256")
+        .update("upstream-key")
+        .digest("hex")
+        .slice(0, 16),
+    );
+
+  const safePreview = await fetchWorker(
+    "/api/admin/catalog/batches/preview",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${catalogSecret}`,
+        "content-type": "application/json",
+        "idempotency-key": "catalog-preview-stale-0001",
+      },
+      body: JSON.stringify({
+        action: "publish",
+        expectedCatalogGeneration: "sync_test_complete_0001",
+        selection: {
+          platform: "tiktok",
+          query: "fetch_user_profile",
+          status: "disabled",
+          safety: "safe_data_read",
+        },
+        pricing: {
+          markupBps: 1000,
+          minimumCustomerPriceUsdMicros: 1,
+        },
+      }),
+    },
+    env,
+  );
+  assert.equal(safePreview.status, 200);
+  const safePlan = await safePreview.json();
+  db.raw
+    .prepare(
+      `UPDATE endpoint_catalog
+       SET customer_price_usd_micros = 2500, revision = revision + 1
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    )
+    .run();
+  const staleApply = await fetchWorker(
+    `/api/admin/catalog/batches/${safePlan.batch.id}/apply`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${catalogSecret}`,
+        "content-type": "application/json",
+        "idempotency-key": "catalog-apply-stale-0001",
+      },
+      body: JSON.stringify({
+        expectedVersion: safePlan.batch.version,
+        previewDigest: safePlan.batch.targetDigest,
+        confirmation: safePlan.batch.confirmationText,
+      }),
+    },
+    env,
+  );
+  assert.equal(staleApply.status, 409);
+  assert.equal(
+    (await staleApply.json()).error.code,
+    "catalog_batch_apply_conflict",
+  );
+  const afterConflict = db.raw
+    .prepare(
+      `SELECT customer_price_usd_micros, enabled, revision
+       FROM endpoint_catalog
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    )
+    .get();
+  assert.equal(afterConflict.customer_price_usd_micros, 2500);
+  assert.equal(afterConflict.enabled, 0);
+  assert.equal(afterConflict.revision, 12);
 });
 
 test("reconciles missed payment callbacks without double credit", async (t) => {
