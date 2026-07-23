@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { getRequestOrigin } from "../request-origin";
 
 export const metadata: Metadata = {
   title: "API 文档",
@@ -7,14 +8,15 @@ export const metadata: Metadata = {
     "RelayBase API 鉴权、请求示例、错误码、计费与支付确认语义。",
 };
 
-const curlExample = `curl --request GET \\
-  'https://api.relaybase.dev/v1/tiktok/web/fetch_user_profile?uniqueId=mrbeast' \\
+function codeExamples(origin: string) {
+  const curl = `curl --request GET \\
+  '${origin}/v1/tiktok/web/fetch_user_profile?uniqueId=mrbeast' \\
   --header 'Authorization: Bearer rb_live_YOUR_KEY' \\
   --header 'Idempotency-Key: profile-sync-20260723-001' \\
   --header 'Accept: application/json'`;
 
-const javascriptExample = `const response = await fetch(
-  "https://api.relaybase.dev/v1/tiktok/web/fetch_user_profile?uniqueId=mrbeast",
+  const javascript = `const response = await fetch(
+  "${origin}/v1/tiktok/web/fetch_user_profile?uniqueId=mrbeast",
   {
     headers: {
       Authorization: "Bearer rb_live_YOUR_KEY",
@@ -31,10 +33,10 @@ if (!response.ok) {
 
 const payload = await response.json();`;
 
-const pythonExample = `import requests
+  const python = `import requests
 
 response = requests.get(
-    "https://api.relaybase.dev/v1/tiktok/web/fetch_user_profile",
+    "${origin}/v1/tiktok/web/fetch_user_profile",
     params={"uniqueId": "mrbeast"},
     headers={
         "Authorization": "Bearer rb_live_YOUR_KEY",
@@ -46,6 +48,9 @@ response = requests.get(
 response.raise_for_status()
 payload = response.json()`;
 
+  return { curl, javascript, python };
+}
+
 const errorExample = `{
   "error": {
     "code": "insufficient_balance",
@@ -55,13 +60,14 @@ const errorExample = `{
 }`;
 
 const errors = [
-  ["400", "bad_request", "参数缺失、格式无效或请求路径不支持"],
+  ["400", "invalid_idempotency_key", "幂等键缺失或格式无效"],
   ["401", "invalid_api_key", "API Key 缺失、无效或已撤销"],
   ["402", "insufficient_balance", "可用余额不足以发起本次调用"],
   ["409", "idempotency_conflict", "幂等键已被使用；不会重复调用或扣费"],
-  ["404", "upstream_not_found", "目标资源不存在或上游未返回结果"],
-  ["429", "rate_limited", "触发请求速率限制，请退避后重试"],
-  ["502", "upstream_error", "上游暂时不可用或响应无法解析"],
+  ["404", "endpoint_not_enabled", "接口未开放，或上游通过统一错误体返回 404"],
+  ["429", "rate_limit_exceeded", "客户、账户或共享上游达到速率限制"],
+  ["502", "upstream_unavailable", "上游网络不可用；请求已退款"],
+  ["503", "upstream_not_authorized", "当前部署仍处于安全沙盒"],
 ] as const;
 
 function CodePanel({
@@ -86,7 +92,10 @@ function CodePanel({
   );
 }
 
-export default function DocsPage() {
+export default async function DocsPage() {
+  const origin = await getRequestOrigin();
+  const examples = codeExamples(origin);
+
   return (
     <main className="docs-page" id="main-content">
       <header className="docs-masthead">
@@ -110,6 +119,7 @@ export default function DocsPage() {
           <nav aria-label="文档目录">
             <span>开始</span>
             <a href="#overview">基本约定</a>
+            <a href="#catalog">接口目录</a>
             <a href="#auth">鉴权</a>
             <a href="#examples">请求示例</a>
             <span>行为</span>
@@ -157,8 +167,25 @@ export default function DocsPage() {
             </ul>
           </section>
 
+          <section id="catalog">
+            <div className="docs-section-label">02 / CATALOG</div>
+            <h2>先读取当前开放目录</h2>
+            <p>
+              <Link href="/catalog">接口目录页面</Link>
+              只展示已经完成只读、安全和价格审核的路径。程序也可以直接读取公开 JSON：
+            </p>
+            <CodePanel title="Public endpoint catalog" language="HTTP">
+              {`GET ${origin}/api/catalog
+GET ${origin}/api/catalog?platform=tiktok&limit=100`}
+            </CodePanel>
+            <p>
+              返回的 <code>priceUsdMicros</code> 是每次上游 HTTP 200
+              成功请求的客户价格。未出现在目录中的路径不能调用。
+            </p>
+          </section>
+
           <section id="auth">
-            <div className="docs-section-label">02 / AUTH</div>
+            <div className="docs-section-label">03 / AUTH</div>
             <h2>Bearer Key 鉴权</h2>
             <p>
               在控制台生成以 <code>rb_live_</code> 开头的密钥，并放入每次请求的{" "}
@@ -181,16 +208,17 @@ Idempotency-Key: profile-sync-20260723-001`}
             <div className="docs-callout">
               <span>＝</span>
               <div>
-                <b>幂等键：8–128 个可打印 ASCII 字符</b>
+                <b>幂等键：8–128 个安全 ASCII 字符</b>
                 <p>
-                  同一个键再次提交会返回 409，且不会重复请求上游或重复扣费。请按业务任务生成并持久化，而不是每次重试都换新键。
+                  仅使用字母、数字、点、下划线、冒号和连字符。同一个键再次提交会返回
+                  409，且不会重复请求上游或扣费；每次付费请求都必须提供。
                 </p>
               </div>
             </div>
           </section>
 
           <section id="examples">
-            <div className="docs-section-label">03 / EXAMPLES</div>
+            <div className="docs-section-label">04 / EXAMPLES</div>
             <h2>同一请求，三种写法</h2>
             <p>
               下面都请求同一个 TikTok 用户资料能力。把示例域名替换为你的部署域名，并替换 API
@@ -198,24 +226,23 @@ Idempotency-Key: profile-sync-20260723-001`}
             </p>
             <div className="docs-code-stack">
               <CodePanel title="cURL" language="SHELL">
-                {curlExample}
+                {examples.curl}
               </CodePanel>
               <CodePanel title="JavaScript" language="JS">
-                {javascriptExample}
+                {examples.javascript}
               </CodePanel>
               <CodePanel title="Python" language="PY">
-                {pythonExample}
+                {examples.python}
               </CodePanel>
             </div>
           </section>
 
           <section id="response">
-            <div className="docs-section-label">04 / RESPONSE</div>
+            <div className="docs-section-label">05 / RESPONSE</div>
             <h2>响应与 requestId</h2>
             <p>
-              公开端点成功时原样透传 TikHub JSON，不额外包裹 RelayBase
-              字段。请求标识与计费信息通过 RelayBase
-              响应头和控制台提供；错误响应才使用下方统一错误体。
+              公开端点成功时原样透传上游 JSON，不额外包裹 RelayBase
+              字段。请求标识与计费信息通过响应头和控制台提供；任何平台或上游错误都使用下方统一错误体。
             </p>
             <CodePanel title="RelayBase response headers" language="HTTP">
               {`X-Request-Id: req_01K2...
@@ -242,7 +269,7 @@ X-RelayBase-Balance-Usd-Micros: 24998000`}
           </section>
 
           <section id="errors">
-            <div className="docs-section-label">05 / ERRORS</div>
+            <div className="docs-section-label">06 / ERRORS</div>
             <h2>统一错误体</h2>
             <CodePanel title="Error response" language="JSON">
               {errorExample}
@@ -274,14 +301,15 @@ X-RelayBase-Balance-Usd-Micros: 24998000`}
               <div>
                 <b>重试建议</b>
                 <p>
-                  只对 429、502 和网络超时进行指数退避重试；为业务任务保存自己的幂等标识，避免重复处理返回数据。
+                  只对 429、502、503 和网络超时进行指数退避重试，并始终复用原来的幂等键。收到
+                  409 时不要换键盲目重放，应先核对原请求。
                 </p>
               </div>
             </div>
           </section>
 
           <section id="billing">
-            <div className="docs-section-label">06 / BILLING</div>
+            <div className="docs-section-label">07 / BILLING</div>
             <h2>计费语义</h2>
             <p>
               余额使用美元微单位记录，<code>1 USD = 1,000,000 micros</code>
@@ -313,7 +341,7 @@ X-RelayBase-Balance-Usd-Micros: 24998000`}
           </section>
 
           <section id="webhooks">
-            <div className="docs-section-label">07 / PAYMENT CONFIRMATION</div>
+            <div className="docs-section-label">08 / PAYMENT CONFIRMATION</div>
             <h2>充值确认不依赖浏览器</h2>
             <p>
               创建充值单后，控制台会显示地址、币种、应付数量与 invoice

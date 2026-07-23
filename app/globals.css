@@ -199,6 +199,36 @@ pre {
   box-shadow: 0 0 0 1px var(--ink);
 }
 
+.platform-status-checking .status-dot {
+  background: var(--line);
+  animation: status-pulse 1.2s ease-in-out infinite;
+}
+
+.platform-status-sandbox .status-dot,
+.platform-status-partial .status-dot {
+  background: #f2bd2d;
+}
+
+.platform-status-live .status-dot {
+  background: var(--lime);
+}
+
+.platform-status-unknown .status-dot {
+  background: var(--red);
+}
+
+@keyframes status-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .platform-status-checking .status-dot {
+    animation: none;
+  }
+}
+
 .button {
   display: inline-flex;
   min-height: 44px;

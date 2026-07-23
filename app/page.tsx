@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { getRequestOrigin } from "./request-origin";
 
 export const metadata: Metadata = {
   title: "稳定的数据 API",
@@ -43,7 +44,9 @@ const billRows = [
   { item: "失败请求", requests: "37", unit: "$0.000", total: "$0.00" },
 ] as const;
 
-export default function Home() {
+export default async function Home() {
+  const origin = await getRequestOrigin();
+
   return (
     <main id="main-content">
       <section className="hero section-grid">
@@ -93,7 +96,7 @@ export default function Home() {
               <span>request.sh</span>
               <span className="code-live">
                 <i aria-hidden="true" />
-                LIVE
+                API v1
               </span>
             </div>
             <div className="code-tabs" aria-hidden="true">
@@ -107,7 +110,7 @@ export default function Home() {
                 <span className="code-blue">curl</span> --request GET \{"\n"}
                 <span className="code-muted">02</span> &nbsp;
                 <span className="code-lime">
-                  &apos;https://api.relaybase.dev/v1/tiktok/
+                  &apos;{origin}/v1/tiktok/
                   {"\n"}
                 </span>
                 <span className="code-muted">03</span> &nbsp;
@@ -182,11 +185,11 @@ export default function Home() {
         </div>
         <div className="section-intro">
           <p>
-            不再为每个平台重复处理鉴权、限流和响应差异。RelayBase
-            把多平台能力整理在可预测的路径下。
+            下列是上游可编排的数据范围；只有完成只读、安全和价格审核后才会进入
+            RelayBase 公开目录，以目录实时状态为准。
           </p>
-          <Link className="text-link" href="/docs">
-            浏览接口规范 <span aria-hidden="true">↗</span>
+          <Link className="text-link" href="/catalog">
+            浏览当前接口 <span aria-hidden="true">↗</span>
           </Link>
         </div>
         <div className="platform-grid">
@@ -212,7 +215,7 @@ export default function Home() {
             </div>
             <h3>持续扩展</h3>
             <p>更多公开数据能力正在整理接入</p>
-            <Link href="/docs">查看全部路径</Link>
+            <Link href="/catalog">查看全部路径</Link>
           </article>
         </div>
       </section>

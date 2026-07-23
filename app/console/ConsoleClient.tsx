@@ -1,7 +1,7 @@
 "use client";
 
-import type { FormEvent } from "react";
-import { useCallback, useEffect, useState } from "react";
+import type { FormEvent, MouseEvent } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatGPTUser } from "../chatgpt-auth";
 
 type ApiKeyRecord = {
@@ -17,8 +17,12 @@ type PaymentRecord = {
   id: string;
   amountUsdMicros: number;
   payCurrency: string;
+  payAmount: string | null;
+  payAddress: string | null;
+  invoiceUrl: string | null;
   status: string;
   createdAt: string;
+  updatedAt: string;
 };
 
 type CallRecord = {
@@ -28,6 +32,7 @@ type CallRecord = {
   platform: string;
   statusCode: number;
   costUsdMicros: number;
+  refunded: boolean;
   latencyMs: number;
   createdAt: string;
 };
@@ -38,6 +43,17 @@ type DashboardData = {
     displayName: string;
   };
   balanceUsdMicros: number;
+  capabilities: {
+    databaseConfigured: boolean;
+    configurationValid: boolean;
+    legalReviewConfirmed: boolean;
+    resellerAuthorized: boolean;
+    proxyEnabled: boolean;
+    paymentsEnabled: boolean;
+    adminConfigured: boolean;
+    schemaReady: boolean;
+    catalogReady: boolean;
+  };
   stats: {
     calls30d: number;
     spend30dUsdMicros: number;
@@ -60,8 +76,8 @@ type PaymentInvoice = {
   id: string;
   status: string;
   payAddress: string | null;
-  payAmount: number | string;
-  payCurrency: "usdttrc20" | "usdterc20" | "usdcbase";
+  payAmount: number | string | null;
+  payCurrency: string;
   invoiceUrl: string | null;
 };
 
@@ -73,12 +89,34 @@ type ApiErrorShape = {
   };
 };
 
+type JsonRecord = Record<string, unknown>;
+
+type SessionUser = {
+  displayName: string;
+  email: string | null;
+  walletAddress: string | null;
+  provider: string;
+};
+
+type AuthMeResponse = {
+  user: SessionUser;
+};
+
 const amountOptions = [10, 25, 50, 100] as const;
 const currencyOptions = [
   { value: "usdttrc20", label: "USDT · TRC20" },
   { value: "usdterc20", label: "USDT · ERC20" },
   { value: "usdcbase", label: "USDC · Base" },
 ] as const;
+
+class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
 
 async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -99,7 +137,7 @@ async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
       (response.status === 401
         ? "登录状态已失效，请重新登录。"
         : `请求失败（HTTP ${response.status}）`);
-    throw new Error(message);
+    throw new ApiRequestError(message, response.status);
   }
 
   if (!payload) {
@@ -107,6 +145,134 @@ async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
   }
 
   return payload;
+}
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 0;
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return typeof value === "string" || value === null;
+}
+
+function isSessionUser(value: unknown): value is SessionUser {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.displayName === "string" &&
+    value.displayName.length > 0 &&
+    value.displayName.length <= 320 &&
+    (value.email === null ||
+      (typeof value.email === "string" &&
+        value.email.length > 0 &&
+        value.email.length <= 320)) &&
+    (value.walletAddress === null ||
+      (typeof value.walletAddress === "string" &&
+        /^0x[a-fA-F0-9]{40}$/.test(value.walletAddress))) &&
+    typeof value.provider === "string" &&
+    /^[a-z][a-z0-9_-]{0,31}$/.test(value.provider)
+  );
+}
+
+function isAuthMeResponse(value: unknown): value is AuthMeResponse {
+  return isRecord(value) && isSessionUser(value.user);
+}
+
+function isSignoutResponse(value: unknown): value is { ok: true } {
+  return isRecord(value) && value.ok === true;
+}
+
+function isApiKeyRecord(value: unknown): value is ApiKeyRecord {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === "string" &&
+    typeof value.label === "string" &&
+    typeof value.prefix === "string" &&
+    typeof value.createdAt === "string" &&
+    isNullableString(value.lastUsedAt) &&
+    isNullableString(value.revokedAt)
+  );
+}
+
+function isPaymentRecord(value: unknown): value is PaymentRecord {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === "string" &&
+    isNonNegativeInteger(value.amountUsdMicros) &&
+    typeof value.payCurrency === "string" &&
+    isNullableString(value.payAmount) &&
+    isNullableString(value.payAddress) &&
+    isNullableString(value.invoiceUrl) &&
+    typeof value.status === "string" &&
+    typeof value.createdAt === "string" &&
+    typeof value.updatedAt === "string"
+  );
+}
+
+function isCallRecord(value: unknown): value is CallRecord {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === "string" &&
+    typeof value.method === "string" &&
+    typeof value.path === "string" &&
+    typeof value.platform === "string" &&
+    isNonNegativeInteger(value.statusCode) &&
+    isNonNegativeInteger(value.costUsdMicros) &&
+    typeof value.refunded === "boolean" &&
+    isNonNegativeInteger(value.latencyMs) &&
+    typeof value.createdAt === "string"
+  );
+}
+
+function isDashboardData(value: unknown): value is DashboardData {
+  if (!isRecord(value)) return false;
+
+  const { user, capabilities, stats, keys, payments, calls } = value;
+  if (!isRecord(user) || !isRecord(capabilities) || !isRecord(stats)) {
+    return false;
+  }
+
+  return (
+    typeof user.email === "string" &&
+    typeof user.displayName === "string" &&
+    isFiniteNumber(value.balanceUsdMicros) &&
+    typeof capabilities.databaseConfigured === "boolean" &&
+    typeof capabilities.configurationValid === "boolean" &&
+    typeof capabilities.legalReviewConfirmed === "boolean" &&
+    typeof capabilities.resellerAuthorized === "boolean" &&
+    typeof capabilities.proxyEnabled === "boolean" &&
+    typeof capabilities.paymentsEnabled === "boolean" &&
+    typeof capabilities.adminConfigured === "boolean" &&
+    typeof capabilities.schemaReady === "boolean" &&
+    typeof capabilities.catalogReady === "boolean" &&
+    isNonNegativeInteger(stats.calls30d) &&
+    isNonNegativeInteger(stats.spend30dUsdMicros) &&
+    isFiniteNumber(stats.successRate) &&
+    stats.successRate >= 0 &&
+    stats.successRate <= 1 &&
+    Array.isArray(keys) &&
+    keys.every(isApiKeyRecord) &&
+    Array.isArray(payments) &&
+    payments.every(isPaymentRecord) &&
+    Array.isArray(calls) &&
+    calls.every(isCallRecord)
+  );
+}
+
+function parseDashboardData(value: unknown): DashboardData {
+  if (!isDashboardData(value)) {
+    throw new Error(
+      "控制台数据格式异常，请刷新重试；若问题持续存在，请联系支持。",
+    );
+  }
+  return value;
 }
 
 function formatUsd(micros: number | null | undefined, digits = 2) {
@@ -134,14 +300,28 @@ function formatDate(value: string | null | undefined, includeTime = false) {
 function paymentStatus(status: string) {
   const labels: Record<string, string> = {
     pending: "待确认",
+    waiting: "等待付款",
     confirming: "确认中",
+    confirmed: "已确认",
+    sending: "入账处理中",
+    partially_paid: "金额不足",
     finished: "已到账",
     completed: "已到账",
     paid: "已到账",
     failed: "失败",
     expired: "已过期",
+    refunded: "已退款",
+    manual_review: "人工复核",
+    manual_resolved: "复核已结案",
+    provider_error: "通道异常",
+    creating: "创建中",
   };
   return labels[status.toLowerCase()] ?? status;
+}
+
+function paymentStatusClass(status: string) {
+  const normalized = status.toLowerCase().replace(/[^a-z_]/g, "");
+  return normalized || "unknown";
 }
 
 function currencyLabel(currency: string) {
@@ -151,16 +331,26 @@ function currencyLabel(currency: string) {
 }
 
 export function ConsoleClient({
-  user,
-  signInPath,
-  signOutPath,
+  chatGPTUser,
+  chatGPTSignOutPath,
 }: {
-  user: ChatGPTUser | null;
-  signInPath: string;
-  signOutPath: string;
+  chatGPTUser: ChatGPTUser | null;
+  chatGPTSignOutPath: string;
 }) {
+  const [sessionUser, setSessionUser] = useState<SessionUser | null>(() =>
+    chatGPTUser
+      ? {
+          displayName: chatGPTUser.displayName,
+          email: chatGPTUser.email,
+          walletAddress: null,
+          provider: "chatgpt",
+        }
+      : null,
+  );
+  const [authChecking, setAuthChecking] = useState(!chatGPTUser);
+  const [signingOut, setSigningOut] = useState(false);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
-  const [loading, setLoading] = useState(Boolean(user));
+  const [loading, setLoading] = useState(Boolean(chatGPTUser));
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [keyLabel, setKeyLabel] = useState("Production");
@@ -173,6 +363,23 @@ export function ConsoleClient({
     useState<(typeof currencyOptions)[number]["value"]>("usdttrc20");
   const [creatingPayment, setCreatingPayment] = useState(false);
   const [invoice, setInvoice] = useState<PaymentInvoice | null>(null);
+  const paymentAttemptKey = useRef<string | null>(null);
+  const latestInvoicePayment = invoice
+    ? dashboard?.payments.find((payment) => payment.id === invoice.id)
+    : null;
+  const visibleInvoice = invoice
+    ? {
+        ...invoice,
+        status: latestInvoicePayment?.status ?? invoice.status,
+        payAmount: latestInvoicePayment?.payAmount ?? invoice.payAmount,
+        payAddress: latestInvoicePayment?.payAddress ?? invoice.payAddress,
+        invoiceUrl: latestInvoicePayment?.invoiceUrl ?? invoice.invoiceUrl,
+      }
+    : null;
+  const visibleInvoiceId = visibleInvoice?.id ?? null;
+  const visibleInvoiceStatus = visibleInvoice?.status ?? null;
+  const user = sessionUser;
+  const loginPath = "/login?return_to=%2Fconsole";
 
   const refreshDashboard = useCallback(async () => {
     if (!user) {
@@ -183,11 +390,18 @@ export function ConsoleClient({
     setLoading(true);
     setError(null);
     try {
-      const data = await apiRequest<DashboardData>("/api/dashboard", {
+      const payload = await apiRequest<unknown>("/api/dashboard", {
         cache: "no-store",
       });
+      const data = parseDashboardData(payload);
       setDashboard(data);
     } catch (requestError) {
+      if (requestError instanceof ApiRequestError && requestError.status === 401) {
+        setDashboard(null);
+        if (user?.provider !== "chatgpt") {
+          setSessionUser(null);
+        }
+      }
       setError(
         requestError instanceof Error
           ? requestError.message
@@ -199,11 +413,83 @@ export function ConsoleClient({
   }, [user]);
 
   useEffect(() => {
+    if (chatGPTUser) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setAuthChecking(true);
+      try {
+        const response = await fetch("/api/auth/me", {
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+          signal: controller.signal,
+        });
+        const payload: unknown = await response.json().catch(() => null);
+        if (response.status === 401) {
+          setSessionUser(null);
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(`会话检查失败（HTTP ${response.status}）。`);
+        }
+        if (!isAuthMeResponse(payload)) {
+          throw new Error("登录会话返回了无法验证的数据。");
+        }
+        setSessionUser(payload.user);
+      } catch (requestError) {
+        if (controller.signal.aborted) return;
+        setSessionUser(null);
+        setError(
+          requestError instanceof Error
+            ? requestError.message
+            : "无法确认当前登录状态。",
+        );
+      } finally {
+        if (!controller.signal.aborted) setAuthChecking(false);
+      }
+    }, 0);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [chatGPTUser]);
+
+  useEffect(() => {
     const timer = window.setTimeout(() => {
       void refreshDashboard();
     }, 0);
     return () => window.clearTimeout(timer);
   }, [refreshDashboard]);
+
+  useEffect(() => {
+    if (
+      !user ||
+      !visibleInvoiceId ||
+      !visibleInvoiceStatus ||
+      [
+        "finished",
+        "failed",
+        "expired",
+        "refunded",
+        "manual_review",
+        "manual_resolved",
+      ].includes(
+        visibleInvoiceStatus.toLowerCase(),
+      )
+    ) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void refreshDashboard();
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [
+    refreshDashboard,
+    user,
+    visibleInvoiceId,
+    visibleInvoiceStatus,
+  ]);
 
   async function createKey(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -265,13 +551,21 @@ export function ConsoleClient({
     setError(null);
     setNotice(null);
     try {
+      paymentAttemptKey.current ??=
+        typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `payment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const result = await apiRequest<{ payment: PaymentInvoice }>(
         "/api/payments",
         {
           method: "POST",
+          headers: {
+            "Idempotency-Key": paymentAttemptKey.current,
+          },
           body: JSON.stringify({ amountUsd, payCurrency }),
         },
       );
+      paymentAttemptKey.current = null;
       setInvoice(result.payment);
       setNotice("充值单已创建，请严格按指定币种、网络和数量支付。");
       await refreshDashboard();
@@ -286,6 +580,37 @@ export function ConsoleClient({
     }
   }
 
+  async function signOut(event: MouseEvent<HTMLAnchorElement>) {
+    event.preventDefault();
+    if (signingOut) return;
+    setSigningOut(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const response = await fetch("/api/auth/signout", {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      const payload: unknown = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(`退出失败（HTTP ${response.status}）。`);
+      }
+      if (!isSignoutResponse(payload)) {
+        throw new Error("退出接口返回了无法验证的数据。");
+      }
+      window.location.assign(
+        user?.provider === "chatgpt" ? chatGPTSignOutPath : "/",
+      );
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error ? requestError.message : "退出失败。",
+      );
+      setSigningOut(false);
+    }
+  }
+
   async function copyText(value: string, successMessage: string) {
     try {
       await navigator.clipboard.writeText(value);
@@ -296,11 +621,19 @@ export function ConsoleClient({
   }
 
   const displayName =
-    dashboard?.user.displayName ?? user?.displayName ?? "未登录用户";
-  const email = dashboard?.user.email ?? user?.email ?? "";
+    dashboard?.user.displayName ??
+    user?.displayName ??
+    (authChecking ? "正在确认账户" : "未登录用户");
+  const email =
+    dashboard?.user.email ??
+    user?.email ??
+    (user?.walletAddress
+      ? `${user.walletAddress.slice(0, 8)}…${user.walletAddress.slice(-6)}`
+      : "");
   const activeKeys = dashboard?.keys.filter((key) => !key.revokedAt) ?? [];
   const recentCalls = dashboard?.calls.slice(0, 8) ?? [];
-  const recentPayments = dashboard?.payments.slice(0, 4) ?? [];
+  const recentPayments = dashboard?.payments.slice(0, 6) ?? [];
+  const paymentsEnabled = dashboard?.capabilities.paymentsEnabled ?? false;
 
   return (
     <div className="console-shell">
@@ -318,14 +651,33 @@ export function ConsoleClient({
             <span>{email || "登录后同步账户数据"}</span>
           </div>
           {user ? (
-            <a href={signOutPath}>退出</a>
+            <a
+              href={user.provider === "chatgpt" ? chatGPTSignOutPath : "/"}
+              onClick={(event) => void signOut(event)}
+              aria-disabled={signingOut}
+            >
+              {signingOut ? "退出中" : "退出"}
+            </a>
           ) : (
-            <a href={signInPath}>登录</a>
+            <a href={loginPath}>{authChecking ? "检查中" : "登录"}</a>
           )}
         </div>
       </div>
 
-      {!user ? (
+      {authChecking ? (
+        <section className="console-auth-banner" role="status">
+          <div className="auth-banner-mark" aria-hidden="true">
+            ···
+          </div>
+          <div>
+            <span>CHECKING SESSION</span>
+            <h2>正在确认你的登录会话。</h2>
+            <p>会话检查完成后，控制台会自动加载对应账户的数据。</p>
+          </div>
+        </section>
+      ) : null}
+
+      {!user && !authChecking ? (
         <section className="console-auth-banner">
           <div className="auth-banner-mark" aria-hidden="true">
             ↗
@@ -334,11 +686,12 @@ export function ConsoleClient({
             <span>IDENTITY REQUIRED</span>
             <h2>登录后加载你的余额、密钥和请求账本。</h2>
             <p>
-              使用 ChatGPT 登录识别账户。登录不会自动充值，也不会向浏览器暴露任何上游凭据。
+              支持 Google、EVM 钱包与 ChatGPT
+              托管身份。登录不会自动充值，也不会向浏览器暴露任何上游凭据。
             </p>
           </div>
-          <a className="button button-lime" href={signInPath}>
-            使用 ChatGPT 登录
+          <a className="button button-lime" href={loginPath}>
+            选择登录方式
             <span aria-hidden="true">→</span>
           </a>
         </section>
@@ -523,7 +876,11 @@ export function ConsoleClient({
             <span className="pay-badge">STABLECOIN</span>
           </div>
           <form onSubmit={createPayment}>
-            <fieldset disabled={!user || creatingPayment}>
+            <fieldset
+              disabled={
+                !user || loading || creatingPayment || !paymentsEnabled
+              }
+            >
               <legend>充值金额（USD）</legend>
               <div className="amount-options">
                 {amountOptions.map((amount) => (
@@ -533,7 +890,10 @@ export function ConsoleClient({
                       name="amount"
                       value={amount}
                       checked={amountUsd === amount}
-                      onChange={() => setAmountUsd(amount)}
+                      onChange={() => {
+                        paymentAttemptKey.current = null;
+                        setAmountUsd(amount);
+                      }}
                     />
                     <span>${amount}</span>
                   </label>
@@ -544,9 +904,12 @@ export function ConsoleClient({
                 <select
                   value={payCurrency}
                   onChange={(event) =>
-                    setPayCurrency(
-                      event.target.value as typeof payCurrency,
-                    )
+                    {
+                      paymentAttemptKey.current = null;
+                      setPayCurrency(
+                        event.target.value as typeof payCurrency,
+                      );
+                    }
                   }
                 >
                   {currencyOptions.map((currency) => (
@@ -560,19 +923,23 @@ export function ConsoleClient({
             <button
               className="button button-lime topup-submit"
               type="submit"
-              disabled={!user || creatingPayment}
+              disabled={
+                !user || loading || creatingPayment || !paymentsEnabled
+              }
             >
               {creatingPayment ? "正在创建充值单…" : `充值 $${amountUsd}`}
               <span aria-hidden="true">↗</span>
             </button>
           </form>
           <p className="topup-warning">
-            只向充值单指定的网络和地址转账。链上确认前，余额不会改变。
+            {user && !loading && !paymentsEnabled
+              ? "当前为安全沙盒，真实充值将在数据代理、商户与合规条件全部就绪后开放。"
+              : "只向充值单指定的网络和地址转账。链上确认前，余额不会改变。"}
           </p>
         </aside>
       </div>
 
-      {invoice ? (
+      {visibleInvoice ? (
         <section className="invoice-panel">
           <div className="invoice-title">
             <div>
@@ -590,17 +957,20 @@ export function ConsoleClient({
           <div className="invoice-grid">
             <div>
               <span>应付数量</span>
-              <strong>{invoice.payAmount}</strong>
-              <small>{currencyLabel(invoice.payCurrency)}</small>
+              <strong>{visibleInvoice.payAmount ?? "—"}</strong>
+              <small>{currencyLabel(visibleInvoice.payCurrency)}</small>
             </div>
             <div className="invoice-address">
               <span>收款地址</span>
-              <code>{invoice.payAddress ?? "等待支付服务生成地址"}</code>
-              {invoice.payAddress ? (
+              <code>{visibleInvoice.payAddress ?? "等待支付服务生成地址"}</code>
+              {visibleInvoice.payAddress ? (
                 <button
                   type="button"
                   onClick={() =>
-                    void copyText(invoice.payAddress!, "支付地址已复制。")
+                    void copyText(
+                      visibleInvoice.payAddress!,
+                      "支付地址已复制。",
+                    )
                   }
                 >
                   复制地址
@@ -610,15 +980,15 @@ export function ConsoleClient({
             <div>
               <span>当前状态</span>
               <strong className="invoice-status">
-                {paymentStatus(invoice.status)}
+                {paymentStatus(visibleInvoice.status)}
               </strong>
               <small>到账后自动更新余额</small>
             </div>
           </div>
-          {invoice.invoiceUrl ? (
+          {visibleInvoice.invoiceUrl ? (
             <a
               className="button button-dark"
-              href={invoice.invoiceUrl}
+              href={visibleInvoice.invoiceUrl}
               target="_blank"
               rel="noreferrer"
             >
@@ -671,7 +1041,12 @@ export function ConsoleClient({
                     </span>
                   </td>
                   <td>{call.latencyMs} ms</td>
-                  <td>{formatUsd(call.costUsdMicros, 4)}</td>
+                  <td>
+                    {formatUsd(call.refunded ? 0 : call.costUsdMicros, 4)}
+                    {call.refunded ? (
+                      <small className="request-refunded">已退回</small>
+                    ) : null}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -684,7 +1059,7 @@ export function ConsoleClient({
                   ? "创建 Key 并发出第一条请求后，状态、延迟与费用会出现在这里。"
                   : "登录后查看真实的请求记录。"}
               </p>
-              <a href={user ? "/docs" : signInPath}>
+              <a href={user ? "/docs" : loginPath}>
                 {user ? "查看快速开始 →" : "登录控制台 →"}
               </a>
             </div>
@@ -711,7 +1086,7 @@ export function ConsoleClient({
             {recentPayments.map((payment) => (
               <article key={payment.id}>
                 <span
-                  className={`payment-dot payment-${payment.status.toLowerCase()}`}
+                  className={`payment-dot payment-${paymentStatusClass(payment.status)}`}
                   aria-hidden="true"
                 />
                 <div>
@@ -721,6 +1096,32 @@ export function ConsoleClient({
                 <code>{payment.id}</code>
                 <span>{formatDate(payment.createdAt, true)}</span>
                 <strong>{paymentStatus(payment.status)}</strong>
+                {payment.payAddress &&
+                ![
+                  "finished",
+                  "failed",
+                  "expired",
+                  "refunded",
+                  "manual_review",
+                  "manual_resolved",
+                  "provider_error",
+                ].includes(payment.status.toLowerCase()) ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setInvoice({
+                        id: payment.id,
+                        status: payment.status,
+                        payAddress: payment.payAddress,
+                        payAmount: payment.payAmount,
+                        payCurrency: payment.payCurrency,
+                        invoiceUrl: payment.invoiceUrl,
+                      })
+                    }
+                  >
+                    继续支付
+                  </button>
+                ) : null}
               </article>
             ))}
           </div>

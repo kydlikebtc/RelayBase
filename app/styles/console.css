@@ -650,8 +650,8 @@
 .topup-warning {
   margin: 0;
   padding: 0 20px 20px;
-  color: #c6d2ff;
-  font-size: 9px;
+  color: #e1e7ff;
+  font-size: 11px;
   line-height: 1.55;
 }
 
@@ -857,6 +857,15 @@
   background: var(--red);
 }
 
+.request-refunded {
+  display: block;
+  margin-top: 3px;
+  color: var(--green);
+  font-family: var(--sans);
+  font-size: 9px;
+  font-weight: 800;
+}
+
 .table-empty {
   display: grid;
   min-height: 200px;
@@ -893,7 +902,9 @@
 
 .payment-list article {
   display: grid;
-  grid-template-columns: auto minmax(120px, 0.6fr) minmax(140px, 1fr) auto auto;
+  grid-template-columns:
+    auto minmax(120px, 0.6fr) minmax(140px, 1fr) auto auto
+    auto;
   align-items: center;
   gap: 14px;
   padding: 14px 0;
@@ -920,12 +931,20 @@
 }
 
 .payment-pending,
-.payment-confirming {
+.payment-waiting,
+.payment-confirming,
+.payment-confirmed,
+.payment-sending,
+.payment-partially_paid,
+.payment-creating {
   background: #ffcf4a;
 }
 
 .payment-failed,
-.payment-expired {
+.payment-expired,
+.payment-provider_error,
+.payment-refunded,
+.payment-manual_review {
   background: #ff7761;
 }
 
@@ -953,6 +972,16 @@
 .payment-list article > strong {
   color: var(--blue);
   font-size: 10px;
+}
+
+.payment-list article > button {
+  padding: 6px 8px;
+  border: 1px solid var(--ink);
+  border-radius: 4px;
+  cursor: pointer;
+  background: var(--lime);
+  font-size: 9px;
+  font-weight: 850;
 }
 
 .panel-empty-inline {
@@ -1052,7 +1081,7 @@
   }
 
   .payment-list article {
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: auto 1fr auto auto;
   }
 
   .payment-list article > code,

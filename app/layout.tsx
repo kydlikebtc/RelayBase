@@ -1,31 +1,13 @@
 import type { Metadata } from "next";
-import { headers } from "next/headers";
 import { SiteFooter, SiteHeader } from "./components/SiteChrome";
+import { getRequestOrigin } from "./request-origin";
 import "./globals.css";
 import "./styles/home.css";
 import "./styles/console.css";
 import "./styles/docs-pricing.css";
 
 export async function generateMetadata(): Promise<Metadata> {
-  const requestHeaders = await headers();
-  const forwardedHost = requestHeaders
-    .get("x-forwarded-host")
-    ?.split(",")[0]
-    ?.trim();
-  const directHost = requestHeaders.get("host")?.trim();
-  const candidateHost = forwardedHost || directHost || "relaybase.invalid";
-  const safeHost = /^[a-zA-Z0-9.-]+(?::\d{1,5})?$/.test(candidateHost)
-    ? candidateHost
-    : "relaybase.invalid";
-  const forwardedProto = requestHeaders
-    .get("x-forwarded-proto")
-    ?.split(",")[0]
-    ?.trim();
-  const protocol =
-    forwardedProto === "http" || safeHost.startsWith("localhost")
-      ? "http"
-      : "https";
-  const origin = `${protocol}://${safeHost}`;
+  const origin = await getRequestOrigin();
   const socialImage = `${origin}/og.png`;
 
   return {

@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import {
-  chatGPTSignInPath,
   chatGPTSignOutPath,
   getChatGPTUser,
 } from "../chatgpt-auth";
@@ -19,9 +18,8 @@ export default async function ConsolePage() {
   return (
     <main className="console-page" id="main-content">
       <ConsoleClient
-        user={user}
-        signInPath={chatGPTSignInPath("/console")}
-        signOutPath={chatGPTSignOutPath("/")}
+        chatGPTUser={user}
+        chatGPTSignOutPath={chatGPTSignOutPath("/")}
       />
     </main>
   );

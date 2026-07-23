@@ -1,7 +1,9 @@
 import Link from "next/link";
+import { PlatformStatus } from "./PlatformStatus";
 
 const navigation = [
   { href: "/#platforms", label: "平台覆盖" },
+  { href: "/catalog", label: "接口目录" },
   { href: "/pricing", label: "定价" },
   { href: "/docs", label: "文档" },
 ] as const;
@@ -27,10 +29,7 @@ export function SiteHeader() {
         </nav>
 
         <div className="header-actions">
-          <span className="system-status">
-            <span className="status-dot" aria-hidden="true" />
-            安全沙盒
-          </span>
+          <PlatformStatus className="system-status" />
           <Link className="button button-dark button-small" href="/console">
             打开控制台
             <span aria-hidden="true">↗</span>
@@ -79,6 +78,7 @@ export function SiteFooter() {
           <div>
             <span>产品</span>
             <Link href="/#platforms">平台覆盖</Link>
+            <Link href="/catalog">接口目录</Link>
             <Link href="/pricing">定价</Link>
             <Link href="/console">控制台</Link>
           </div>
@@ -87,13 +87,11 @@ export function SiteFooter() {
             <Link href="/docs">快速开始</Link>
             <Link href="/docs#errors">错误码</Link>
             <Link href="/docs#billing">计费语义</Link>
+            <Link href="/admin">运营后台</Link>
           </div>
           <div>
             <span>状态</span>
-            <span className="footer-status">
-              <span className="status-dot" aria-hidden="true" />
-              安全沙盒模式
-            </span>
+            <PlatformStatus className="footer-status" />
             <span>支持渠道待配置</span>
           </div>
         </div>
