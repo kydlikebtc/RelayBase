@@ -1,4 +1,5 @@
 import { recoverMessageAddress } from "viem";
+import packageJson from "../package.json";
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -162,6 +163,7 @@ export async function handlePlatformRequest(
         {
           ok: true,
           service: "relaybase-api",
+          version: packageJson.version,
           ready: readiness.ready,
           mode: readiness.mode,
           capabilities: readiness.capabilities,
@@ -179,6 +181,7 @@ export async function handlePlatformRequest(
         {
           ok: readiness.ready,
           service: "relaybase-api",
+          version: packageJson.version,
           mode: readiness.mode,
           capabilities: readiness.capabilities,
           missing: readiness.missing,

@@ -7,6 +7,10 @@ RelayBase 自己签发的 API Key；服务端验证余额和端点价格后，�
 > 当前仓库默认是安全沙盒。未取得 TikHub 经销/白标书面授权、商户审核和适用
 > 地区的法律意见前，不要打开真实代理或真实加密收款。
 
+当前应用版本：`v0.2.0-preview.1` · API 契约版本：`v1`
+
+[查看变更日志](CHANGELOG.md) · [查看发布与回滚规范](docs/RELEASES.md)
+
 ## 已实现
 
 - 公共首页、接口目录、控制台、定价页和 API 文档
@@ -33,6 +37,15 @@ npm run dev
 
 默认地址为 `http://localhost:3000`。未注入 Sites 身份头和 D1 时，公开页面可以
 预览，但控制台写操作会返回明确的认证或数据库配置错误。
+
+提交或发布前运行完整门禁：
+
+```bash
+npm run check
+```
+
+它会依次校验应用版本元数据、TypeScript、ESLint、生产构建和集成测试。GitHub
+Pull Request 与 `main` 分支推送也会执行相同门禁。
 
 生成数据库迁移：
 
@@ -152,6 +165,24 @@ curl "$APP_URL/v1/tiktok/web/fetch_user_profile?uniqueId=tiktok" \
 
 生产环境仍需配置外部定时触发器，并增加 AML/制裁筛查、按主体的充值限额、人工
 退款审批和异常支付处置流程。
+
+## 版本与发布
+
+RelayBase 使用语义化版本。公开生产就绪前使用
+`v0.x.y-preview.n`；同一候选版本的代码、README、`VERSION`、变更日志、Git
+tag、GitHub Release 和 Sites 保存版本必须来自同一源码树。优先使用同一提交
+SHA；若托管连接器重建了提交对象，Release 必须记录 GitHub SHA、Sites SHA 与
+双方一致的 Git tree SHA。
+
+每次行为、配置、迁移或运营流程变化都必须同步更新：
+
+- 对应源码与测试
+- README 中受影响的使用或配置说明
+- `CHANGELOG.md` 的 `Unreleased` 或新版本章节
+- 必要的单向 D1 迁移和回滚说明
+
+版本一致性由 `npm run check:version` 自动检查。完整分支、版本升级、tag、GitHub
+Release、Sites 部署和回滚步骤见 [发布规范](docs/RELEASES.md)。
 
 ## 上线前清单
 

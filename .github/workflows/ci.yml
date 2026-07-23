@@ -1,0 +1,44 @@
+name: RelayBase CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relaybase-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run release and product gates
+        run: npm run check
+        env:
+          DOC_SYNC_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high

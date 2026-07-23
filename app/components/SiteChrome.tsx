@@ -1,4 +1,5 @@
 import Link from "next/link";
+import packageJson from "../../package.json";
 import { PlatformStatus } from "./PlatformStatus";
 
 const navigation = [
@@ -97,7 +98,9 @@ export function SiteFooter() {
         </div>
       </div>
       <div className="site-footer-bottom">
-        <span>© 2026 RelayBase API</span>
+        <span>
+          © 2026 RelayBase API · v{packageJson.version}
+        </span>
         <span>独立服务封装层 · 非上游平台官方产品</span>
       </div>
     </footer>
