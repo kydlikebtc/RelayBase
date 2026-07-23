@@ -5,14 +5,15 @@ import { getRequestOrigin } from "../request-origin";
 export const metadata: Metadata = {
   title: "API 文档",
   description:
-    "RelayBase API 鉴权、请求示例、错误码、计费与支付确认语义。",
+    "RelayBase API 市场、鉴权、请求示例、错误码、计费与支付确认语义。",
 };
 
 function codeExamples(origin: string) {
   const curl = `curl --request GET \\
   '${origin}/v1/tiktok/web/fetch_user_profile?uniqueId=mrbeast' \\
   --header 'Authorization: Bearer rb_live_YOUR_KEY' \\
-  --header 'Idempotency-Key: profile-sync-20260723-001' \\
+  --header 'Idempotency-Key: profile-sync-20260724-001' \\
+  --header 'X-RelayBase-Max-Cost-Usd-Micros: 2000' \\
   --header 'Accept: application/json'`;
 
   const javascript = `const response = await fetch(
@@ -20,7 +21,8 @@ function codeExamples(origin: string) {
   {
     headers: {
       Authorization: "Bearer rb_live_YOUR_KEY",
-      "Idempotency-Key": "profile-sync-20260723-001",
+      "Idempotency-Key": "profile-sync-20260724-001",
+      "X-RelayBase-Max-Cost-Usd-Micros": "2000",
       Accept: "application/json",
     },
   },
@@ -40,7 +42,8 @@ response = requests.get(
     params={"uniqueId": "mrbeast"},
     headers={
         "Authorization": "Bearer rb_live_YOUR_KEY",
-        "Idempotency-Key": "profile-sync-20260723-001",
+        "Idempotency-Key": "profile-sync-20260724-001",
+        "X-RelayBase-Max-Cost-Usd-Micros": "2000",
         "Accept": "application/json",
     },
     timeout=30,
@@ -61,10 +64,16 @@ const errorExample = `{
 
 const errors = [
   ["400", "invalid_idempotency_key", "幂等键缺失或格式无效"],
+  ["400", "invalid_marketplace_filter", "API 市场筛选值无效或重复"],
+  ["400", "invalid_pagination", "分页 limit 或 offset 超出允许范围"],
+  ["400", "invalid_marketplace_endpoint", "详情 path 或 method 缺失或无效"],
+  ["400", "invalid_max_cost", "最高成本请求头不是允许范围内的微美元整数"],
   ["401", "invalid_api_key", "API Key 缺失、无效或已撤销"],
   ["402", "insufficient_balance", "可用余额不足以发起本次调用"],
   ["409", "idempotency_conflict", "幂等键已被使用；不会重复调用或扣费"],
+  ["409", "price_quote_exceeded", "实时客户价超过请求声明的最高成本"],
   ["404", "endpoint_not_enabled", "接口未开放，或上游通过统一错误体返回 404"],
+  ["404", "marketplace_endpoint_not_found", "参考市场中没有匹配的 path 与 method"],
   ["429", "rate_limit_exceeded", "客户、账户或共享上游达到速率限制"],
   ["502", "upstream_unavailable", "上游网络不可用；请求已退款"],
   ["503", "upstream_not_authorized", "当前部署仍处于安全沙盒"],
@@ -119,7 +128,7 @@ export default async function DocsPage() {
           <nav aria-label="文档目录">
             <span>开始</span>
             <a href="#overview">基本约定</a>
-            <a href="#catalog">接口目录</a>
+            <a href="#catalog">API 市场与开放目录</a>
             <a href="#auth">鉴权</a>
             <a href="#examples">请求示例</a>
             <span>行为</span>
@@ -162,25 +171,123 @@ export default async function DocsPage() {
               </li>
               <li>
                 <span>✓</span>
-                MVP 仅开放 <code>GET</code> 只读端点，不代理写入、发布或删除操作。
+                仅开放通过只读、安全和价格审核的 <code>GET</code> /{" "}
+                <code>POST</code> 数据查询端点；不代理写入、发布、互动或删除操作。
               </li>
             </ul>
           </section>
 
           <section id="catalog">
             <div className="docs-section-label">02 / CATALOG</div>
-            <h2>先读取当前开放目录</h2>
+            <h2>区分能力发现与真实可调用。</h2>
             <p>
-              <Link href="/catalog">接口目录页面</Link>
-              只展示已经完成只读、安全和价格审核的路径。程序也可以直接读取公开 JSON：
+              <Link href="/catalog">API 市场页面</Link>
+              使用 TikHub OpenAPI V5.3.2 静态参考快照，展示 1,025 个 operations：
+              GET 839、POST 186，覆盖 27 个平台、53 个 TikHub 官方 tags 和 15 个
+              RelayBase 归一化类型。参考市场用于搜索与能力发现，不代表当前部署已经
+              取得调用权限或完成核价。来源可追溯到{" "}
+              <a
+                href="https://docs.tikhub.io/4579905m0"
+                target="_blank"
+                rel="noreferrer"
+              >
+                TikHub 官方文档入口
+              </a>
+              。
             </p>
-            <CodePanel title="Public endpoint catalog" language="HTTP">
+            <CodePanel title="Marketplace discovery" language="HTTP">
+              {`GET ${origin}/api/marketplace?q=user&platform=tiktok&tag=TikTok-Web-API&dataType=profile_creator&method=GET&surface=web&availability=available&limit=20&offset=0
+GET ${origin}/api/marketplace/detail?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_profile&method=GET`}
+            </CodePanel>
+            <p>
+              市场列表支持 <code>q</code>、<code>platform</code>、
+              TikHub 官方分类 <code>tag</code>、RelayBase 归一化分类{" "}
+              <code>dataType</code>、<code>method</code>、
+              <code>surface</code>、<code>availability</code>、
+              <code>limit</code> 和 <code>offset</code>。默认每页 20 条；
+              响应包含 <code>source</code>、全局 <code>stats</code> 与{" "}
+              <code>facets</code>、当前页 <code>endpoints</code>、筛选后{" "}
+              <code>total</code>、<code>count</code>、<code>offset</code> 和{" "}
+              <code>nextOffset</code>。
+            </p>
+            <CodePanel title="Marketplace detail response" language="JSON">
+              {`{
+  "source": {
+    "provider": "TikHub",
+    "openApiVersion": "V5.3.2",
+    "snapshotHash": "f941ffbce28988ca158b2fb8febf2a206004eaba1d2d0e1a7eba9678f9461a01",
+    "generatedAt": "2026-07-23",
+    "operationCount": 1025
+  },
+  "endpoint": {
+    "path": "/v1/tiktok/web/fetch_user_profile",
+    "method": "GET",
+    "availability": "pending",
+    "tags": ["TikTok-Web-API"],
+    "operationId": "fetch_user_profile_api_v1_tiktok_web_fetch_user_profile_get",
+    "description": "Get user profile",
+    "parameters": [
+      {
+        "name": "uniqueId",
+        "in": "query",
+        "required": false,
+        "schema": { "type": "string" }
+      }
+    ],
+    "requestBody": null,
+    "response": {
+      "statuses": [
+        {
+          "status": "200",
+          "description": "Successful Response",
+          "schemaRef": "#/components/schemas/ResponseModel"
+        },
+        {
+          "status": "422",
+          "description": "Validation Error",
+          "schemaRef": "#/components/schemas/HTTPValidationError"
+        }
+      ]
+    }
+  },
+  "examples": {
+    "curl": "curl ...",
+    "javascript": "const response = await fetch(...);",
+    "python": "response = requests.get(...)"
+  }
+}`}
+            </CodePanel>
+            <p>
+              详情查询必须同时提供 URL 编码的精确 <code>path</code> 和{" "}
+              <code>method=GET|POST</code>。它返回同代来源、官方 tags、
+              <code>operationId</code>、描述、参数、请求体、响应状态与上游 Schema
+              标识，以及按该端点方法生成的 cURL、JavaScript、Python 示例。
+              <code>schemaRef</code> 只用于标识 TikHub OpenAPI 来源，不是在该响应内
+              可独立解析的完整 components。
+              <code>available</code> 才表示当前可代理；<code>pending</code> 是待审核
+              或部署尚未就绪，<code>restricted</code> 永不开放。
+            </p>
+            <div className="docs-callout docs-callout-warning">
+              <span>!</span>
+              <div>
+                <b>参考展示不等于可调用</b>
+                <p>
+                  只有真实 TikHub Key、完整同步与覆盖证明、安全审核、核价上架和近期
+                  对账健康全部满足，并且实时 OpenAPI 的哈希与操作数和本页参考快照
+                  完全一致、全部 (method, path) 身份集合无缺失或重复时，端点才会
+                  成为 available。价格和速率在未开放时可以为 null。
+                </p>
+              </div>
+            </div>
+            <CodePanel title="Callable endpoint catalog" language="HTTP">
               {`GET ${origin}/api/catalog
 GET ${origin}/api/catalog?platform=tiktok&limit=100`}
             </CodePanel>
             <p>
-              返回的 <code>priceUsdMicros</code> 是每次上游 HTTP 200
-              成功请求的客户价格。未出现在目录中的路径不能调用。
+              <code>/api/catalog</code> 是端点级已开放清单。客户还必须确认响应中的{" "}
+              <code>mode=live</code>，并满足最新 readiness、账户、余额和限流条件。
+              <code>priceUsdMicros</code> 是每次上游 HTTP 200 成功请求的客户价格；
+              未出现在该目录中的路径不能调用。
             </p>
           </section>
 
@@ -190,11 +297,13 @@ GET ${origin}/api/catalog?platform=tiktok&limit=100`}
             <p>
               在控制台生成以 <code>rb_live_</code> 开头的密钥，并放入每次请求的{" "}
               <code>Authorization</code> 请求头。每个业务任务还应发送唯一的{" "}
-              <code>Idempotency-Key</code>。
+              <code>Idempotency-Key</code>。建议同时发送当前报价作为{" "}
+              <code>X-RelayBase-Max-Cost-Usd-Micros</code>，防止调价竞态。
             </p>
             <CodePanel title="Authorization header" language="HTTP">
               {`Authorization: Bearer rb_live_YOUR_KEY
-Idempotency-Key: profile-sync-20260723-001`}
+Idempotency-Key: profile-sync-20260724-001
+X-RelayBase-Max-Cost-Usd-Micros: 2000`}
             </CodePanel>
             <div className="docs-callout docs-callout-warning">
               <span>!</span>
@@ -212,6 +321,17 @@ Idempotency-Key: profile-sync-20260723-001`}
                 <p>
                   仅使用字母、数字、点、下划线、冒号和连字符。同一个键再次提交会返回
                   409，且不会重复请求上游或扣费；每次付费请求都必须提供。
+                </p>
+              </div>
+            </div>
+            <div className="docs-callout">
+              <span>≤</span>
+              <div>
+                <b>最高成本保护：微美元整数</b>
+                <p>
+                  当实时客户价超过该请求声明的上限时，返回{" "}
+                  <code>409 price_quote_exceeded</code>，不会调用上游或扣费。
+                  刷新目录并确认新价格后，用新的幂等键发起新尝试。
                 </p>
               </div>
             </div>
@@ -301,8 +421,11 @@ X-RelayBase-Balance-Usd-Micros: 24998000`}
               <div>
                 <b>重试建议</b>
                 <p>
-                  只对 429、502、503 和网络超时进行指数退避重试，并始终复用原来的幂等键。收到
-                  409 时不要换键盲目重放，应先核对原请求。
+                  对 429、502、503 使用指数退避。已经收到明确的终态错误且要重新发起
+                  一次新调用时使用新幂等键；只有在网络中断、无法判断服务端是否收到
+                  请求时，才先复用原键安全确认。收到 409
+                  表示原键已有请求记录，不会重复调用或扣费，应先在控制台核对原请求，
+                  再决定是否用新键发起新的计费尝试。
                 </p>
               </div>
             </div>

@@ -4,7 +4,7 @@ import { PlatformStatus } from "./PlatformStatus";
 
 const navigation = [
   { href: "/#platforms", label: "平台覆盖" },
-  { href: "/catalog", label: "接口目录" },
+  { href: "/catalog", label: "API 市场" },
   { href: "/pricing", label: "定价" },
   { href: "/docs", label: "文档" },
 ] as const;
@@ -79,7 +79,7 @@ export function SiteFooter() {
           <div>
             <span>产品</span>
             <Link href="/#platforms">平台覆盖</Link>
-            <Link href="/catalog">接口目录</Link>
+            <Link href="/catalog">API 市场</Link>
             <Link href="/pricing">定价</Link>
             <Link href="/console">控制台</Link>
           </div>

@@ -42,6 +42,10 @@
 5. 使用同名 annotated tag：`v<version>`。
 6. GitHub Release 必须指向该 tag；预览版本标记为 prerelease。
 
+如果候选包含尚未取得公开再分发授权的上游派生目录、文档或元数据，第 5–6 步以及
+向公开 GitHub 的分支推送必须暂停。此时只形成本地候选提交，并允许把同一源码树部署
+到 owner-only Sites 做私有验收；授权证据归档后再创建并公开 tag 与 Release。
+
 优先让 GitHub 与 Sites 引用同一个 commit SHA。若托管连接器因自身作者元数据重建
 提交对象，两个 commit SHA 可能不同；此时必须验证两端 Git tree SHA 完全相同，并
 在 Release 中显式记录 GitHub SHA ↔ Sites SHA 映射，不能声称它们是同一提交。
@@ -79,9 +83,12 @@
 
 每个发布应能提供：
 
-- Git commit SHA、tag 和 GitHub Release
+- Git commit SHA；公开发布还需提供 tag 和 GitHub Release
 - GitHub 与 Sites SHA 不同时的双向映射，以及一致的 Git tree SHA
 - `npm run check` 与生产依赖审计结果
 - Sites 保存版本号、部署状态和 URL
 - D1 迁移范围与验收结果
 - 外部授权或运营门禁仍未满足时的明确 NO-GO 说明
+
+未获公开再分发授权的私有候选应记录本地 commit SHA、Sites commit/version/deployment
+和一致的 Git tree SHA，并明确 GitHub push/tag/Release 仍为 NO-GO。

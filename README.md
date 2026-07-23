@@ -7,17 +7,20 @@ RelayBase 自己签发的 API Key；服务端验证余额和端点价格后，�
 > 当前仓库默认是安全沙盒。未取得 TikHub 经销/白标书面授权、商户审核和适用
 > 地区的法律意见前，不要打开真实代理或真实加密收款。
 
-当前应用版本：`v0.3.0-preview.4` · API 契约版本：`v1`
+当前应用版本：`v0.3.0-preview.5` · API 契约版本：`v1`
 
-[查看变更日志](CHANGELOG.md) · [查看发布与回滚规范](docs/RELEASES.md)
+[查看变更日志](CHANGELOG.md) · [查看发布与回滚规范](docs/RELEASES.md) ·
+[查看 TikHub 来源与再分发边界](docs/TIKHUB-PROVENANCE.md)
 
 ## 已实现
 
-- 公共首页、接口目录、控制台、定价页和 API 文档
+- 公共首页、API 市场、控制台、定价页和 API 文档
 - Google OAuth、EVM 钱包签名与可选受信任 Sites 身份登录
 - 用户、用量、TikHub 加密数据源、目录定价和支付复核管理后台
 - D1 用户、API Key、不可变余额账本、支付订单、端点目录和调用日志
 - API Key 仅创建时展示明文；数据库只保存 SHA-256 哈希
+- TikHub V5.3.2 静态参考市场收录 1,025 个 GET/POST 数据操作，并提供搜索、
+  多维筛选、服务端分页和同页参数/示例详情
 - 同步 TikHub OpenAPI 路径与可信价格目录；新端点默认禁用
 - 后台可按路径设置客户价与上下架，也可先冻结服务端筛选结果，再原子批量调价、
   上架或下架；高风险或无可验证价格的端点强制关闭
@@ -46,8 +49,27 @@ npm run dev
 npm run check
 ```
 
-它会依次校验应用版本元数据、TypeScript、ESLint、生产构建和集成测试。GitHub
-Pull Request 与 `main` 分支推送也会执行相同门禁。
+它会依次校验应用版本元数据、已提交参考目录的结构/计数/脱敏/稳定序列化、
+TypeScript、ESLint、生产构建和集成测试。GitHub Pull Request 与 `main`
+分支推送也会执行相同门禁。
+
+生成 TikHub 静态参考市场时，传入已审计的本地 OpenAPI 快照；生成器不会联网：
+
+```bash
+npm run catalog:reference -- --input /absolute/path/to/tikhub-openapi.json
+npm run catalog:reference:check -- --input /absolute/path/to/tikhub-openapi.json
+npm run catalog:reference:validate
+```
+
+第一条命令稳定生成 `data/tikhub-catalog-reference.json`；第二条使用 `--check`
+按字节验证已提交产物仍与同一输入一致，不会改写文件；第三条不依赖本地源快照，
+会在默认 CI 中自检已提交产物的完整覆盖、统计、路径、输入脱敏与稳定序列化。
+生成器只允许本地
+`#/components/...` 引用，并对引用深度、数量、节点、字符串和展开体积设置硬上限；
+它会安全展开 `parameters` 与 `requestBody` 所需输入结构，并把 Cookie、Token、
+密码、代理和密钥字段的 `example/default` 替换成固定占位符；上游 description
+中的原始示例代码块会移除，描述和响应说明中的凭据式赋值会再次净化。遇到外部引用、
+循环或任何上限超出时直接失败。
 
 生成数据库迁移：
 
@@ -74,6 +96,8 @@ npm run db:generate
 - `TRUST_SITES_IDENTITY_HEADERS` 默认关闭。只有托管边缘会剥离客户自带
   `oai-authenticated-user-*` 并注入已认证身份时，才可显式设为 `true`。
 - 新 Google subject 不会仅凭同名邮箱接管已有账户；冲突必须走受控账户恢复。
+- 管理员把用户设为 `suspended` 时，用户状态、全部客户 API Key 撤销、全部登录
+  session 删除和管理员审计在同一 D1 原子批次提交；重新启用账户不会恢复旧凭据。
 
 ## 环境变量
 
@@ -101,6 +125,39 @@ managed mode；没有活动 Key、Key 已过期、KEK 错误或密文异常时�
 三个条件以及数据库、登录方式、TikHub/支付商密钥、管理密钥、已审核目录和五分钟
 内的对账心跳未全部满足时，对应真实操作会安全失败。支付创建要求至少有一个已审核
 开放的接口，避免“可以充值但没有服务可用”。
+
+## API 市场参考目录
+
+仓库内置的 `data/tikhub-catalog-reference.json` 来自 TikHub OpenAPI V5.3.2
+静态快照，共 1,025 个 operations：GET 839、POST 186，覆盖 27 个平台和 53 个
+实际 operation tags，并映射为 15 个 RelayBase 归一化类型。它用于能力发现、搜索
+与详情展示，不代表当前部署的 TikHub Key 已有 scope，也不代表价格、授权或上游
+状态已经可用于真实调用。
+
+公开参考市场接口：
+
+```text
+GET /api/marketplace?q=user&platform=tiktok&tag=TikTok-App-V3-API&dataType=profile_creator&method=GET&surface=web&availability=available&limit=20&offset=0
+GET /api/marketplace/detail?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_profile&method=GET
+```
+
+`GET /api/marketplace` 返回 `source`、全局 `stats`、`facets`、当前页
+`endpoints`、`total`、`count`、`offset` 和 `nextOffset`；默认每页 20 条，可按
+关键词、平台、TikHub 官方 `tag`、RelayBase 归一化 `dataType`、GET/POST 方法、
+APP/WEB 调用表面和
+`available|pending|restricted` 状态筛选。`GET /api/marketplace/detail` 必须同时
+传入精确 `path` 与 `method`，返回同代 `source`、官方 tags、`operationId`、端点
+描述、参数、请求体、响应状态与上游 Schema 标识，以及 cURL、JavaScript、Python
+三种调用示例。`schemaRef` 是来源标识，不是可在该响应内独立解析的完整 components。
+
+参考展示和真实可调用目录是两层状态。只有部署具备真实且已验证的 TikHub Key，
+完成 OpenAPI 与可信价格目录的全量同步和覆盖证明，端点通过当前安全策略与人工审核，
+客户价格已核验且明确上架，并且近期对账健康时，市场中的 `availability` 才会是
+`available`。静态参考与实时目录还必须具有相同的快照哈希、操作数，以及完整一致的
+`(method, path)` 身份集合；任何缺行、重复行或不同代数据都会保持 `pending`。
+`pending` 和 `restricted` 只用于发现或审计，不能代理。客户程序应以
+`GET /api/catalog` 返回端点级已开放目录；客户还必须确认响应中的
+`mode=live`，并满足账户、余额、限流和最新 readiness 条件后才能真实调用。
 
 ## 上游端点与价格
 
@@ -145,6 +202,8 @@ schema。只有同时存在于 OpenAPI、方法匹配、位于活动 Key 的已�
 `safe_data_read` 路径才允许审核上架；其他路径保留供审计，但不能公开代理。
 字段检查会统一识别驼峰、连字符、数组/嵌套键和 `x-api-key` 等变体；客户请求在
 扣费前还会递归执行同一输入保护。仅分页用途的明确 token 字段列入允许清单。
+静态参考生成也只展开有界的本地 `$ref` 输入结构；外部引用、循环引用和超过
+深度、节点、引用数量或体积限制的 schema 不会进入参考产物。
 
 TikHub 当前价格目录的正式字段 `endpoint_uri` 与 `endpoint_cost` 会被直接解析；
 显式零成本也属于已验证价格。完全相同的重复记录只计一次，而同一路径出现不同
@@ -210,11 +269,14 @@ curl -X PATCH "$APP_URL/api/admin/catalog" \
 ```bash
 curl "$APP_URL/v1/tiktok/web/fetch_user_profile?uniqueId=tiktok" \
   -H "Authorization: Bearer rb_live_..." \
-  -H "Idempotency-Key: profile-sync-20260723-001"
+  -H "Idempotency-Key: profile-sync-20260724-001" \
+  -H "X-RelayBase-Max-Cost-Usd-Micros: 2000"
 ```
 
 `Idempotency-Key` 是每个付费请求的必填项；重试必须复用原值。返回头会包含
-请求编号、本次实际扣费和调用后余额。只有 TikHub HTTP `200` 响应扣费；其他
+请求编号、本次实际扣费和调用后余额。建议把市场或开放目录中的当前微美元价格作为
+`X-RelayBase-Max-Cost-Usd-Micros` 上限；若调用时价格已超过上限，服务返回
+`409 price_quote_exceeded`，不会调用上游或扣费。只有 TikHub HTTP `200` 响应扣费；其他
 状态会自动退款并转换为统一 RelayBase 错误体。即使状态为 `200`，服务端也会先
 完整读取并验证有界 JSON；截断、超限、HTML 风控页或畸形 JSON 都按失败退款。
 
@@ -246,6 +308,9 @@ curl "$APP_URL/v1/tiktok/web/fetch_user_profile?uniqueId=tiktok" \
 11. 对账除待确认订单外，还会轮询最近 180 天内仍有净入账的父付款与重复入金
     子付款；候选以付款级正向账本和未冲销状态为准，不依赖父子付款共享的订单
     状态。即使子付款仍在人工复核且父付款退款 IPN 丢失，也会发现并精确冲销。
+12. 如果本轮确实调用了支付 provider、但所有 provider 查询都失败，对账返回
+    `502`，只记录失败诊断，不刷新成功的 `reconciliation` 心跳；readiness 会随
+    旧成功心跳过期而自动关闭真实代理和充值。
 
 生产环境仍需配置外部定时触发器，并增加 AML/制裁筛查、按主体的充值限额、人工
 退款审批和异常支付处置流程。
@@ -253,10 +318,12 @@ curl "$APP_URL/v1/tiktok/web/fetch_user_profile?uniqueId=tiktok" \
 ## 版本与发布
 
 RelayBase 使用语义化版本。公开生产就绪前使用
-`v0.x.y-preview.n`；同一候选版本的代码、README、`VERSION`、变更日志、Git
-tag、GitHub Release 和 Sites 保存版本必须来自同一源码树。优先使用同一提交
-SHA；若托管连接器重建了提交对象，Release 必须记录 GitHub SHA、Sites SHA 与
-双方一致的 Git tree SHA。
+`v0.x.y-preview.n`。在上游派生内容尚未取得公开再分发授权时，候选版本只允许形成
+本地提交并部署到 owner-only Sites；不得向公开 GitHub 推送派生目录、tag 或
+Release。门禁满足后，同一候选版本的代码、README、`VERSION`、变更日志、Git tag、
+GitHub Release 和 Sites 保存版本必须来自同一源码树。优先使用同一提交 SHA；若
+托管连接器重建了提交对象，Release 必须记录 GitHub SHA、Sites SHA 与双方一致的
+Git tree SHA。
 
 每次行为、配置、迁移或运营流程变化都必须同步更新：
 
@@ -277,7 +344,8 @@ Release、Sites 部署和回滚步骤见 [发布规范](docs/RELEASES.md)。
 - 只启用公开、只读端点；禁用 Cookie、互动、发布、验证码和账号操作类接口
 - 每分钟由受保护的外部调度器调用 `POST /api/admin/reconcile`，回退两分钟前
   仍未完成但已扣费的代理请求，并处理支付事件和轮询待确认充值
-- 对账会写入运行心跳；超过五分钟没有成功心跳时，真实代理与充值都会自动关闭
+- 对账只在支付 provider 本轮没有“全部失败”时刷新成功心跳；超过五分钟没有成功
+  心跳时，真实代理与充值都会自动关闭
 - 设置生产密钥、回调 URL、监控、告警、日对账与备份
 - 正式站点必须允许客户 API 与支付商 IPN 访问；owner-only 私有预览不能用于真实
   收款。切换公开访问前必须先完成授权、法律审查、条款、隐私政策与支持渠道配置

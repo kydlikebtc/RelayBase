@@ -1,5 +1,6 @@
 import { recoverMessageAddress } from "viem";
 import packageJson from "../package.json";
+import tikHubCatalogReferenceJson from "../data/tikhub-catalog-reference.json";
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -19,6 +20,13 @@ const MAX_UPSTREAM_ERROR_BODY_BYTES = 32 * 1024;
 const MAX_PROVIDER_RESPONSE_BYTES = 256 * 1024;
 const MAX_CATALOG_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_OPENAPI_RESPONSE_BYTES = 16 * 1024 * 1024;
+const MAX_OPENAPI_INPUT_SCHEMA_BYTES = 16 * 1024;
+const MAX_OPENAPI_REFERENCE_DEPTH = 16;
+const MAX_OPENAPI_REFERENCE_NODES = 4_000;
+const MAX_OPENAPI_REFERENCE_BYTES = 64 * 1024;
+const MAX_OPENAPI_REFERENCE_STRING_BYTES = 16 * 1024;
+const MAX_OPENAPI_REFERENCE_ITEMS = 1_000;
+const MAX_OPENAPI_REFERENCES = 512;
 const MAX_PROXY_BODY_BYTES = 256 * 1024;
 const CATALOG_SAFETY_POLICY_VERSION = 1;
 const MAX_CATALOG_BATCH_TARGETS = 2_000;
@@ -139,6 +147,87 @@ type CatalogRecord = {
   safety_policy_version: number;
   sync_generation: string | null;
   coverage_verified: number;
+};
+
+type MarketplaceSurface = "app" | "web" | "app_web" | "other";
+type MarketplaceAvailability = "available" | "pending" | "restricted";
+
+type MarketplaceReferenceEndpoint = {
+  path: string;
+  platform: string;
+  dataType: string;
+  method: "GET" | "POST";
+  surface: MarketplaceSurface;
+  tags: string[];
+  summary: string | null;
+  description: string | null;
+  operationId: string | null;
+  parameters: Record<string, unknown>[];
+  requestBody: Record<string, unknown> | null;
+  response: Record<string, unknown> | null;
+};
+
+type MarketplaceReferenceFileEndpoint = Omit<
+  MarketplaceReferenceEndpoint,
+  "response"
+> & {
+  responses: Array<{
+    status: string;
+    description: string | null;
+    schemaRef: string | null;
+  }>;
+};
+
+type MarketplaceReferenceFile = {
+  generatedAt: string | null;
+  source: {
+    name: string;
+    version: string | null;
+    snapshotSha256: string | null;
+  };
+  stats: {
+    operationCount: number;
+    methodCounts: { GET: number; POST: number };
+    platformCount: number;
+    dataTypeCount: number;
+  };
+  operations: MarketplaceReferenceFileEndpoint[];
+};
+
+type MarketplaceReference = {
+  source: {
+    provider: string;
+    openApiVersion: string | null;
+    snapshotHash: string | null;
+    generatedAt: string | null;
+    operationCount: number;
+  };
+  stats: {
+    total: number;
+    get: number;
+    post: number;
+    platforms: number;
+    dataTypes: number;
+  };
+  endpoints: MarketplaceReferenceEndpoint[];
+};
+
+type MarketplaceCatalogOverlay = {
+  path: string;
+  platform: string;
+  http_method: string;
+  summary: string | null;
+  description: string | null;
+  parameter_schema_json: string | null;
+  customer_price_usd_micros: number;
+  price_verified: number;
+  enabled: number;
+  read_only: number;
+  safety_classification: CatalogSafetyClassification;
+  safety_policy_version: number;
+  updated_at: string;
+  catalog_openapi_snapshot_hash: string | null;
+  catalog_openapi_operation_count: number | null;
 };
 
 type CatalogSafetyClassification =
@@ -352,6 +441,17 @@ export async function handlePlatformRequest(
 
     if (url.pathname === "/api/catalog" && request.method === "GET") {
       return await handlePublicCatalog(request, env, requestId);
+    }
+
+    if (url.pathname === "/api/marketplace" && request.method === "GET") {
+      return await handleMarketplace(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/marketplace/detail" &&
+      request.method === "GET"
+    ) {
+      return await handleMarketplaceDetail(request, env, requestId);
     }
 
     if (
@@ -3218,6 +3318,37 @@ async function handleProxyRequest(
       `该 Idempotency-Key 已用于请求 ${previous.id}（${previous.status}），未重复调用或扣费。`,
     );
   }
+  const maxCostHeader = request.headers.get(
+    "x-relaybase-max-cost-usd-micros",
+  );
+  let maxCostUsdMicros: number | null = null;
+  if (maxCostHeader !== null) {
+    if (!/^(?:0|[1-9]\d{0,8})$/.test(maxCostHeader)) {
+      throw new PlatformError(
+        400,
+        "invalid_max_cost",
+        "X-RelayBase-Max-Cost-Usd-Micros 必须是 0–100000000 的整数。",
+      );
+    }
+    maxCostUsdMicros = Number(maxCostHeader);
+    if (
+      !Number.isSafeInteger(maxCostUsdMicros) ||
+      maxCostUsdMicros > 100_000_000
+    ) {
+      throw new PlatformError(
+        400,
+        "invalid_max_cost",
+        "X-RelayBase-Max-Cost-Usd-Micros 必须是 0–100000000 的整数。",
+      );
+    }
+    if (catalog.customer_price_usd_micros > maxCostUsdMicros) {
+      throw new PlatformError(
+        409,
+        "price_quote_exceeded",
+        "当前接口价格超过请求声明的最高成本，未调用上游或扣费；请刷新目录后重试。",
+      );
+    }
+  }
   const upstreamCredential = await resolveTikHubCredential(env, db);
   if (!upstreamCredential) {
     throw new PlatformError(
@@ -3627,6 +3758,922 @@ async function handleProxyRequest(
     statusText: upstreamResponse.statusText,
     headers: responseHeaders,
   });
+}
+
+const TIKHUB_CATALOG_REFERENCE_FILE =
+  tikHubCatalogReferenceJson as unknown as MarketplaceReferenceFile;
+let normalizedMarketplaceReference: MarketplaceReference | null = null;
+let normalizedMarketplaceReferenceKeys: ReadonlySet<string> | null = null;
+let normalizedMarketplaceReferenceByKey:
+  | ReadonlyMap<string, MarketplaceReferenceEndpoint>
+  | null = null;
+const marketplaceReferenceSafetyCache = new Map<
+  string,
+  ReturnType<typeof classifyCatalogSafety>
+>();
+type MarketplaceOverlay = {
+  rows: Map<string, MarketplaceCatalogOverlay>;
+  catalogReady: boolean;
+  referenceMatchesLive: boolean;
+  source: MarketplaceReference["source"];
+};
+const marketplaceOverlayCache = new WeakMap<
+  object,
+  {
+    expiresAt: number;
+    value: Promise<MarketplaceOverlay>;
+  }
+>();
+
+function marketplaceReference(): MarketplaceReference {
+  if (normalizedMarketplaceReference) return normalizedMarketplaceReference;
+  const file = TIKHUB_CATALOG_REFERENCE_FILE;
+  const reference: MarketplaceReference = {
+    source: {
+      provider: "TikHub",
+      openApiVersion: file.source?.version ?? null,
+      snapshotHash: file.source?.snapshotSha256 ?? null,
+      generatedAt: file.generatedAt ?? null,
+      operationCount: Number(file.stats?.operationCount ?? 0),
+    },
+    stats: {
+      total: Number(file.stats?.operationCount ?? 0),
+      get: Number(file.stats?.methodCounts?.GET ?? 0),
+      post: Number(file.stats?.methodCounts?.POST ?? 0),
+      platforms: Number(file.stats?.platformCount ?? 0),
+      dataTypes: Number(file.stats?.dataTypeCount ?? 0),
+    },
+    endpoints: Array.isArray(file.operations)
+      ? file.operations.map((endpoint) => ({
+          ...endpoint,
+          response: { statuses: endpoint.responses ?? [] },
+        }))
+      : [],
+  };
+  const identities = new Set<string>();
+  const paths = new Set<string>();
+  const tags = new Set<string>();
+  let getCount = 0;
+  let postCount = 0;
+  let endpointsValid = true;
+  for (const endpoint of reference.endpoints) {
+    const identity = `${endpoint.method}:${endpoint.path}`;
+    if (
+      (endpoint.method !== "GET" && endpoint.method !== "POST") ||
+      !/^\/v1\/[A-Za-z0-9/_-]+$/.test(endpoint.path) ||
+      endpoint.path.includes("..") ||
+      endpoint.path.includes("//") ||
+      endpoint.path.endsWith("/") ||
+      endpoint.platform !== endpoint.path.split("/")[2] ||
+      !["app", "web", "app_web", "other"].includes(endpoint.surface) ||
+      typeof endpoint.dataType !== "string" ||
+      endpoint.dataType.length < 1 ||
+      endpoint.dataType.length > 80 ||
+      !Array.isArray(endpoint.tags) ||
+      endpoint.tags.length > 100 ||
+      !endpoint.tags.every(
+        (tag) =>
+          typeof tag === "string" &&
+          tag.length > 0 &&
+          tag.length <= 160 &&
+          tag.trim() === tag &&
+          !/[?&#=\u0000-\u001F\u007F]/.test(tag),
+      ) ||
+      new Set(endpoint.tags).size !== endpoint.tags.length ||
+      !Array.isArray(endpoint.parameters) ||
+      endpoint.parameters.length > 200 ||
+      !endpoint.parameters.every(isPlainRecord) ||
+      (endpoint.requestBody !== null &&
+        !isPlainRecord(endpoint.requestBody)) ||
+      (endpoint.response !== null && !isPlainRecord(endpoint.response)) ||
+      identities.has(identity) ||
+      paths.has(endpoint.path)
+    ) {
+      endpointsValid = false;
+      break;
+    }
+    identities.add(identity);
+    paths.add(endpoint.path);
+    for (const tag of endpoint.tags) tags.add(tag);
+    if (endpoint.method === "GET") getCount += 1;
+    if (endpoint.method === "POST") postCount += 1;
+  }
+  if (
+    !reference ||
+    !isPlainRecord(reference.source) ||
+    reference.source.provider !== "TikHub" ||
+    typeof reference.source.openApiVersion !== "string" ||
+    reference.source.openApiVersion.length > 80 ||
+    typeof reference.source.snapshotHash !== "string" ||
+    !/^[0-9a-f]{64}$/.test(reference.source.snapshotHash) ||
+    typeof reference.source.generatedAt !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(reference.source.generatedAt) ||
+    !Array.isArray(reference.endpoints) ||
+    !endpointsValid ||
+    !Number.isSafeInteger(reference.source.operationCount) ||
+    reference.source.operationCount !== reference.endpoints.length ||
+    reference.stats.total !== reference.endpoints.length ||
+    reference.stats.get !== getCount ||
+    reference.stats.post !== postCount ||
+    tags.size > 500 ||
+    reference.endpoints.length < 1 ||
+    reference.endpoints.length > 5_000
+  ) {
+    throw new PlatformError(
+      500,
+      "marketplace_reference_invalid",
+      "API 市场参考目录无效。",
+    );
+  }
+  normalizedMarketplaceReferenceKeys = new Set(
+    reference.endpoints.map(
+      (endpoint) => `${endpoint.method}:${endpoint.path}`,
+    ),
+  );
+  normalizedMarketplaceReferenceByKey = new Map(
+    reference.endpoints.map((endpoint) => [
+      `${endpoint.method}:${endpoint.path}`,
+      endpoint,
+    ]),
+  );
+  normalizedMarketplaceReference = reference;
+  return reference;
+}
+
+async function loadMarketplaceCatalogOverlay(
+  env: PlatformEnv,
+): Promise<MarketplaceOverlay> {
+  const reference = marketplaceReference();
+  if (!env.DB) {
+    return {
+      rows: new Map(),
+      catalogReady: false,
+      referenceMatchesLive: false,
+      source: reference.source,
+    };
+  }
+  const readiness = await operationalReadiness(env);
+  if (!readiness.capabilities.schemaReady) {
+    return {
+      rows: new Map(),
+      catalogReady: false,
+      referenceMatchesLive: false,
+      source: reference.source,
+    };
+  }
+  try {
+    const catalogResult = await env.DB.prepare(
+      `SELECT endpoint.path, endpoint.platform, endpoint.http_method,
+              endpoint.summary, endpoint.description,
+              endpoint.parameter_schema_json,
+              endpoint.customer_price_usd_micros,
+              endpoint.price_verified, endpoint.enabled,
+              endpoint.read_only, endpoint.safety_classification,
+              endpoint.safety_policy_version, endpoint.updated_at,
+              state.openapi_snapshot_hash
+                AS catalog_openapi_snapshot_hash,
+              state.openapi_operation_count
+                AS catalog_openapi_operation_count
+       FROM endpoint_catalog AS endpoint
+       JOIN catalog_sync_state AS state
+         ON state.id = 1
+        AND endpoint.sync_generation = state.last_success_generation
+       ORDER BY endpoint.path ASC
+       LIMIT 5000`,
+    ).all();
+    const catalogRows =
+      resultRows<MarketplaceCatalogOverlay>(catalogResult);
+    const rows = new Map(
+      catalogRows.map((row) => [
+        `${row.http_method.toUpperCase()}:${row.path}`,
+        row,
+      ]),
+    );
+    const referenceKeys =
+      normalizedMarketplaceReferenceKeys ??
+      new Set(
+        reference.endpoints.map(
+          (endpoint) => `${endpoint.method}:${endpoint.path}`,
+        ),
+      );
+    const liveKeys = new Set(rows.keys());
+    const identitySetMatches =
+      catalogRows.length === reference.source.operationCount &&
+      rows.size === catalogRows.length &&
+      referenceKeys.size === reference.source.operationCount &&
+      [...referenceKeys].every((key) => liveKeys.has(key));
+    const referenceMatchesLive =
+      typeof reference.source.snapshotHash === "string" &&
+      identitySetMatches &&
+      catalogRows.every(
+        (row) =>
+          row.catalog_openapi_snapshot_hash ===
+            reference.source.snapshotHash &&
+          Number(row.catalog_openapi_operation_count) ===
+            reference.source.operationCount,
+      );
+    return {
+      rows,
+      catalogReady:
+        referenceMatchesLive &&
+        readiness.capabilities.catalogReady &&
+        readiness.capabilities.proxyEnabled &&
+        readiness.capabilities.reconciliationConfigured &&
+        readiness.capabilities.reconciliationRecent,
+      referenceMatchesLive,
+      source: reference.source,
+    };
+  } catch (error) {
+    console.error("Marketplace overlay unavailable", {
+      error: error instanceof Error ? error.message : "unknown error",
+    });
+    return {
+      rows: new Map(),
+      catalogReady: false,
+      referenceMatchesLive: false,
+      source: reference.source,
+    };
+  }
+}
+
+async function marketplaceCatalogOverlay(
+  env: PlatformEnv,
+): Promise<MarketplaceOverlay> {
+  if (!env.DB || typeof env.DB !== "object") {
+    return loadMarketplaceCatalogOverlay(env);
+  }
+  const cacheKey = env as object;
+  const now = Date.now();
+  const cached = marketplaceOverlayCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) return cached.value;
+  const value = loadMarketplaceCatalogOverlay(env);
+  marketplaceOverlayCache.set(cacheKey, {
+    expiresAt: now + 5_000,
+    value,
+  });
+  return value;
+}
+
+function mergedMarketplaceEndpoints(
+  overlay: Awaited<ReturnType<typeof marketplaceCatalogOverlay>>,
+): Array<
+  MarketplaceReferenceEndpoint & {
+    availability: MarketplaceAvailability;
+    priceUsdMicros: number | null;
+    rateLimitRpm: number | null;
+    updatedAt: string | null;
+  }
+> {
+  const reference = marketplaceReference();
+  const byKey = new Map<string, MarketplaceReferenceEndpoint>();
+  for (const endpoint of reference.endpoints) {
+    byKey.set(`${endpoint.method}:${endpoint.path}`, endpoint);
+  }
+
+  return [...byKey.values()].map((referenceEndpoint) => {
+    const key = `${referenceEndpoint.method}:${referenceEndpoint.path}`;
+    const row = overlay.rows.get(key);
+    const referenceKeys =
+      normalizedMarketplaceReferenceKeys ??
+      new Set(
+        reference.endpoints.map(
+          (endpoint) => `${endpoint.method}:${endpoint.path}`,
+        ),
+      );
+    let staticSafety = marketplaceReferenceSafetyCache.get(key);
+    if (!staticSafety || !referenceKeys.has(key)) {
+      staticSafety = classifyCatalogSafety(
+        referenceEndpoint.path,
+        referenceEndpoint.method,
+        {
+          summary: referenceEndpoint.summary,
+          operationId: referenceEndpoint.operationId,
+          parameters: referenceEndpoint.parameters,
+          requestBody: referenceEndpoint.requestBody,
+        },
+      );
+      if (referenceKeys.has(key)) {
+        marketplaceReferenceSafetyCache.set(key, staticSafety);
+      }
+    }
+    const restricted =
+      row?.safety_classification === "prohibited" ||
+      staticSafety.classification === "prohibited";
+    const available =
+      !restricted &&
+      overlay.catalogReady &&
+      row != null &&
+      row.enabled === 1 &&
+      row.read_only === 1 &&
+      row.price_verified === 1 &&
+      row.safety_classification === "safe_data_read" &&
+      row.safety_policy_version === CATALOG_SAFETY_POLICY_VERSION;
+    return {
+      ...referenceEndpoint,
+      availability: available
+        ? ("available" as const)
+        : restricted
+          ? ("restricted" as const)
+          : ("pending" as const),
+      priceUsdMicros: available
+        ? Math.max(0, Number(row.customer_price_usd_micros))
+        : null,
+      rateLimitRpm: null,
+      updatedAt: row?.updated_at ?? null,
+    };
+  });
+}
+
+function marketplaceFacet<T extends string>(
+  values: T[],
+  labels: Partial<Record<T, string>> = {},
+) {
+  const counts = new Map<T, number>();
+  for (const value of values) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([value, count]) => ({
+      value,
+      label: labels[value] ?? value,
+      count,
+    }))
+    .sort(
+      (left, right) =>
+        right.count - left.count ||
+        left.label.localeCompare(right.label, "zh-CN"),
+    );
+}
+
+function marketplaceFilters(url: URL) {
+  const single = (name: string, maxLength: number): string | null => {
+    if (url.searchParams.getAll(name).length > 1) {
+      throw new PlatformError(
+        400,
+        "invalid_marketplace_filter",
+        `API 市场筛选参数 ${name} 重复。`,
+      );
+    }
+    const value = url.searchParams.get(name)?.trim() ?? "";
+    if (
+      value.length > maxLength ||
+      /[\u0000-\u001F\u007F]/.test(value)
+    ) {
+      throw new PlatformError(
+        400,
+        "invalid_marketplace_filter",
+        `API 市场筛选参数 ${name} 无效。`,
+      );
+    }
+    return value || null;
+  };
+  const q = single("q", 160);
+  const platform = single("platform", 64)?.toLowerCase() ?? null;
+  const tag = single("tag", 160)?.toLowerCase() ?? null;
+  const dataType = single("dataType", 80)?.toLowerCase() ?? null;
+  const methodRaw = single("method", 8)?.toUpperCase() ?? null;
+  const surfaceRaw = single("surface", 16)?.toLowerCase() ?? null;
+  const availabilityRaw =
+    single("availability", 16)?.toLowerCase() ?? null;
+  if (methodRaw && methodRaw !== "GET" && methodRaw !== "POST") {
+    throw new PlatformError(
+      400,
+      "invalid_marketplace_filter",
+      "API 市场请求方法筛选无效。",
+    );
+  }
+  if (
+    surfaceRaw &&
+    !["app", "web", "app_web", "other"].includes(surfaceRaw)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_marketplace_filter",
+      "API 市场端类型筛选无效。",
+    );
+  }
+  if (
+    availabilityRaw &&
+    !["available", "pending", "restricted"].includes(availabilityRaw)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_marketplace_filter",
+      "API 市场可用状态筛选无效。",
+    );
+  }
+  const rawLimit = single("limit", 4);
+  const limit = rawLimit == null ? 20 : Number(rawLimit);
+  const rawOffset = single("offset", 5);
+  const offset = rawOffset == null ? 0 : Number(rawOffset);
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 100 ||
+    !Number.isSafeInteger(offset) ||
+    offset < 0 ||
+    offset > 5_000
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_pagination",
+      "API 市场分页参数无效。",
+    );
+  }
+  return {
+    q: q?.normalize("NFKC").toLowerCase() ?? null,
+    platform,
+    tag,
+    dataType,
+    method: methodRaw as "GET" | "POST" | null,
+    surface: surfaceRaw as MarketplaceSurface | null,
+    availability:
+      availabilityRaw as MarketplaceAvailability | null,
+    limit,
+    offset,
+  };
+}
+
+function marketplacePublicEndpoint(
+  endpoint: ReturnType<typeof mergedMarketplaceEndpoints>[number],
+) {
+  return {
+    path: endpoint.path,
+    platform: endpoint.platform,
+    dataType: endpoint.dataType,
+    method: endpoint.method,
+    surface: endpoint.surface,
+    availability: endpoint.availability,
+    summary: endpoint.summary,
+    priceUsdMicros: endpoint.priceUsdMicros,
+    rateLimitRpm: endpoint.rateLimitRpm,
+    updatedAt: endpoint.updatedAt,
+  };
+}
+
+function marketplaceResponseShape(
+  endpoints: ReturnType<typeof mergedMarketplaceEndpoints>,
+  source: MarketplaceReference["source"],
+) {
+  const total = endpoints.length;
+  const available = endpoints.filter(
+    (endpoint) => endpoint.availability === "available",
+  ).length;
+  const restricted = endpoints.filter(
+    (endpoint) => endpoint.availability === "restricted",
+  ).length;
+  return {
+    source,
+    stats: {
+      total,
+      available,
+      pending: total - available - restricted,
+      restricted,
+      platforms: new Set(endpoints.map((endpoint) => endpoint.platform))
+        .size,
+      categories: new Set(
+        endpoints.flatMap((endpoint) => endpoint.tags),
+      ).size,
+      dataTypes: new Set(endpoints.map((endpoint) => endpoint.dataType))
+        .size,
+    },
+    facets: {
+      platforms: marketplaceFacet(
+        endpoints.map((endpoint) => endpoint.platform),
+        {
+          bilibili: "Bilibili",
+          demo: "Demo",
+          douyin: "抖音 / Douyin",
+          health: "Health",
+          hybrid: "Hybrid",
+          instagram: "Instagram",
+          ios_shortcut: "iOS Shortcut",
+          kuaishou: "快手 / Kuaishou",
+          lemon8: "Lemon8",
+          linkedin: "LinkedIn",
+          pipixia: "皮皮虾 / Pipixia",
+          reddit: "Reddit",
+          telegram: "Telegram",
+          temp_mail: "Temp Mail",
+          threads: "Threads",
+          tikhub: "TikHub",
+          tiktok: "TikTok",
+          toutiao: "今日头条 / Toutiao",
+          twitter: "X / Twitter",
+          wechat_channels: "微信视频号",
+          wechat_mp: "微信公众号",
+          wechat_search: "微信搜索",
+          weibo: "微博 / Weibo",
+          xiaohongshu: "小红书 / Xiaohongshu",
+          xigua: "西瓜视频 / Xigua",
+          youtube: "YouTube",
+          zhihu: "知乎 / Zhihu",
+        },
+      ),
+      dataTypes: marketplaceFacet(
+        endpoints.map((endpoint) => endpoint.dataType),
+        {
+          account: "账户 / Account",
+          analytics_trends: "分析与趋势",
+          comments: "评论 / Comments",
+          commerce_marketing: "电商与营销",
+          content: "内容与作品",
+          email: "邮件 / Email",
+          live: "直播 / Live",
+          media_download: "媒体下载",
+          other: "其他 / Other",
+          profile_creator: "用户与创作者",
+          search_discovery: "搜索与发现",
+          social_graph: "关注与社交关系",
+          system: "系统 / System",
+          taxonomy: "话题与分类",
+          utility: "工具 / Utility",
+        },
+      ),
+      tags: marketplaceFacet(
+        endpoints.flatMap((endpoint) => endpoint.tags),
+      ),
+      methods: marketplaceFacet(
+        endpoints.map((endpoint) => endpoint.method),
+      ),
+      surfaces: marketplaceFacet(
+        endpoints.map((endpoint) => endpoint.surface),
+        {
+          app: "APP",
+          web: "WEB",
+          app_web: "APP + WEB",
+          other: "OTHER",
+        },
+      ),
+      availability: marketplaceFacet(
+        endpoints.map((endpoint) => endpoint.availability),
+        {
+          available: "已开放",
+          pending: "待审核",
+          restricted: "不开放",
+        },
+      ),
+    },
+  };
+}
+
+async function handleMarketplace(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const filters = marketplaceFilters(url);
+  const overlay = await marketplaceCatalogOverlay(env);
+  const endpoints = mergedMarketplaceEndpoints(overlay);
+  const summary = marketplaceResponseShape(endpoints, overlay.source);
+  const filtered = endpoints.filter((endpoint) => {
+    if (
+      filters.platform &&
+      endpoint.platform.toLowerCase() !== filters.platform
+    ) {
+      return false;
+    }
+    if (
+      filters.dataType &&
+      endpoint.dataType.toLowerCase() !== filters.dataType
+    ) {
+      return false;
+    }
+    if (
+      filters.tag &&
+      !endpoint.tags.some(
+        (tag) => tag.toLowerCase() === filters.tag,
+      )
+    ) {
+      return false;
+    }
+    if (filters.method && endpoint.method !== filters.method) return false;
+    if (filters.surface && endpoint.surface !== filters.surface) return false;
+    if (
+      filters.availability &&
+      endpoint.availability !== filters.availability
+    ) {
+      return false;
+    }
+    if (filters.q) {
+      const searchable = [
+        endpoint.path,
+        endpoint.platform,
+        endpoint.dataType,
+        endpoint.summary ?? "",
+        endpoint.description ?? "",
+        ...endpoint.tags,
+      ]
+        .join(" ")
+        .normalize("NFKC")
+        .toLowerCase();
+      if (!searchable.includes(filters.q)) return false;
+    }
+    return true;
+  });
+  const page = filtered.slice(
+    filters.offset,
+    filters.offset + filters.limit,
+  );
+  return jsonResponse(
+    {
+      ...summary,
+      endpoints: page.map(marketplacePublicEndpoint),
+      count: page.length,
+      total: filtered.length,
+      offset: filters.offset,
+      nextOffset:
+        filters.offset + page.length < filtered.length
+          ? filters.offset + page.length
+          : null,
+    },
+    200,
+    requestId,
+    { "cache-control": "no-store" },
+  );
+}
+
+function marketplaceExampleScalar(
+  parameter: Record<string, unknown>,
+): string {
+  const schema = isPlainRecord(parameter.schema)
+    ? parameter.schema
+    : {};
+  const candidates = [
+    parameter.example,
+    schema.example,
+    schema.default,
+    Array.isArray(schema.enum) ? schema.enum[0] : undefined,
+  ];
+  for (const candidate of candidates) {
+    if (
+      typeof candidate === "string" &&
+      candidate.length > 0 &&
+      candidate.length <= 120 &&
+      !/[\u0000-\u001F\u007F]/.test(candidate)
+    ) {
+      return candidate;
+    }
+    if (
+      typeof candidate === "number" &&
+      Number.isFinite(candidate)
+    ) {
+      return String(candidate);
+    }
+    if (typeof candidate === "boolean") return String(candidate);
+  }
+  if (schema.type === "integer" || schema.type === "number") return "1";
+  if (schema.type === "boolean") return "true";
+  return `YOUR_${String(parameter.name ?? "VALUE")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .toUpperCase()
+    .slice(0, 48)}`;
+}
+
+function marketplaceRequestBodyExample(
+  requestBody: Record<string, unknown> | null,
+): unknown {
+  if (!requestBody) return {};
+  const content = isPlainRecord(requestBody.content)
+    ? requestBody.content
+    : null;
+  const media = content && isPlainRecord(content["application/json"])
+    ? content["application/json"]
+    : null;
+  const schema = media && isPlainRecord(media.schema) ? media.schema : null;
+  const boundedExample = (value: unknown): unknown | undefined => {
+    if (value === undefined) return undefined;
+    try {
+      const serialized = JSON.stringify(value);
+      if (
+        typeof serialized !== "string" ||
+        serialized.length > MAX_OPENAPI_INPUT_SCHEMA_BYTES
+      ) {
+        return undefined;
+      }
+      return JSON.parse(serialized) as unknown;
+    } catch {
+      return undefined;
+    }
+  };
+  const mediaExample = boundedExample(
+    redactCatalogExampleAgainstSchema(media?.example, schema),
+  );
+  if (mediaExample !== undefined) return mediaExample;
+  const build = (
+    node: Record<string, unknown> | null,
+    depth: number,
+    fieldName?: string,
+  ): unknown => {
+    if (!node || depth > 4) return {};
+    if (fieldName && catalogInputFieldRisk(fieldName) != null) {
+      return redactedCatalogExample(fieldName);
+    }
+    const declaredExample = boundedExample(
+      redactCatalogExampleAgainstSchema(node.example, node, fieldName),
+    );
+    if (declaredExample !== undefined) return declaredExample;
+    if (
+      typeof node.default === "string" ||
+      typeof node.default === "number" ||
+      typeof node.default === "boolean"
+    ) {
+      return node.default;
+    }
+    if (Array.isArray(node.enum) && node.enum.length > 0) {
+      return node.enum[0];
+    }
+    if (node.type === "array") {
+      return [
+        build(
+          isPlainRecord(node.items) ? node.items : null,
+          depth + 1,
+          fieldName,
+        ),
+      ];
+    }
+    if (isPlainRecord(node.properties)) {
+      return Object.fromEntries(
+        Object.entries(node.properties)
+          .slice(0, 12)
+          .map(([name, child]) => [
+            name,
+            build(
+              isPlainRecord(child) ? child : null,
+              depth + 1,
+              name,
+            ),
+          ]),
+      );
+    }
+    if (node.type === "integer" || node.type === "number") return 1;
+    if (node.type === "boolean") return true;
+    return "YOUR_VALUE";
+  };
+  return build(schema, 0);
+}
+
+function marketplaceCodeExamples(
+  request: Request,
+  endpoint: ReturnType<typeof mergedMarketplaceEndpoints>[number],
+) {
+  const origin = new URL(request.url).origin;
+  const queryParameters = endpoint.parameters
+    .filter(
+      (parameter) =>
+        parameter.in === "query" &&
+        typeof parameter.name === "string" &&
+        catalogInputFieldRisk(parameter.name) == null,
+    )
+    .slice(0, 20);
+  const query = new URLSearchParams();
+  for (const parameter of queryParameters) {
+    query.set(String(parameter.name), marketplaceExampleScalar(parameter));
+  }
+  const url = `${origin}${endpoint.path}${
+    query.size > 0 ? `?${query.toString()}` : ""
+  }`;
+  const body = marketplaceRequestBodyExample(endpoint.requestBody);
+  const bodyJson = JSON.stringify(body, null, 2);
+  const hasBody = endpoint.method === "POST";
+  const curl = [
+    `curl --request ${endpoint.method} \\`,
+    `  '${url}' \\`,
+    "  --header 'Authorization: Bearer rb_live_YOUR_KEY' \\",
+    "  --header 'Idempotency-Key: marketplace-example-001' \\",
+    ...(endpoint.priceUsdMicros !== null
+      ? [
+          `  --header 'X-RelayBase-Max-Cost-Usd-Micros: ${endpoint.priceUsdMicros}' \\`,
+        ]
+      : []),
+    ...(hasBody
+      ? [
+          "  --header 'Content-Type: application/json' \\",
+          `  --data '${bodyJson.replaceAll("'", "'\\''")}'`,
+        ]
+      : ["  --header 'Accept: application/json'"]),
+  ].join("\n");
+  const javascript = `const response = await fetch(${JSON.stringify(url)}, {
+  method: "${endpoint.method}",
+  headers: {
+    Authorization: "Bearer rb_live_YOUR_KEY",
+    "Idempotency-Key": "marketplace-example-001",
+    ${
+      endpoint.priceUsdMicros !== null
+        ? `"X-RelayBase-Max-Cost-Usd-Micros": "${endpoint.priceUsdMicros}",`
+        : ""
+    }
+    Accept: "application/json",${
+      hasBody ? '\n    "Content-Type": "application/json",' : ""
+    }
+  },${hasBody ? `\n  body: JSON.stringify(${bodyJson}),` : ""}
+});
+
+const payload = await response.json();
+if (!response.ok) throw new Error(payload.error?.message ?? "Request failed");`;
+  const pythonParams = Object.fromEntries(
+    queryParameters.map((parameter) => [
+      String(parameter.name),
+      marketplaceExampleScalar(parameter),
+    ]),
+  );
+  const python = `import json
+import requests
+
+response = requests.${endpoint.method.toLowerCase()}(
+    ${JSON.stringify(`${origin}${endpoint.path}`)},
+    headers={
+        "Authorization": "Bearer rb_live_YOUR_KEY",
+        "Idempotency-Key": "marketplace-example-001",
+        ${
+          endpoint.priceUsdMicros !== null
+            ? `"X-RelayBase-Max-Cost-Usd-Micros": "${endpoint.priceUsdMicros}",`
+            : ""
+        }
+        "Accept": "application/json",
+    },${
+      Object.keys(pythonParams).length > 0
+        ? `\n    params=${JSON.stringify(pythonParams, null, 4)},`
+        : ""
+    }${
+      hasBody
+        ? `\n    json=json.loads(${JSON.stringify(JSON.stringify(body))}),`
+        : ""
+    }
+    timeout=30,
+)
+response.raise_for_status()
+payload = response.json()`;
+  return { curl, javascript, python };
+}
+
+async function handleMarketplaceDetail(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  const url = new URL(request.url);
+  if (
+    url.searchParams.getAll("path").length !== 1 ||
+    url.searchParams.getAll("method").length !== 1
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_marketplace_endpoint",
+      "API 市场详情参数无效。",
+    );
+  }
+  const path = normalizeCatalogPath(url.searchParams.get("path") ?? "");
+  const method = (url.searchParams.get("method") ?? "").toUpperCase();
+  if (method !== "GET" && method !== "POST") {
+    throw new PlatformError(
+      400,
+      "invalid_marketplace_endpoint",
+      "API 市场请求方法无效。",
+    );
+  }
+  marketplaceReference();
+  const referenceEndpoint = normalizedMarketplaceReferenceByKey?.get(
+    `${method}:${path}`,
+  );
+  if (!referenceEndpoint) {
+    throw new PlatformError(
+      404,
+      "marketplace_endpoint_not_found",
+      "API 市场中没有这个端点。",
+    );
+  }
+  const overlay = await marketplaceCatalogOverlay(env);
+  const endpoint = mergedMarketplaceEndpoints(overlay).find(
+    (candidate) =>
+      candidate.path === path && candidate.method === method,
+  );
+  if (!endpoint) {
+    throw new PlatformError(
+      404,
+      "marketplace_endpoint_not_found",
+      "API 市场中没有这个端点。",
+    );
+  }
+  return jsonResponse(
+    {
+      source: overlay.source,
+      endpoint: {
+        ...marketplacePublicEndpoint(endpoint),
+        tags: endpoint.tags,
+        description: endpoint.description,
+        operationId: endpoint.operationId,
+        parameters: endpoint.parameters,
+        requestBody: endpoint.requestBody,
+        response: endpoint.response,
+      },
+      examples: marketplaceCodeExamples(request, endpoint),
+    },
+    200,
+    requestId,
+    { "cache-control": "no-store" },
+  );
 }
 
 async function handlePublicCatalog(
@@ -5681,6 +6728,16 @@ async function handleAdminUserUpdate(
   }
 
   const db = requireDb(env);
+  const auditStatement = await prepareAdminAuditStatement(db, request, {
+    action: "user.status_updated",
+    targetType: "user",
+    targetId: userId,
+    details: {
+      status,
+      credentialsInvalidated: status === "suspended",
+    },
+    userStatusUpdate: { userId, status },
+  });
   const results = await db.batch([
     db
       .prepare(
@@ -5696,16 +6753,17 @@ async function handleAdminUserUpdate(
          WHERE user_id = ? AND ? = 'suspended'`,
       )
       .bind(userId, status),
+    db
+      .prepare(
+        `DELETE FROM auth_sessions
+         WHERE user_id = ? AND ? = 'suspended'`,
+      )
+      .bind(userId, status),
+    auditStatement,
   ]);
   if (Number(results[0]?.meta?.changes ?? 0) !== 1) {
     throw new PlatformError(404, "user_not_found", "没有找到这个用户。");
   }
-  await writeAdminAudit(db, request, {
-    action: "user.status_updated",
-    targetType: "user",
-    targetId: userId,
-    details: { status },
-  });
   return jsonResponse({ ok: true, userId, status }, 200, requestId);
 }
 
@@ -7973,6 +9031,7 @@ async function handleReconciliation(
   let creditedPaymentsPolled = 0;
   let rejectedPaymentsPolled = 0;
   let paymentErrors = 0;
+  let paymentProviderAttempts = 0;
   const paymentApiKey = env.NOWPAYMENTS_API_KEY;
   if (paymentApiKey) {
     const events = await db
@@ -7990,6 +9049,7 @@ async function handleReconciliation(
         order_id: string;
       }>();
     const eventRows = events.results ?? [];
+    paymentProviderAttempts += eventRows.length;
     for (let offset = 0; offset < eventRows.length; offset += 3) {
       await Promise.all(
         eventRows.slice(offset, offset + 3).map(async (event) => {
@@ -8036,6 +9096,7 @@ async function handleReconciliation(
       )
       .all<{ id: string; provider_payment_id: string }>();
     const pendingRows = pendingPayments.results ?? [];
+    paymentProviderAttempts += pendingRows.length;
     for (let offset = 0; offset < pendingRows.length; offset += 3) {
       await Promise.all(
         pendingRows.slice(offset, offset + 3).map(async (payment) => {
@@ -8149,6 +9210,7 @@ async function handleReconciliation(
             )
             .first<{ name: string }>();
           if (!claimed) return;
+          paymentProviderAttempts += 1;
           let pollError: string | null = null;
           try {
             const verified = await getNowPaymentsPayment(
@@ -8242,6 +9304,7 @@ async function handleReconciliation(
       )
       .all<{ order_id: string; provider_payment_id: string }>();
     const creditedRows = creditedCandidates.results ?? [];
+    paymentProviderAttempts += creditedRows.length;
     for (let offset = 0; offset < creditedRows.length; offset += 3) {
       await Promise.all(
         creditedRows.slice(offset, offset + 3).map(async (payment) => {
@@ -8297,7 +9360,27 @@ async function handleReconciliation(
     }
   }
 
-  await db.batch([
+  const paymentProviderSuccesses =
+    paymentEventsProcessed +
+    paymentsPolled +
+    creditedPaymentsPolled +
+    rejectedPaymentsPolled;
+  const providerObservationFailed =
+    Boolean(paymentApiKey) &&
+    paymentProviderAttempts > 0 &&
+    paymentProviderSuccesses === 0;
+  const reconciliationDetails = JSON.stringify({
+    refunded,
+    paymentEventsProcessed,
+    paymentsPolled,
+    creditedPaymentsPolled,
+    rejectedPaymentsPolled,
+    paymentErrors,
+    paymentProviderAttempts,
+    paymentProviderSuccesses,
+    status: providerObservationFailed ? "provider_failed" : "healthy",
+  });
+  const maintenanceStatements = [
     db
       .prepare(
         `DELETE FROM payment_rate_limit_buckets
@@ -8344,22 +9427,28 @@ async function handleReconciliation(
       .prepare(
         `INSERT INTO operation_heartbeats
          (name, last_success_at, details_json)
-         VALUES ('reconciliation', CURRENT_TIMESTAMP, ?)
+         VALUES ('reconciliation:last-run', CURRENT_TIMESTAMP, ?)
          ON CONFLICT(name) DO UPDATE SET
            last_success_at = CURRENT_TIMESTAMP,
            details_json = excluded.details_json`,
       )
-      .bind(
-        JSON.stringify({
-          refunded,
-          paymentEventsProcessed,
-          paymentsPolled,
-          creditedPaymentsPolled,
-          rejectedPaymentsPolled,
-          paymentErrors,
-        }),
-      ),
-  ]);
+      .bind(reconciliationDetails),
+  ];
+  if (!providerObservationFailed) {
+    maintenanceStatements.push(
+      db
+        .prepare(
+          `INSERT INTO operation_heartbeats
+         (name, last_success_at, details_json)
+         VALUES ('reconciliation', CURRENT_TIMESTAMP, ?)
+         ON CONFLICT(name) DO UPDATE SET
+           last_success_at = CURRENT_TIMESTAMP,
+           details_json = excluded.details_json`,
+        )
+        .bind(reconciliationDetails),
+    );
+  }
+  await db.batch(maintenanceStatements);
 
   return jsonResponse(
     {
@@ -8373,11 +9462,14 @@ async function handleReconciliation(
         creditedPolled: creditedPaymentsPolled,
         rejectedPolled: rejectedPaymentsPolled,
         errors: paymentErrors,
+        providerAttempts: paymentProviderAttempts,
+        providerSuccesses: paymentProviderSuccesses,
+        providerHealthy: !providerObservationFailed,
         skipped: paymentApiKey ? null : "NOWPAYMENTS_API_KEY 未配置",
       },
       note: "回退两分钟前仍未完成且存在扣款流水的代理请求，并复核未处理事件、待确认充值、近期零入账拒绝案件与已入账退款状态。",
     },
-    200,
+    providerObservationFailed ? 502 : 200,
     requestId,
   );
 }
@@ -10354,6 +11446,449 @@ function extractOpenApiVersion(payload: unknown): string | null {
   return compactCatalogText(payload.info.version, 80);
 }
 
+function redactedCatalogExample(fieldName?: string): string {
+  const canonical = fieldName
+    ? canonicalCatalogInputField(fieldName)
+    : "";
+  return canonical
+    ? `YOUR_${canonical.toUpperCase().slice(0, 48)}`
+    : "[REDACTED]";
+}
+
+function looksSensitiveCatalogExample(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  return (
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----/i.test(value) ||
+    /(?:Bearer\s+[A-Za-z0-9._~+/-]{16,}={0,2}|sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|AIza[A-Za-z0-9_-]{20,}|rb_live_[A-Za-z0-9_-]{16,})/i.test(
+      value,
+    ) ||
+    /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/.test(
+      value,
+    )
+  );
+}
+
+function redactSensitiveCatalogText(value: string): string {
+  const placeholder = (field: string) => redactedCatalogExample(field);
+  return value
+    .replace(
+      /(["'])([A-Za-z][A-Za-z0-9_.\-/]{0,80})\1(\s*[:=]\s*)(["'])([^\r\n]*?)\4/g,
+      (
+        match: string,
+        keyQuote: string,
+        field: string,
+        separator: string,
+        valueQuote: string,
+      ) =>
+        catalogInputFieldRisk(field) != null
+          ? `${keyQuote}${field}${keyQuote}${separator}${valueQuote}${placeholder(field)}${valueQuote}`
+          : match,
+    )
+    .replace(
+      /(^|[^A-Za-z0-9_])([A-Za-z][A-Za-z0-9_.\-/]{0,80})(\s*[:=]\s*)(["'])([^\r\n]*?)\4/gm,
+      (
+        match: string,
+        prefix: string,
+        field: string,
+        separator: string,
+        quote: string,
+      ) =>
+        catalogInputFieldRisk(field) != null
+          ? `${prefix}${field}${separator}${quote}${placeholder(field)}${quote}`
+          : match,
+    )
+    .replace(
+      /(^|[^A-Za-z0-9_])(["']?)([A-Za-z][A-Za-z0-9_.\-/]{0,80})\2(\s*[:=]\s*)(?!["'])([^\r\n]+)/gm,
+      (
+        match: string,
+        prefix: string,
+        keyQuote: string,
+        field: string,
+        separator: string,
+      ) =>
+        catalogInputFieldRisk(field) != null
+          ? `${prefix}${keyQuote}${field}${keyQuote}${separator}${placeholder(field)}`
+          : match,
+    )
+    .replace(
+      /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gi,
+      "[REDACTED_PRIVATE_KEY]",
+    )
+    .replace(
+      /\bBearer\s+[A-Za-z0-9._~+/-]{16,}={0,2}/gi,
+      "Bearer [REDACTED]",
+    )
+    .replace(
+      /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
+      "[REDACTED_JWT]",
+    )
+    .replace(
+      /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|AIza[A-Za-z0-9_-]{20,}|rb_live_[A-Za-z0-9_-]{16,})\b/gi,
+      "[REDACTED_TOKEN]",
+    );
+}
+
+function stripUpstreamCatalogExamples(value: string): string {
+  const output: string[] = [];
+  const lines = value.replace(/\r\n?/g, "\n").split("\n");
+  let skippedHeadingLevel: number | null = null;
+  let insideFence = false;
+  let insertedNotice = false;
+  const insertNotice = (): void => {
+    if (!insertedNotice) {
+      output.push(
+        "上游原始示例已移除；请使用 RelayBase 生成的安全调用示例。",
+      );
+      insertedNotice = true;
+    }
+  };
+
+  for (const line of lines) {
+    const heading = line.match(
+      /^\s{0,4}(#{1,6})\s*(.*?)\s*#*\s*$/,
+    );
+    if (skippedHeadingLevel != null) {
+      if (heading && heading[1].length <= skippedHeadingLevel) {
+        skippedHeadingLevel = null;
+      } else {
+        continue;
+      }
+    }
+    if (
+      heading &&
+      /(?:示例|例子|\bexamples?\b)/iu.test(heading[2])
+    ) {
+      insertNotice();
+      skippedHeadingLevel = heading[1].length;
+      continue;
+    }
+    if (/^\s*(?:```|~~~)/.test(line)) {
+      if (!insideFence) insertNotice();
+      insideFence = !insideFence;
+      continue;
+    }
+    if (insideFence) continue;
+    output.push(line);
+  }
+  return output.join("\n").trim();
+}
+
+function publicCatalogDescription(value: unknown, maxLength: number): string | null {
+  if (typeof value !== "string") return null;
+  return compactCatalogText(
+    redactSensitiveCatalogText(stripUpstreamCatalogExamples(value)),
+    maxLength,
+  );
+}
+
+function redactCatalogExampleAgainstSchema(
+  value: unknown,
+  schema: unknown,
+  fieldName?: string,
+  depth = 0,
+): unknown {
+  if (
+    (fieldName && catalogInputFieldRisk(fieldName) != null) ||
+    looksSensitiveCatalogExample(value)
+  ) {
+    return redactedCatalogExample(fieldName);
+  }
+  if (depth > 32) return "[REDACTED]";
+  if (Array.isArray(value)) {
+    const itemSchema =
+      isPlainRecord(schema) && isPlainRecord(schema.items)
+        ? schema.items
+        : null;
+    return value.map((item) =>
+      redactCatalogExampleAgainstSchema(
+        item,
+        itemSchema,
+        fieldName,
+        depth + 1,
+      ),
+    );
+  }
+  if (typeof value === "string") return redactSensitiveCatalogText(value);
+  if (!isPlainRecord(value)) return value;
+  const properties =
+    isPlainRecord(schema) && isPlainRecord(schema.properties)
+      ? schema.properties
+      : null;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [
+      key,
+      redactCatalogExampleAgainstSchema(
+        child,
+        properties?.[key],
+        key,
+        depth + 1,
+      ),
+    ]),
+  );
+}
+
+function redactUnknownCatalogExample(
+  value: unknown,
+  fieldName?: string,
+  depth = 0,
+): unknown {
+  if (
+    (fieldName && catalogInputFieldRisk(fieldName) != null) ||
+    looksSensitiveCatalogExample(value)
+  ) {
+    return redactedCatalogExample(fieldName);
+  }
+  if (depth > 32) return "[REDACTED]";
+  if (Array.isArray(value)) {
+    return value.map((item) =>
+      redactUnknownCatalogExample(item, fieldName, depth + 1),
+    );
+  }
+  if (typeof value === "string") return redactSensitiveCatalogText(value);
+  if (!isPlainRecord(value)) return value;
+  const exampleObject =
+    Object.hasOwn(value, "value") &&
+    Object.keys(value).every((key) =>
+      ["summary", "description", "value", "externalValue"].includes(key),
+    );
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => {
+      if (
+        exampleObject &&
+        (key === "summary" ||
+          key === "description" ||
+          key === "externalValue")
+      ) {
+        return [
+          key,
+          typeof child === "string"
+            ? redactSensitiveCatalogText(child)
+            : "[REDACTED_INVALID_EXAMPLE_METADATA]",
+        ];
+      }
+      return [
+        key,
+        redactUnknownCatalogExample(
+          child,
+          exampleObject && key === "value" ? fieldName : key,
+          depth + 1,
+        ),
+      ];
+    }),
+  );
+}
+
+function redactCatalogInputMetadata(
+  value: unknown,
+  fieldName?: string,
+  depth = 0,
+): unknown {
+  if (depth > 64) return value;
+  if (Array.isArray(value)) {
+    return value.map((item) =>
+      redactCatalogInputMetadata(item, fieldName, depth + 1),
+    );
+  }
+  if (typeof value === "string") return redactSensitiveCatalogText(value);
+  if (!isPlainRecord(value)) return value;
+  const declaredName =
+    typeof value.name === "string" &&
+    catalogInputFieldRisk(value.name) != null
+      ? value.name
+      : fieldName;
+  const schema = isPlainRecord(value.schema) ? value.schema : null;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => {
+      if (key === "description" && typeof child === "string") {
+        return [
+          key,
+          publicCatalogDescription(child, 2_000),
+        ];
+      }
+      if ((key === "example" || key === "default") && schema) {
+        return [
+          key,
+          redactCatalogExampleAgainstSchema(
+            child,
+            schema,
+            declaredName,
+          ),
+        ];
+      }
+      if (
+        key === "example" ||
+        key === "examples" ||
+        key === "default"
+      ) {
+        return [
+          key,
+          redactUnknownCatalogExample(child, declaredName),
+        ];
+      }
+      if (key === "properties" && isPlainRecord(child)) {
+        return [
+          key,
+          Object.fromEntries(
+            Object.entries(child).map(([propertyName, propertySchema]) => [
+              propertyName,
+              redactCatalogInputMetadata(
+                propertySchema,
+                propertyName,
+                depth + 1,
+              ),
+            ]),
+          ),
+        ];
+      }
+      return [
+        key,
+        redactCatalogInputMetadata(child, declaredName, depth + 1),
+      ];
+    }),
+  );
+}
+
+function resolveOpenApiInputReferences(
+  document: Record<string, unknown>,
+  value: unknown,
+): unknown {
+  let visitedNodes = 0;
+  let expandedBytes = 0;
+  let referenceCount = 0;
+  const activeReferences = new Set<string>();
+  const encoder = new TextEncoder();
+
+  class ReferenceBudgetError extends Error {
+    constructor(readonly reason: string) {
+      super(reason);
+    }
+  }
+
+  const addBytes = (value: string): void => {
+    const bytes = encoder.encode(value).byteLength;
+    if (bytes > MAX_OPENAPI_REFERENCE_STRING_BYTES) {
+      throw new ReferenceBudgetError("string_limit");
+    }
+    expandedBytes += bytes;
+    if (expandedBytes > MAX_OPENAPI_REFERENCE_BYTES) {
+      throw new ReferenceBudgetError("byte_limit");
+    }
+  };
+
+  const unresolvedReference = (
+    reference: string,
+    reason: string,
+  ): Record<string, string> => ({
+    $ref: reference.slice(0, 512),
+    "x-relaybase-unresolved": reason,
+  });
+
+  const resolvePointer = (reference: string): unknown => {
+    if (
+      !reference.startsWith("#/components/") ||
+      reference.length > 512
+    ) {
+      return undefined;
+    }
+    let current: unknown = document;
+    for (const rawSegment of reference.slice(2).split("/")) {
+      const segment = rawSegment.replace(/~1/g, "/").replace(/~0/g, "~");
+      if (
+        !segment ||
+        segment.length > 200 ||
+        segment === "__proto__" ||
+        segment === "prototype" ||
+        segment === "constructor" ||
+        !isPlainRecord(current) ||
+        !Object.hasOwn(current, segment)
+      ) {
+        return undefined;
+      }
+      current = current[segment];
+    }
+    return current;
+  };
+
+  const visit = (input: unknown, depth: number): unknown => {
+    visitedNodes += 1;
+    if (visitedNodes > MAX_OPENAPI_REFERENCE_NODES) {
+      throw new ReferenceBudgetError("node_limit");
+    }
+    if (depth > MAX_OPENAPI_REFERENCE_DEPTH) {
+      throw new ReferenceBudgetError("depth_limit");
+    }
+    if (Array.isArray(input)) {
+      if (input.length > MAX_OPENAPI_REFERENCE_ITEMS) {
+        throw new ReferenceBudgetError("array_limit");
+      }
+      return input.map((item) => visit(item, depth + 1));
+    }
+    if (typeof input === "string") {
+      addBytes(input);
+      return input;
+    }
+    if (!isPlainRecord(input)) {
+      expandedBytes += 8;
+      if (expandedBytes > MAX_OPENAPI_REFERENCE_BYTES) {
+        throw new ReferenceBudgetError("byte_limit");
+      }
+      return input;
+    }
+    const entries = Object.entries(input);
+    if (entries.length > MAX_OPENAPI_REFERENCE_ITEMS) {
+      throw new ReferenceBudgetError("object_limit");
+    }
+    for (const [key] of entries) addBytes(key);
+
+    const reference =
+      typeof input.$ref === "string" ? input.$ref.trim() : null;
+    if (reference) {
+      referenceCount += 1;
+      if (referenceCount > MAX_OPENAPI_REFERENCES) {
+        throw new ReferenceBudgetError("reference_limit");
+      }
+      if (activeReferences.has(reference)) {
+        return unresolvedReference(reference, "reference_cycle");
+      }
+      const target = resolvePointer(reference);
+      if (target === undefined) {
+        return unresolvedReference(reference, "reference_not_allowed");
+      }
+      activeReferences.add(reference);
+      const resolvedTarget = visit(target, depth + 1);
+      activeReferences.delete(reference);
+      if (!isPlainRecord(resolvedTarget)) {
+        return unresolvedReference(reference, "reference_not_object");
+      }
+      const siblings = Object.fromEntries(
+        Object.entries(input)
+          .filter(([key]) => key !== "$ref")
+          .map(([key, child]) => [key, visit(child, depth + 1)]),
+      );
+      return { ...resolvedTarget, ...siblings };
+    }
+
+    return Object.fromEntries(
+      entries.map(([key, child]) => [
+        key,
+        visit(child, depth + 1),
+      ]),
+    );
+  };
+
+  try {
+    return visit(value, 0);
+  } catch (error) {
+    if (error instanceof ReferenceBudgetError) {
+      return unresolvedReference(
+        "#/components/relaybase/input-budget",
+        error.reason,
+      );
+    }
+    throw error;
+  }
+}
+
 function extractOpenApiCatalog(
   payload: unknown,
 ): Map<
@@ -10421,29 +11956,53 @@ function extractOpenApiCatalog(
         const operationParameters = Array.isArray(operation.parameters)
           ? operation.parameters
           : [];
-        const mergedParameters = [
-          ...pathParameters,
-          ...operationParameters,
-        ];
+        const mergedParameters = redactCatalogInputMetadata(
+          resolveOpenApiInputReferences(payload, [
+            ...pathParameters,
+            ...operationParameters,
+          ]),
+        );
+        const requestBody = redactCatalogInputMetadata(
+          resolveOpenApiInputReferences(
+            payload,
+            isPlainRecord(operation.requestBody)
+              ? operation.requestBody
+              : null,
+          ),
+        );
         const schemaPayload = {
           parameters: mergedParameters,
-          requestBody: isPlainRecord(operation.requestBody)
-            ? operation.requestBody
-            : null,
+          requestBody,
         };
         const serializedSchema = JSON.stringify(schemaPayload);
-        const safety = classifyCatalogSafety(path, httpMethod, {
-          ...operation,
-          parameters: mergedParameters,
-        });
+        const safety =
+          serializedSchema.length <= MAX_OPENAPI_INPUT_SCHEMA_BYTES
+            ? classifyCatalogSafety(path, httpMethod, {
+                ...operation,
+                parameters: mergedParameters,
+                requestBody,
+              })
+            : {
+                classification: "ambiguous" as const,
+                reasons: ["input_schema_storage_limit"],
+              };
         const entry = {
           path,
           platform: path.split("/")[2] || "other",
           httpMethod,
-          summary: compactCatalogText(operation.summary, 240),
-          description: compactCatalogText(operation.description, 2_000),
+          summary:
+            typeof operation.summary === "string"
+              ? compactCatalogText(
+                  redactSensitiveCatalogText(operation.summary),
+                  240,
+                )
+              : null,
+          description: publicCatalogDescription(
+            operation.description,
+            2_000,
+          ),
           parameterSchemaJson:
-            serializedSchema.length <= 16_384
+            serializedSchema.length <= MAX_OPENAPI_INPUT_SCHEMA_BYTES
               ? serializedSchema
               : JSON.stringify({ truncated: true }),
           looksReadOnly: safety.classification === "safe_data_read",
@@ -10637,9 +12196,15 @@ function catalogInputFieldRisk(
     "access_token",
     "refresh_token",
     "auth_token",
+    "auth",
     "authorization",
     "password",
+    "passwd",
     "secret",
+    "credential",
+    "credentials",
+    "csrf",
+    "csrf_token",
     "api_key",
     "private_key",
     "proxy",
@@ -10660,8 +12225,13 @@ function catalogInputFieldRisk(
     "cookie",
     "cookies",
     "session",
+    "auth",
     "password",
+    "passwd",
     "secret",
+    "credential",
+    "credentials",
+    "csrf",
     "proxy",
     "authorization",
     "device",
@@ -11055,6 +12625,10 @@ async function prepareAdminAuditStatement(
       action: string;
       requestHash: string;
     };
+    userStatusUpdate?: {
+      userId: string;
+      status: "active" | "suspended";
+    };
     catalogEndpointRevision?: {
       path: string;
       revision: number;
@@ -11119,6 +12693,24 @@ async function prepareAdminAuditStatement(
     input.targetId.slice(0, 180),
     details,
   ];
+  if (input.userStatusUpdate) {
+    return db
+      .prepare(
+        `INSERT INTO admin_audit_logs
+         (id, actor_fingerprint, action, target_type, target_id,
+          details_json, created_at)
+         SELECT ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+         WHERE EXISTS (
+           SELECT 1 FROM users
+           WHERE id = ? AND status = ?
+         )`,
+      )
+      .bind(
+        ...values,
+        input.userStatusUpdate.userId,
+        input.userStatusUpdate.status,
+      );
+  }
   if (input.paymentReviewResolution) {
     return db
       .prepare(

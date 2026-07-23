@@ -3,9 +3,9 @@ import CatalogClient from "./CatalogClient";
 import "../styles/catalog.css";
 
 export const metadata: Metadata = {
-  title: "接口目录",
+  title: "API 市场",
   description:
-    "浏览 RelayBase 当前开放的只读数据接口，按平台筛选并查看每次成功请求的公开价格。",
+    "浏览 RelayBase 的 1,025 个 TikHub 参考端点，按平台、TikHub 官方分类、RelayBase 归一化类型、方法与调用表面筛选，并查看参数、示例和参考价格。",
 };
 
 export default function CatalogPage() {

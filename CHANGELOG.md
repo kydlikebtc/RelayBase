@@ -9,6 +9,51 @@ RelayBase 的用户可见变化、计费语义、安全边界与数据库迁移�
 
 - 待下一轮迭代记录。
 
+## [0.3.0-preview.5] - 2026-07-24
+
+### Added
+
+- 新增 TikHub OpenAPI V5.3.2 静态参考市场与可重现生成器，收录 1,025 个
+  operations（GET 839、POST 186）、27 个平台和 53 个实际 operation tags；
+  `catalog:reference` 负责生成，`catalog:reference:check` 使用 `--check` 做字节级
+  过期校验。
+- 新增公开的 `GET /api/marketplace` 能力发现接口，支持关键词、平台、53 个 TikHub
+  官方 tags、15 个 RelayBase 归一化类型、GET/POST 方法、APP/WEB 调用表面、
+  可用状态筛选和服务端分页。
+- 新增 `GET /api/marketplace/detail` 详情接口与同页市场详情，展示端点描述、参数、
+  请求体、官方 tags、`operationId`、响应状态与上游 Schema 标识，以及 cURL、
+  JavaScript 和 Python 三种调用示例。
+- 客户付费调用支持可选 `X-RelayBase-Max-Cost-Usd-Micros` 上限；实时价格超过
+  客户报价时返回 `409 price_quote_exceeded`，不调用上游也不扣费。
+
+### Changed
+
+- 静态参考市场明确区分“可发现”和“可调用”：只有真实 TikHub Key、完整目录同步与
+  覆盖证明、当前安全审核、核价并上架、近期对账健康全部满足时，端点才标记为
+  `available`；`pending` 与 `restricted` 不进入真实代理。
+- 客户文档不再把所有公开数据能力表述为“仅 GET”；安全审核后的只读数据端点可以
+  使用 GET 或 POST，但写入、发布、互动、删除和控制面操作仍禁止代理。
+
+### Security
+
+- 静态参考生成器只解析有界的本地 `#/components/...` 引用，并为引用深度、引用数、
+  节点、字符串和展开体积设置硬上限；安全展开参数与请求体输入，外部引用、循环和
+  超限 schema 均 fail closed。
+- 生成器和运行时会对 Cookie、Token、会话、密码、代理、私钥和 API Key 字段的
+  `example/default` 做字段感知脱敏；本次参考快照中的结构化敏感输入值全部替换为
+  固定占位符。
+  description 与响应说明中的凭据式赋值会再次净化，上游原始示例代码块不会进入公开
+  参考产物。默认 `npm run check` 新增不依赖源快照的产物结构、完整覆盖、脱敏和
+  稳定序列化校验。
+- 公开市场只有在实时同步的 OpenAPI 快照哈希、操作数与完整 `(method, path)`
+  身份集合均和已提交参考快照一致时，才会叠加 `available` 与客户价格；不同代、
+  缺行或重复目录保持 `pending`，避免旧 Schema 搭配新价格或可用状态。
+- 当一轮对账存在支付 provider 调用且全部失败时，不再刷新成功
+  `reconciliation` heartbeat；仅记录失败诊断、返回 `502`，让 readiness 随旧成功
+  心跳过期而安全关闭。
+- 管理员停用用户时，用户状态变更、该用户全部 API Key 撤销、全部登录 session
+  删除和管理员审计在同一 D1 原子批次提交；重新启用不会恢复旧凭据。
+
 ## [0.3.0-preview.4] - 2026-07-23
 
 ### Added
@@ -173,7 +218,8 @@ RelayBase 的用户可见变化、计费语义、安全边界与数据库迁移�
 
 - RelayBase 初始市场页、安全沙盒、基础 TikHub 代理、客户 API Key 与预付余额原型。
 
-[Unreleased]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.4...HEAD
+[Unreleased]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.5...HEAD
+[0.3.0-preview.5]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.4...v0.3.0-preview.5
 [0.3.0-preview.4]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.3...v0.3.0-preview.4
 [0.3.0-preview.3]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.2...v0.3.0-preview.3
 [0.3.0-preview.2]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.1...v0.3.0-preview.2

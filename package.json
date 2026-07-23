@@ -1,6 +1,6 @@
 {
   "name": "relaybase-api",
-  "version": "0.3.0-preview.4",
+  "version": "0.3.0-preview.5",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -14,7 +14,10 @@
     "typecheck": "tsc --noEmit",
     "check:version": "node scripts/check-version.mjs",
     "check:docs": "node scripts/check-doc-sync.mjs",
-    "check": "npm run check:version && npm run check:docs && npm run typecheck && npm run lint && npm test",
+    "catalog:reference": "node scripts/generate-tikhub-catalog-reference.mjs",
+    "catalog:reference:check": "node scripts/generate-tikhub-catalog-reference.mjs --check",
+    "catalog:reference:validate": "node scripts/generate-tikhub-catalog-reference.mjs --validate-output",
+    "check": "npm run check:version && npm run check:docs && npm run catalog:reference:validate && npm run typecheck && npm run lint && npm test",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
