@@ -9,6 +9,22 @@ RelayBase 的用户可见变化、计费语义、安全边界与数据库迁移�
 
 - 待下一轮迭代记录。
 
+## [0.3.0-preview.2] - 2026-07-23
+
+### Fixed
+
+- 同一服务商付款存在开放案件时，任何状态查询都会先刷新带唯一观察 ID 的案件
+  证据；人工拒绝再对最初读取的证据执行原子比较。即使旧的零到账查询晚于足额
+  到账查询落库，也不能形成 ABA 并让旧拒绝覆盖资金。
+- 人工案件结算后的账本冲销、订单状态和管理员审计全部绑定本次 action 与请求
+  哈希；失败或过期的管理请求不能回退并发退款状态，也不会留下假成功审计。
+- 对最近 7 天内已拒绝且未入账的 NOWPayments 付款增加有时间窗、轮询间隔、
+  批次和并发上限的低频对账；即使晚到资金 IPN 丢失也会重新打开案件。
+- 晚到款重开必须精确匹配同一订单与服务商付款编号，避免父付款因子付款案件改变
+  共享订单状态后被误建复核案件。
+- 已入账父付款的退款轮询改以正向账本和未冲销状态为准，不再依赖父子付款共享的
+  订单状态；子付款仍在人工复核时也不会漏掉父付款退款。
+
 ## [0.3.0-preview.1] - 2026-07-23
 
 ### Added
@@ -86,6 +102,7 @@ RelayBase 的用户可见变化、计费语义、安全边界与数据库迁移�
 
 - RelayBase 初始市场页、安全沙盒、基础 TikHub 代理、客户 API Key 与预付余额原型。
 
-[Unreleased]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.1...HEAD
+[Unreleased]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.2...HEAD
+[0.3.0-preview.2]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.1...v0.3.0-preview.2
 [0.3.0-preview.1]: https://github.com/kydlikebtc/RelayBase/releases/tag/v0.3.0-preview.1
 [0.2.0-preview.1]: https://github.com/kydlikebtc/RelayBase/releases/tag/v0.2.0-preview.1

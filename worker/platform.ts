@@ -2245,6 +2245,25 @@ async function applyVerifiedNowPayment(
     typeof verified.payment_status === "string"
       ? verified.payment_status.trim().toLowerCase()
       : "";
+  const actualPaidPositive =
+    normalizedPositiveDecimal(verified.actually_paid) != null;
+  const exactReview = await db
+    .prepare(
+      `SELECT id, status, reason, resolution_action
+       FROM payment_review_cases
+       WHERE order_id = ? AND provider_payment_id = ?
+       LIMIT 1`,
+    )
+    .bind(input.orderId, input.paymentId)
+    .first<{
+      id: string;
+      status: string;
+      reason: string;
+      resolution_action: string | null;
+    }>();
+  const exactRejectedReview =
+    exactReview?.status === "resolved" &&
+    exactReview.resolution_action === "reject";
   if (isBoundChild && status === "refunded") {
     await reversePaymentReviewCredits(
       db,
@@ -2256,6 +2275,18 @@ async function applyVerifiedNowPayment(
   if (
     isBoundChild
   ) {
+    if (exactRejectedReview) {
+      if (actualPaidPositive) {
+        await persistPaymentReviewCase(db, {
+          orderId: input.orderId,
+          providerPaymentId: input.paymentId,
+          parentPaymentId,
+          reason: "funds_after_manual_rejection",
+          verified,
+        });
+      }
+      return;
+    }
     await persistPaymentReviewCase(db, {
       orderId: input.orderId,
       providerPaymentId: input.paymentId,
@@ -2295,8 +2326,18 @@ async function applyVerifiedNowPayment(
     return;
   }
 
-  if (order.status === "manual_resolved" && status !== "refunded") {
-    if (normalizedPositiveDecimal(verified.actually_paid) != null) {
+  if (exactReview?.status === "open") {
+    await persistPaymentReviewCase(db, {
+      orderId: input.orderId,
+      providerPaymentId: input.paymentId,
+      parentPaymentId: parentPaymentId || null,
+      reason: exactReview.reason,
+      verified,
+    });
+    return;
+  }
+  if (exactRejectedReview) {
+    if (actualPaidPositive) {
       await persistPaymentReviewCase(db, {
         orderId: input.orderId,
         providerPaymentId: input.paymentId,
@@ -2307,6 +2348,7 @@ async function applyVerifiedNowPayment(
     }
     return;
   }
+  if (order.status === "manual_resolved") return;
   const verifiedUsdMicros = parseUsdMicros(verified.price_amount);
   const currencyMatches =
     typeof verified.pay_currency === "string" &&
@@ -2326,8 +2368,6 @@ async function applyVerifiedNowPayment(
     expectedPayAmount != null &&
     verified.actually_paid != null &&
     isMaterialOverpayment(verified.actually_paid, expectedPayAmount);
-  const actualPaidPositive =
-    normalizedPositiveDecimal(verified.actually_paid) != null;
   const invoiceUrl = safeInvoiceUrl(
     typeof verified.invoice_url === "string" ? verified.invoice_url : null,
   );
@@ -2677,6 +2717,7 @@ async function persistPaymentReviewCase(
   },
 ): Promise<void> {
   const evidence = JSON.stringify({
+    observationId: `obs_${randomBase64Url(12)}`,
     paymentId: String(input.verified.payment_id ?? "").slice(0, 128),
     parentPaymentId: input.parentPaymentId?.slice(0, 128) ?? null,
     orderId:
@@ -2724,6 +2765,7 @@ async function persistPaymentReviewCase(
              OR (
                payment_review_cases.status = 'resolved'
                AND payment_review_cases.resolution_action = 'reject'
+               AND ? = 1
              )
            )
            AND payment_review_cases.order_id = excluded.order_id`,
@@ -2739,6 +2781,9 @@ async function persistPaymentReviewCase(
           ? input.verified.pay_currency.slice(0, 32)
           : null,
         evidence,
+        normalizedPositiveDecimal(input.verified.actually_paid) != null
+          ? 1
+          : 0,
       ),
     db
       .prepare(
@@ -4352,7 +4397,7 @@ async function handlePaymentReviewResolve(
   const review = await db
     .prepare(
       `SELECT r.id, r.order_id, r.provider_payment_id,
-              r.parent_payment_id, r.reason, r.status,
+              r.parent_payment_id, r.reason, r.status, r.evidence_json,
               r.resolution_action, r.resolution_credit_usd_micros,
               r.resolution_request_hash,
               p.user_id, p.provider_payment_id AS order_payment_id,
@@ -4369,6 +4414,7 @@ async function handlePaymentReviewResolve(
       parent_payment_id: string | null;
       reason: string;
       status: string;
+      evidence_json: string;
       resolution_action: string | null;
       resolution_credit_usd_micros: number | null;
       resolution_request_hash: string | null;
@@ -4522,6 +4568,7 @@ async function handlePaymentReviewResolve(
              resolution_note = ?, resolution_reference = ?,
              resolved_at = CURRENT_TIMESTAMP
          WHERE id = ? AND status = 'open'
+           AND (? != 'reject' OR evidence_json = ?)
            AND (
              ? != 'credit'
              OR NOT EXISTS (
@@ -4539,6 +4586,8 @@ async function handlePaymentReviewResolve(
         note,
         resolutionReference,
         caseId,
+        action,
+        review.evidence_json,
         action,
         originalCreditReference,
       ),
@@ -4590,12 +4639,21 @@ async function handlePaymentReviewResolve(
                     'Provider-confirmed payment refund', CURRENT_TIMESTAMP
              FROM balance_ledger
              WHERE reference_id = ? AND delta_usd_micros > 0
+               AND EXISTS (
+                 SELECT 1
+                 FROM payment_review_cases
+                 WHERE id = ? AND status = 'resolved'
+                   AND resolution_action = 'refund_confirmed'
+                   AND resolution_request_hash = ?
+               )
              LIMIT 1`,
           )
           .bind(
             `led_${randomBase64Url(16)}`,
             `nowpayments:${review.provider_payment_id}:reversal`,
             `nowpayments:${review.provider_payment_id}:credit`,
+            caseId,
+            resolutionRequestHash,
           ),
       );
     }
@@ -4611,12 +4669,21 @@ async function handlePaymentReviewResolve(
                   CURRENT_TIMESTAMP
            FROM balance_ledger
            WHERE reference_id = ? AND delta_usd_micros > 0
+             AND EXISTS (
+               SELECT 1
+               FROM payment_review_cases
+               WHERE id = ? AND status = 'resolved'
+                 AND resolution_action = 'refund_confirmed'
+                 AND resolution_request_hash = ?
+             )
            LIMIT 1`,
         )
         .bind(
           `led_${randomBase64Url(16)}`,
           `nowpayments-review:${caseId}:reversal`,
           `nowpayments-review:${caseId}:credit`,
+          caseId,
+          resolutionRequestHash,
         ),
       paymentCreditedRecalculation(db, review.order_id),
     );
@@ -4627,6 +4694,13 @@ async function handlePaymentReviewResolve(
         `UPDATE payment_orders
          SET status = ?, updated_at = CURRENT_TIMESTAMP
          WHERE id = ?
+           AND EXISTS (
+             SELECT 1
+             FROM payment_review_cases
+             WHERE id = ? AND status = 'resolved'
+               AND resolution_action = ?
+               AND resolution_request_hash = ?
+           )
            AND NOT EXISTS (
              SELECT 1 FROM payment_review_cases
              WHERE order_id = ? AND status = 'open'
@@ -4638,6 +4712,9 @@ async function handlePaymentReviewResolve(
           ? "refunded"
           : "manual_resolved",
         review.order_id,
+        caseId,
+        action,
+        resolutionRequestHash,
         review.order_id,
       ),
   );
@@ -4647,6 +4724,11 @@ async function handlePaymentReviewResolve(
       targetType: "payment_review_case",
       targetId: caseId,
       idempotencyKey: resolutionRequestHash,
+      paymentReviewResolution: {
+        caseId,
+        action,
+        requestHash: resolutionRequestHash,
+      },
       details: {
         orderId: review.order_id,
         providerPaymentId: review.provider_payment_id,
@@ -4666,7 +4748,7 @@ async function handlePaymentReviewResolve(
       .prepare(
         `SELECT status, resolution_action,
                 resolution_credit_usd_micros,
-                resolution_request_hash
+                resolution_request_hash, evidence_json
          FROM payment_review_cases
          WHERE id = ?`,
       )
@@ -4676,6 +4758,7 @@ async function handlePaymentReviewResolve(
         resolution_action: string | null;
         resolution_credit_usd_micros: number | null;
         resolution_request_hash: string | null;
+        evidence_json: string;
       }>();
     const exactReplay =
       current?.status === "resolved" &&
@@ -4683,6 +4766,17 @@ async function handlePaymentReviewResolve(
       current.resolution_credit_usd_micros === creditUsdMicros &&
       current.resolution_request_hash === resolutionRequestHash;
     if (!exactReplay) {
+      if (
+        action === "reject" &&
+        current?.status === "open" &&
+        current.evidence_json !== review.evidence_json
+      ) {
+        throw new PlatformError(
+          409,
+          "payment_review_evidence_changed",
+          "案件在拒绝处理期间收到了新的服务商证据；已保留为待复核，请刷新后重新核对。",
+        );
+      }
       if (action === "credit") {
         const originalCredit = await db
           .prepare(
@@ -5906,6 +6000,7 @@ async function handleReconciliation(
   let paymentEventsProcessed = 0;
   let paymentsPolled = 0;
   let creditedPaymentsPolled = 0;
+  let rejectedPaymentsPolled = 0;
   let paymentErrors = 0;
   const paymentApiKey = env.NOWPAYMENTS_API_KEY;
   if (paymentApiKey) {
@@ -6022,16 +6117,135 @@ async function handleReconciliation(
       );
     }
 
+    const rejectedCandidates = await db
+      .prepare(
+        `SELECT r.order_id, r.provider_payment_id
+         FROM payment_review_cases r
+         JOIN payment_orders p ON p.id = r.order_id
+         LEFT JOIN operation_heartbeats h
+           ON h.name =
+              'payment-rejected-status:' || r.provider_payment_id
+         WHERE p.provider = 'nowpayments'
+           AND r.status = 'resolved'
+           AND r.resolution_action = 'reject'
+           AND r.resolved_at IS NOT NULL
+           AND datetime(r.resolved_at) >= datetime('now', '-7 days')
+           AND datetime(r.resolved_at) <= datetime('now', '-6 hours')
+           AND NOT EXISTS (
+             SELECT 1
+             FROM balance_ledger l
+             WHERE l.delta_usd_micros > 0
+               AND l.reference_id IN (
+                 'nowpayments:' || r.provider_payment_id || ':credit',
+                 'nowpayments-review:' || r.id || ':credit'
+               )
+           )
+           AND (
+             h.name IS NULL
+             OR datetime(h.last_success_at) <
+                datetime('now', '-6 hours')
+           )
+         ORDER BY COALESCE(h.last_success_at, r.resolved_at) ASC,
+                  r.provider_payment_id ASC
+         LIMIT 4`,
+      )
+      .all<{ order_id: string; provider_payment_id: string }>();
+    const rejectedRows = rejectedCandidates.results ?? [];
+    for (let offset = 0; offset < rejectedRows.length; offset += 2) {
+      await Promise.all(
+        rejectedRows.slice(offset, offset + 2).map(async (payment) => {
+          const heartbeatName =
+            `payment-rejected-status:${payment.provider_payment_id}`;
+          const claimed = await db
+            .prepare(
+              `INSERT INTO operation_heartbeats
+               (name, last_success_at, details_json)
+               VALUES (?, CURRENT_TIMESTAMP, ?)
+               ON CONFLICT(name) DO UPDATE SET
+                 last_success_at = CURRENT_TIMESTAMP,
+                 details_json = excluded.details_json
+               WHERE datetime(operation_heartbeats.last_success_at) <
+                     datetime('now', '-6 hours')
+               RETURNING name`,
+            )
+            .bind(
+              heartbeatName,
+              JSON.stringify({
+                orderId: payment.order_id,
+                source: "rejected_payment_reconciliation",
+                state: "polling",
+              }),
+            )
+            .first<{ name: string }>();
+          if (!claimed) return;
+          let pollError: string | null = null;
+          try {
+            const verified = await getNowPaymentsPayment(
+              paymentApiKey,
+              payment.provider_payment_id,
+            );
+            await applyVerifiedNowPayment(db, verified, {
+              paymentId: payment.provider_payment_id,
+              orderId: payment.order_id,
+              requestId,
+            });
+            rejectedPaymentsPolled += 1;
+          } catch (error) {
+            paymentErrors += 1;
+            pollError =
+              error instanceof Error
+                ? error.message.slice(0, 300)
+                : "unknown error";
+            console.error("Rejected payment status polling failed", {
+              requestId,
+              orderId: payment.order_id,
+              paymentId: payment.provider_payment_id,
+              error: pollError,
+            });
+          } finally {
+            const nextRotationTimestamp = new Date(
+              Date.now() - (pollError ? 5 * 60 * 60_000 : 0),
+            ).toISOString();
+            await db
+              .prepare(
+                `INSERT INTO operation_heartbeats
+                 (name, last_success_at, details_json)
+                 VALUES (?, ?, ?)
+                 ON CONFLICT(name) DO UPDATE SET
+                   last_success_at = excluded.last_success_at,
+                   details_json = excluded.details_json`,
+              )
+              .bind(
+                heartbeatName,
+                nextRotationTimestamp,
+                JSON.stringify({
+                  orderId: payment.order_id,
+                  source: "rejected_payment_reconciliation",
+                  error: pollError,
+                }),
+              )
+              .run();
+          }
+        }),
+      );
+    }
+
     const creditedCandidates = await db
       .prepare(
         `WITH candidates(order_id, provider_payment_id) AS (
            SELECT p.id, p.provider_payment_id
            FROM payment_orders p
+           JOIN balance_ledger credit
+             ON credit.reference_id =
+                'nowpayments:' || p.provider_payment_id || ':credit'
+              AND credit.delta_usd_micros > 0
+           LEFT JOIN balance_ledger reversal
+             ON reversal.reference_id =
+                'nowpayments:' || p.provider_payment_id || ':reversal'
            WHERE p.provider = 'nowpayments'
              AND p.provider_payment_id IS NOT NULL
-             AND p.status IN ('finished', 'manual_resolved')
-             AND p.credited_usd_micros > 0
              AND datetime(p.created_at) >= datetime('now', '-180 days')
+             AND reversal.id IS NULL
            UNION
            SELECT r.order_id, r.provider_payment_id
            FROM payment_review_cases r
@@ -6149,7 +6363,10 @@ async function handleReconciliation(
     db
       .prepare(
         `DELETE FROM operation_heartbeats
-         WHERE name LIKE 'payment-status:%'
+         WHERE (
+             name LIKE 'payment-status:%'
+             OR name LIKE 'payment-rejected-status:%'
+           )
            AND datetime(last_success_at) < datetime('now', '-200 days')`,
       ),
     db
@@ -6167,6 +6384,7 @@ async function handleReconciliation(
           paymentEventsProcessed,
           paymentsPolled,
           creditedPaymentsPolled,
+          rejectedPaymentsPolled,
           paymentErrors,
         }),
       ),
@@ -6182,10 +6400,11 @@ async function handleReconciliation(
         eventsProcessed: paymentEventsProcessed,
         polled: paymentsPolled,
         creditedPolled: creditedPaymentsPolled,
+        rejectedPolled: rejectedPaymentsPolled,
         errors: paymentErrors,
         skipped: paymentApiKey ? null : "NOWPAYMENTS_API_KEY 未配置",
       },
-      note: "回退两分钟前仍未完成且存在扣款流水的代理请求，并复核未处理支付事件与待确认充值单。",
+      note: "回退两分钟前仍未完成且存在扣款流水的代理请求，并复核未处理事件、待确认充值、近期零入账拒绝案件与已入账退款状态。",
     },
     200,
     requestId,
@@ -8231,6 +8450,11 @@ async function prepareAdminAuditStatement(
     targetId: string;
     details?: Record<string, unknown>;
     idempotencyKey?: string;
+    paymentReviewResolution?: {
+      caseId: string;
+      action: string;
+      requestHash: string;
+    };
   },
 ): Promise<D1PreparedStatement> {
   const supplied = bearerToken(request);
@@ -8252,6 +8476,36 @@ async function prepareAdminAuditStatement(
         )
       ).slice(0, 32)}`
     : `aud_${randomBase64Url(18)}`;
+  const values = [
+    auditId,
+    (await sha256Hex(supplied)).slice(0, 16),
+    input.action.slice(0, 120),
+    input.targetType.slice(0, 80),
+    input.targetId.slice(0, 180),
+    details,
+  ];
+  if (input.paymentReviewResolution) {
+    return db
+      .prepare(
+        `INSERT OR IGNORE INTO admin_audit_logs
+         (id, actor_fingerprint, action, target_type, target_id,
+          details_json, created_at)
+         SELECT ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+         WHERE EXISTS (
+           SELECT 1
+           FROM payment_review_cases
+           WHERE id = ? AND status = 'resolved'
+             AND resolution_action = ?
+             AND resolution_request_hash = ?
+         )`,
+      )
+      .bind(
+        ...values,
+        input.paymentReviewResolution.caseId,
+        input.paymentReviewResolution.action,
+        input.paymentReviewResolution.requestHash,
+      );
+  }
   return db
     .prepare(
       `INSERT OR IGNORE INTO admin_audit_logs
@@ -8259,14 +8513,7 @@ async function prepareAdminAuditStatement(
         details_json, created_at)
        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
     )
-    .bind(
-      auditId,
-      (await sha256Hex(supplied)).slice(0, 16),
-      input.action.slice(0, 120),
-      input.targetType.slice(0, 80),
-      input.targetId.slice(0, 180),
-      details,
-    );
+    .bind(...values);
 }
 
 function assertSameOrigin(request: Request, env: PlatformEnv): void {
