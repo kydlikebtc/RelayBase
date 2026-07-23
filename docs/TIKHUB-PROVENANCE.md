@@ -9,6 +9,7 @@
 - 用户侧 API 市场：<https://user.tikhub.io/dashboard/api-marketplace>
 - 官方文档入口：<https://docs.tikhub.io/4579905m0>
 - TikHub 使用条款：<https://docs.tikhub.io/5508540m0>
+- TikHub 业务限制：<https://docs.tikhub.io/5432446m0>
 - OpenAPI 版本：`V5.3.2`
 - 本地取得日期：`2026-07-23`
 - 原始字节数：`2,714,792`
@@ -46,7 +47,9 @@ OpenAPI 的完整镜像：
 1. TikHub 经销、转售或白标授权；
 2. API 市场元数据与派生文档的再分发权；
 3. 商标、署名和必要的免责声明要求；
-4. 上游条款要求的客户限制、速率限制与数据使用边界。
+4. 上游条款要求的客户限制、速率限制与数据使用边界；
+5. 由于 RelayBase 计划接受稳定币付款，TikHub 书面确认其“虚拟货币及相关行业”
+   业务限制不禁止把加密资产仅作为 API 服务的付款方式。
 
 在证据归档前，`0.3.0-preview.5` 只能作为私有验收候选：Sites 保持 owner-only，
 真实代理、真实收款和公开访问保持关闭。即使代码和目录已部署，也不得把该候选描述为
