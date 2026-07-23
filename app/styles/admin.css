@@ -953,6 +953,92 @@
   font-size: 15px;
 }
 
+.admin-catalog-proof {
+  display: grid;
+  grid-template-columns: minmax(210px, 0.7fr) minmax(540px, 2fr);
+  gap: 22px 28px;
+  margin-bottom: 18px;
+  padding: 18px;
+  border: 1px solid var(--ink);
+  border-radius: 6px;
+  background: var(--paper-raised);
+  box-shadow: inset 5px 0 0 var(--lime);
+}
+
+.admin-catalog-proof h3 {
+  margin: 4px 0 7px;
+  font-size: 20px;
+  letter-spacing: -0.04em;
+}
+
+.admin-catalog-proof > div:first-child > span {
+  color: var(--ink-soft);
+  font-size: 9px;
+}
+
+.admin-catalog-proof dl {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  margin: 0;
+}
+
+.admin-catalog-proof dl > div {
+  min-width: 0;
+  padding: 4px 13px;
+  border-left: 1px solid var(--line);
+}
+
+.admin-catalog-proof dt,
+.admin-catalog-proof small {
+  color: var(--ink-soft);
+  font-size: 8px;
+}
+
+.admin-catalog-proof dd {
+  margin: 6px 0 4px;
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 900;
+  letter-spacing: -0.05em;
+}
+
+.admin-catalog-proof-hashes {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.admin-catalog-proof-hashes code {
+  color: var(--blue-dark);
+  font-size: 8px;
+  font-weight: 800;
+}
+
+.admin-catalog-proof-missing {
+  align-self: center;
+  padding: 13px 15px;
+  border: 1px solid #be8b17;
+  border-radius: 4px;
+  background: #fff7df;
+}
+
+.admin-catalog-proof-missing strong {
+  font-size: 11px;
+}
+
+.admin-catalog-proof-missing p {
+  margin: 5px 0 0;
+  color: #735a1d;
+  font-size: 9px;
+  line-height: 1.6;
+}
+
 .admin-card-list,
 .admin-catalog-list,
 .admin-payment-list {
@@ -1856,6 +1942,10 @@
     justify-items: start;
   }
 
+  .admin-catalog-proof {
+    grid-template-columns: 1fr;
+  }
+
   .admin-toolbar-wide {
     grid-template-columns: repeat(3, 1fr);
   }
@@ -1902,6 +1992,11 @@
   .admin-upstream-form,
   .admin-upstream-credential {
     grid-template-columns: 1fr;
+  }
+
+  .admin-catalog-proof dl {
+    grid-template-columns: repeat(2, 1fr);
+    row-gap: 14px;
   }
 
   .admin-upstream-form .admin-memory-option,
@@ -2059,6 +2154,20 @@
 
   .admin-user-card dl {
     grid-template-columns: 1fr;
+  }
+
+  .admin-catalog-proof dl {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-catalog-proof dl > div {
+    padding: 9px 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .admin-catalog-proof dl > div:first-child {
+    border-top: 0;
   }
 
   .admin-user-card dl > div {

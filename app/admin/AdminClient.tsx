@@ -99,6 +99,31 @@ type CatalogResponse = {
   total: number;
   offset: number;
   nextOffset: number | null;
+  sync: CatalogSyncInfo | null;
+};
+
+type CatalogSyncCoverage = {
+  openApiVersion: string | null;
+  openApiOperations: number;
+  rawPriceRows: number;
+  normalizedPrices: number;
+  openApiPriceMapped: number;
+  priceOnly: number;
+  openApiOnly: number;
+  scopeExcluded: number;
+  matchedPrices: number;
+  positivePrices: number;
+  zeroPrices: number;
+  awaitingPrice: number;
+  openApiSnapshotHash: string;
+  priceSnapshotHash: string;
+};
+
+type CatalogSyncInfo = {
+  generation: string;
+  credentialFingerprint: string | null;
+  syncedAt: string;
+  coverage: CatalogSyncCoverage | null;
 };
 
 type UpstreamCredential = {
@@ -424,6 +449,57 @@ function isCatalogEndpoint(value: unknown): value is CatalogEndpoint {
   );
 }
 
+function isCatalogSyncCoverage(
+  value: unknown,
+): value is CatalogSyncCoverage {
+  if (!isObject(value)) return false;
+  return (
+    isNullableString(value.openApiVersion, 80) &&
+    isSafeNonNegativeInteger(value.openApiOperations) &&
+    value.openApiOperations <= 5_000 &&
+    isSafeNonNegativeInteger(value.rawPriceRows) &&
+    value.rawPriceRows <= 100_000 &&
+    isSafeNonNegativeInteger(value.normalizedPrices) &&
+    value.normalizedPrices <= value.rawPriceRows &&
+    isSafeNonNegativeInteger(value.openApiPriceMapped) &&
+    value.openApiPriceMapped <= value.normalizedPrices &&
+    value.openApiPriceMapped <= value.openApiOperations &&
+    isSafeNonNegativeInteger(value.priceOnly) &&
+    value.priceOnly ===
+      value.normalizedPrices - value.openApiPriceMapped &&
+    isSafeNonNegativeInteger(value.openApiOnly) &&
+    value.openApiOnly ===
+      value.openApiOperations - value.openApiPriceMapped &&
+    isSafeNonNegativeInteger(value.scopeExcluded) &&
+    value.scopeExcluded <= value.openApiPriceMapped &&
+    isSafeNonNegativeInteger(value.matchedPrices) &&
+    value.matchedPrices ===
+      value.openApiPriceMapped - value.scopeExcluded &&
+    isSafeNonNegativeInteger(value.positivePrices) &&
+    isSafeNonNegativeInteger(value.zeroPrices) &&
+    value.positivePrices + value.zeroPrices === value.matchedPrices &&
+    isSafeNonNegativeInteger(value.awaitingPrice) &&
+    value.matchedPrices + value.awaitingPrice === value.openApiOperations &&
+    typeof value.openApiSnapshotHash === "string" &&
+    /^[a-f0-9]{64}$/.test(value.openApiSnapshotHash) &&
+    typeof value.priceSnapshotHash === "string" &&
+    /^[a-f0-9]{64}$/.test(value.priceSnapshotHash)
+  );
+}
+
+function isCatalogSyncInfo(value: unknown): value is CatalogSyncInfo {
+  if (!isObject(value)) return false;
+  return (
+    isNonEmptyString(value.generation, 128) &&
+    /^sync_[A-Za-z0-9_-]{16,80}$/.test(value.generation) &&
+    (value.credentialFingerprint === null ||
+      (typeof value.credentialFingerprint === "string" &&
+        /^[a-f0-9]{16}$/.test(value.credentialFingerprint))) &&
+    isDateString(value.syncedAt) &&
+    (value.coverage === null || isCatalogSyncCoverage(value.coverage))
+  );
+}
+
 function isCatalogResponse(value: unknown): value is CatalogResponse {
   if (!isObject(value) || !Array.isArray(value.endpoints)) return false;
   return (
@@ -438,6 +514,7 @@ function isCatalogResponse(value: unknown): value is CatalogResponse {
         value.nextOffset === value.offset + value.count &&
         value.nextOffset > value.offset &&
         value.nextOffset <= 5_000)) &&
+    (value.sync === null || isCatalogSyncInfo(value.sync)) &&
     value.endpoints.length <= 500 &&
     value.endpoints.every(isCatalogEndpoint)
   );
@@ -642,10 +719,57 @@ function isCatalogUpdateResponse(
 
 function isCatalogSyncResponse(
   value: unknown,
-): value is { synced: number; disabledMissing: number; note: string } {
+): value is {
+  synced: number;
+  openApiVersion: string | null;
+  openApiOperations: number;
+  rawPriceRows: number;
+  normalizedPrices: number;
+  openApiPriceMapped: number;
+  priceOnly: number;
+  openApiOnly: number;
+  scopeExcluded: number;
+  priced: number;
+  positivePrice: number;
+  zeroPrice: number;
+  awaitingPrice: number;
+  openApiSnapshotHash: string;
+  priceSnapshotHash: string;
+  disabledMissing: number;
+  note: string;
+} {
   return (
     isObject(value) &&
     isSafeNonNegativeInteger(value.synced) &&
+    isNullableString(value.openApiVersion, 80) &&
+    isSafeNonNegativeInteger(value.openApiOperations) &&
+    value.openApiOperations === value.synced &&
+    isSafeNonNegativeInteger(value.rawPriceRows) &&
+    isSafeNonNegativeInteger(value.normalizedPrices) &&
+    value.normalizedPrices <= value.rawPriceRows &&
+    isSafeNonNegativeInteger(value.openApiPriceMapped) &&
+    value.openApiPriceMapped <= value.normalizedPrices &&
+    value.openApiPriceMapped <= value.openApiOperations &&
+    isSafeNonNegativeInteger(value.priceOnly) &&
+    value.priceOnly ===
+      value.normalizedPrices - value.openApiPriceMapped &&
+    isSafeNonNegativeInteger(value.openApiOnly) &&
+    value.openApiOnly ===
+      value.openApiOperations - value.openApiPriceMapped &&
+    isSafeNonNegativeInteger(value.scopeExcluded) &&
+    value.scopeExcluded <= value.openApiPriceMapped &&
+    isSafeNonNegativeInteger(value.priced) &&
+    value.priced ===
+      value.openApiPriceMapped - value.scopeExcluded &&
+    isSafeNonNegativeInteger(value.positivePrice) &&
+    isSafeNonNegativeInteger(value.zeroPrice) &&
+    value.positivePrice + value.zeroPrice === value.priced &&
+    isSafeNonNegativeInteger(value.awaitingPrice) &&
+    value.priced + value.awaitingPrice === value.synced &&
+    typeof value.openApiSnapshotHash === "string" &&
+    /^[a-f0-9]{64}$/.test(value.openApiSnapshotHash) &&
+    typeof value.priceSnapshotHash === "string" &&
+    /^[a-f0-9]{64}$/.test(value.priceSnapshotHash) &&
     isSafeNonNegativeInteger(value.disabledMissing) &&
     isNonEmptyString(value.note, 1_000)
   );
@@ -1161,6 +1285,7 @@ export function AdminClient() {
       const endpoints: CatalogEndpoint[] = [];
       let offset = 0;
       let total: number | null = null;
+      let sync: CatalogSyncInfo | null | undefined;
       while (true) {
         const page = await adminRequest(
           `/api/admin/catalog?limit=500&offset=${offset}`,
@@ -1169,7 +1294,9 @@ export function AdminClient() {
         );
         if (
           page.offset !== offset ||
-          (total !== null && page.total !== total)
+          (total !== null && page.total !== total) ||
+          (sync !== undefined &&
+            JSON.stringify(page.sync) !== JSON.stringify(sync))
         ) {
           throw new AdminApiError(
             "接口目录在分页读取期间发生变化，请重新加载。",
@@ -1177,6 +1304,7 @@ export function AdminClient() {
           );
         }
         total ??= page.total;
+        sync ??= page.sync;
         endpoints.push(...page.endpoints);
         if (endpoints.length > total || endpoints.length > 5_000) {
           throw new AdminApiError("接口目录超过安全展示上限。", 502);
@@ -1196,6 +1324,7 @@ export function AdminClient() {
         total,
         offset: 0,
         nextOffset: null,
+        sync: sync ?? null,
       };
       setCatalog({ status: "ready", data });
       setPriceDrafts(
@@ -1719,7 +1848,7 @@ export function AdminClient() {
           { method: "POST" },
         );
         setNotice(
-          `同步完成：识别 ${result.synced} 条，停用缺失端点 ${result.disabledMissing} 条。`,
+          `同步完成：OpenAPI ${result.openApiOperations} 条，价格原始 ${result.rawPriceRows} / 去重 ${result.normalizedPrices} 条；映射 ${result.openApiPriceMapped}、仅价格目录 ${result.priceOnly}、仅 OpenAPI ${result.openApiOnly}、Key scope 排除 ${result.scopeExcluded}；最终核验 ${result.priced} 条（正价 ${result.positivePrice}、零价 ${result.zeroPrice}），停用缺失端点 ${result.disabledMissing} 条。`,
         );
         await Promise.all([loadCatalog(), loadOverview()]);
       }
@@ -2531,6 +2660,121 @@ export function AdminClient() {
             >
               {catalog.status === "ready" ? (
                 <>
+                  <div className="admin-catalog-proof">
+                    <div>
+                      <p className="section-kicker">
+                        SYNC COVERAGE / EVIDENCE
+                      </p>
+                      <h3>目录覆盖证明</h3>
+                      <span>
+                        {catalog.data.sync
+                          ? `同步于 ${formatDate(catalog.data.sync.syncedAt)}`
+                          : "尚无成功同步记录"}
+                      </span>
+                    </div>
+                    {catalog.data.sync?.coverage ? (
+                      <>
+                        <dl>
+                          <div>
+                            <dt>OpenAPI 操作</dt>
+                            <dd>
+                              {catalog.data.sync.coverage.openApiOperations.toLocaleString()}
+                            </dd>
+                            <small>
+                              {catalog.data.sync.coverage.openApiVersion ??
+                                "版本未标注"}{" "}
+                              / 仅 OpenAPI{" "}
+                              {catalog.data.sync.coverage.openApiOnly.toLocaleString()}
+                            </small>
+                          </div>
+                          <div>
+                            <dt>价格记录</dt>
+                            <dd>
+                              {catalog.data.sync.coverage.rawPriceRows.toLocaleString()}
+                            </dd>
+                            <small>
+                              去重{" "}
+                              {catalog.data.sync.coverage.normalizedPrices.toLocaleString()}{" "}
+                              / 仅价格目录{" "}
+                              {catalog.data.sync.coverage.priceOnly.toLocaleString()}
+                            </small>
+                          </div>
+                          <div>
+                            <dt>路径与方法映射</dt>
+                            <dd>
+                              {catalog.data.sync.coverage.openApiPriceMapped.toLocaleString()}
+                            </dd>
+                            <small>
+                              Key scope 排除{" "}
+                              {catalog.data.sync.coverage.scopeExcluded.toLocaleString()}
+                            </small>
+                          </div>
+                          <div>
+                            <dt>最终核验</dt>
+                            <dd>
+                              {catalog.data.sync.coverage.matchedPrices.toLocaleString()}
+                            </dd>
+                            <small>
+                              正价{" "}
+                              {catalog.data.sync.coverage.positivePrices.toLocaleString()}{" "}
+                              / 零价{" "}
+                              {catalog.data.sync.coverage.zeroPrices.toLocaleString()}{" "}
+                              / 未核验{" "}
+                              {catalog.data.sync.coverage.awaitingPrice.toLocaleString()}
+                            </small>
+                          </div>
+                        </dl>
+                        <div className="admin-catalog-proof-hashes">
+                          <span>
+                            OPENAPI{" "}
+                            <code
+                              title={
+                                catalog.data.sync.coverage
+                                  .openApiSnapshotHash ?? undefined
+                              }
+                            >
+                              {catalog.data.sync.coverage.openApiSnapshotHash
+                                ? catalog.data.sync.coverage.openApiSnapshotHash.slice(
+                                    0,
+                                    12,
+                                  )
+                                : "未记录"}
+                            </code>
+                          </span>
+                          <span>
+                            PRICE{" "}
+                            <code
+                              title={
+                                catalog.data.sync.coverage
+                                  .priceSnapshotHash ?? undefined
+                              }
+                            >
+                              {catalog.data.sync.coverage.priceSnapshotHash
+                                ? catalog.data.sync.coverage.priceSnapshotHash.slice(
+                                    0,
+                                    12,
+                                  )
+                                : "未记录"}
+                            </code>
+                          </span>
+                          <span>
+                            KEY{" "}
+                            <code>
+                              {catalog.data.sync.credentialFingerprint ??
+                                "environment"}
+                            </code>
+                          </span>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="admin-catalog-proof-missing">
+                        <strong>当前记录缺少覆盖证明</strong>
+                        <p>
+                          请重新同步 TikHub；在新快照成功发布前，系统不会伪造覆盖数量。
+                        </p>
+                      </div>
+                    )}
+                  </div>
                   <div className="admin-toolbar admin-toolbar-wide">
                     <label>
                       <span>搜索路由</span>

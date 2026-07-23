@@ -161,6 +161,7 @@ const migrationFiles = [
   "drizzle/0008_good_apocalypse.sql",
   "drizzle/0009_conscious_unicorn.sql",
   "drizzle/0010_solid_wasp.sql",
+  "drizzle/0011_eminent_molten_man.sql",
 ];
 
 async function migrate(db, names = migrationFiles) {
@@ -187,17 +188,44 @@ function enableCatalogEndpoint(
     .prepare(
       `INSERT INTO catalog_sync_state
        (id, last_success_generation, credential_source, credential_id,
-        credential_fingerprint, credential_state_version, synced_at)
-       VALUES (1, ?, 'environment', NULL, ?, 0, CURRENT_TIMESTAMP)
+        credential_fingerprint, credential_state_version,
+        openapi_operation_count, raw_price_row_count,
+        normalized_price_count, openapi_price_mapped_count,
+        price_only_count, openapi_only_count, scope_excluded_count,
+        matched_price_count,
+        positive_price_count, zero_price_count, awaiting_price_count,
+        openapi_snapshot_hash, price_snapshot_hash, synced_at)
+       VALUES (1, ?, 'environment', NULL, ?, 0,
+               1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, ?, ?,
+               CURRENT_TIMESTAMP)
        ON CONFLICT(id) DO UPDATE SET
          last_success_generation = excluded.last_success_generation,
          credential_source = excluded.credential_source,
          credential_id = excluded.credential_id,
          credential_fingerprint = excluded.credential_fingerprint,
          credential_state_version = excluded.credential_state_version,
+         openapi_operation_count = excluded.openapi_operation_count,
+         raw_price_row_count = excluded.raw_price_row_count,
+         normalized_price_count = excluded.normalized_price_count,
+         openapi_price_mapped_count =
+           excluded.openapi_price_mapped_count,
+         price_only_count = excluded.price_only_count,
+         openapi_only_count = excluded.openapi_only_count,
+         scope_excluded_count = excluded.scope_excluded_count,
+         matched_price_count = excluded.matched_price_count,
+         positive_price_count = excluded.positive_price_count,
+         zero_price_count = excluded.zero_price_count,
+         awaiting_price_count = excluded.awaiting_price_count,
+         openapi_snapshot_hash = excluded.openapi_snapshot_hash,
+         price_snapshot_hash = excluded.price_snapshot_hash,
          synced_at = CURRENT_TIMESTAMP`,
     )
-    .run(generation, credentialFingerprint);
+    .run(
+      generation,
+      credentialFingerprint,
+      "a".repeat(64),
+      "b".repeat(64),
+    );
   db.raw
     .prepare(
       `UPDATE endpoint_catalog
@@ -467,6 +495,149 @@ test("upgrades populated payment events through the auth and review migrations",
   );
 });
 
+test("adds catalog coverage evidence without changing the previous live generation", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db, migrationFiles.slice(0, -1));
+  const upstreamKey = "upstream-key";
+  const credentialFingerprint = createHash("sha256")
+    .update(upstreamKey)
+    .digest("hex")
+    .slice(0, 16);
+  db.raw
+    .prepare(
+      `INSERT INTO catalog_sync_state
+       (id, last_success_generation, credential_source, credential_id,
+        credential_fingerprint, credential_state_version, synced_at)
+       VALUES (1, 'sync-before-coverage', 'environment', NULL,
+               ?, 0, '2026-07-23 10:00:00')`,
+    )
+    .run(credentialFingerprint);
+
+  await migrate(db, migrationFiles.slice(-1));
+  const state = db.raw
+    .prepare(
+      `SELECT last_success_generation, credential_fingerprint,
+              openapi_operation_count, raw_price_row_count,
+              price_only_count, openapi_snapshot_hash
+       FROM catalog_sync_state
+       WHERE id = 1`,
+    )
+    .get();
+  assert.deepEqual({ ...state }, {
+    last_success_generation: "sync-before-coverage",
+    credential_fingerprint: credentialFingerprint,
+    openapi_operation_count: null,
+    raw_price_row_count: null,
+    price_only_count: null,
+    openapi_snapshot_hash: null,
+  });
+  assert.equal(
+    db.raw.prepare("PRAGMA foreign_key_check").all().length,
+    0,
+  );
+
+  db.raw
+    .prepare(
+      `UPDATE endpoint_catalog
+       SET enabled = 1, read_only = 1, price_verified = 1,
+           http_method = 'GET',
+           sync_generation = 'sync-before-coverage',
+           reviewed_at = CURRENT_TIMESTAMP
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO operation_heartbeats
+       (name, last_success_at, details_json)
+       VALUES ('reconciliation', CURRENT_TIMESTAMP, '{}')`,
+    )
+    .run();
+  const env = baseEnv({
+    DB: db,
+    TIKHUB_API_KEY: upstreamKey,
+    RESELLER_AUTHORIZED: "true",
+    LEGAL_REVIEW_CONFIRMED: "true",
+    RECONCILIATION_SECRET: "coverage-reconcile-secret-32-minimum",
+  });
+  const health = await fetchWorker("/api/health", {}, env);
+  assert.equal(health.status, 200);
+  const healthData = await health.json();
+  assert.equal(healthData.capabilities.schemaReady, true);
+  assert.equal(healthData.capabilities.catalogReady, false);
+  assert.ok(healthData.missing.includes("enabled_catalog"));
+
+  const proxy = await fetchWorker(
+    "/v1/tiktok/web/fetch_user_profile",
+    {},
+    env,
+  );
+  assert.equal(proxy.status, 503);
+  assert.equal((await proxy.json()).error.code, "service_not_ready");
+});
+
+test("fails closed before upstream access when catalog coverage evidence is inconsistent", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  enableCatalogEndpoint(db);
+  const catalogSecret = "catalog-evidence-secret-32-minimum";
+  const env = baseEnv({
+    DB: db,
+    TIKHUB_API_KEY: "upstream-key",
+    RESELLER_AUTHORIZED: "true",
+    LEGAL_REVIEW_CONFIRMED: "true",
+    CATALOG_SYNC_SECRET: catalogSecret,
+    RECONCILIATION_SECRET: "catalog-evidence-reconcile-secret-32-minimum",
+  });
+
+  const healthy = await fetchWorker("/api/health", {}, env);
+  assert.equal(healthy.status, 200);
+  assert.equal((await healthy.json()).capabilities.catalogReady, true);
+
+  db.raw
+    .prepare(
+      `UPDATE catalog_sync_state
+       SET matched_price_count = 0
+       WHERE id = 1`,
+    )
+    .run();
+  const health = await fetchWorker("/api/health", {}, env);
+  assert.equal(health.status, 200);
+  const healthData = await health.json();
+  assert.equal(healthData.capabilities.schemaReady, true);
+  assert.equal(healthData.capabilities.catalogReady, false);
+
+  const adminCatalog = await fetchWorker(
+    "/api/admin/catalog?limit=1&offset=0",
+    {
+      headers: { authorization: `Bearer ${catalogSecret}` },
+    },
+    env,
+  );
+  assert.equal(adminCatalog.status, 200);
+  assert.equal((await adminCatalog.json()).sync.coverage, null);
+
+  const nativeFetch = globalThis.fetch;
+  let upstreamReads = 0;
+  globalThis.fetch = async () => {
+    upstreamReads += 1;
+    throw new Error("upstream must not be called");
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+  const proxy = await fetchWorker(
+    "/v1/tiktok/web/fetch_user_profile",
+    {},
+    env,
+  );
+  assert.equal(proxy.status, 503);
+  assert.equal((await proxy.json()).error.code, "service_not_ready");
+  assert.equal(upstreamReads, 0);
+});
+
 test("encrypts, verifies, rotates and fail-closes managed TikHub credentials", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
@@ -568,9 +739,13 @@ test("encrypts, verifies, rotates and fail-closes managed TikHub credentials", a
       return Response.json({
         data: [
           {
-            path: "/v1/tiktok/web/fetch_user_profile",
-            method: "GET",
-            price: 0.001,
+            endpoint_uri: "/api/v1/tiktok/web/fetch_user_profile",
+            endpoint_cost: 0.001,
+            allow_free_credit: 1,
+            allow_discount: 1,
+            rate_limit: "10/second",
+            endpoint_type: "self-operated",
+            endpoint_owner: "TikHub",
           },
         ],
       });
@@ -578,6 +753,7 @@ test("encrypts, verifies, rotates and fail-closes managed TikHub credentials", a
     if (url.pathname === "/openapi.json") {
       return Response.json({
         openapi: "3.1.0",
+        info: { title: "TikHub API", version: "V5.3.2" },
         paths: {
           "/api/v1/tiktok/web/fetch_user_profile": {
             get: {
@@ -1056,6 +1232,19 @@ test("does not auto-link a reassigned Google email to an existing account", asyn
   const db = new TestD1();
   t.after(() => db.close());
   await migrate(db);
+  enableCatalogEndpoint(db);
+  for (let index = 0; index < 30; index += 1) {
+    db.raw
+      .prepare(
+        `INSERT INTO endpoint_catalog
+         (path, platform, http_method, upstream_price_usd_micros,
+          customer_price_usd_micros, price_verified, enabled, read_only,
+          sync_generation, created_at, updated_at)
+         VALUES (?, 'historical', 'GET', 1000, 2000, 1, 0, 1,
+                 NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      )
+      .run(`/v1/historical/web/fetch_item_${index}`);
+  }
   db.raw
     .prepare(
       `INSERT INTO users (id, email, display_name)
@@ -3528,8 +3717,13 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
     return Response.json({
       data: [
         {
-          path: "/v1/youtube/web/fetch_video",
-          price: 0.001,
+          endpoint_uri: "/api/v1/youtube/web/fetch_video",
+          endpoint_cost: 0.001,
+          allow_free_credit: 1,
+          allow_discount: 1,
+          rate_limit: "10/second",
+          endpoint_type: "self-operated",
+          endpoint_owner: "TikHub",
         },
       ],
     });
@@ -3642,6 +3836,769 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
   );
 });
 
+test("syncs the real TikHub price shape, verifies zero cost and deduplicates identical rows", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+
+  const catalogSecret = "catalog-real-shape-secret-32-minimum";
+  const env = baseEnv({
+    DB: db,
+    TIKHUB_API_KEY: "upstream-key",
+    CATALOG_SYNC_SECRET: catalogSecret,
+  });
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(
+      typeof input === "string" || input instanceof URL ? input : input.url,
+    );
+    if (url.pathname === "/openapi.json") {
+      return Response.json({
+        openapi: "3.1.0",
+        info: { title: "TikHub API", version: "V5.3.2" },
+        paths: {
+          "/api/v1/ios_shortcut/shortcut": {
+            get: {
+              summary: "iOS shortcut metadata",
+              parameters: [],
+            },
+          },
+          "/api/v1/youtube/web/fetch_video": {
+            get: {
+              summary: "Fetch a YouTube video",
+              parameters: [],
+            },
+          },
+          "/api/v1/reddit/web/fetch_new": {
+            get: {
+              summary: "OpenAPI-only endpoint",
+              parameters: [],
+            },
+          },
+        },
+      });
+    }
+    assert.equal(
+      url.href,
+      "https://api.tikhub.io/api/v1/tikhub/user/get_all_endpoints_info",
+    );
+    const youtubePrice = {
+      endpoint_uri: "/api/v1/youtube/web/fetch_video",
+      endpoint_cost: 0.001,
+      allow_free_credit: 1,
+      allow_discount: 1,
+      rate_limit: "10/second",
+      endpoint_type: "self-operated",
+      endpoint_owner: "TikHub",
+    };
+    return Response.json({
+      code: 200,
+      data: [
+        {
+          endpoint_uri: "/api/v1/ios_shortcut/shortcut",
+          endpoint_cost: 0,
+          allow_free_credit: 0,
+          allow_discount: 0,
+          rate_limit: "10/second",
+          endpoint_type: "self-operated",
+          endpoint_owner: "TikHub",
+        },
+        youtubePrice,
+        { ...youtubePrice },
+        {
+          endpoint_uri: "/api/v1/legacy/web/fetch_price_only",
+          endpoint_cost: 0.002,
+          rate_limit: "5/second",
+          endpoint_type: "self-operated",
+          endpoint_owner: "TikHub",
+        },
+      ],
+    });
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const response = await fetchWorker(
+    "/api/admin/catalog/sync",
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${catalogSecret}` },
+    },
+    env,
+  );
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.synced, 3);
+  assert.equal(result.openApiVersion, "V5.3.2");
+  assert.equal(result.openApiOperations, 3);
+  assert.equal(result.rawPriceRows, 4);
+  assert.equal(result.normalizedPrices, 3);
+  assert.equal(result.openApiPriceMapped, 2);
+  assert.equal(result.priceOnly, 1);
+  assert.equal(result.openApiOnly, 1);
+  assert.equal(result.scopeExcluded, 0);
+  assert.equal(result.priced, 2);
+  assert.equal(result.positivePrice, 1);
+  assert.equal(result.zeroPrice, 1);
+  assert.equal(result.awaitingPrice, 1);
+  assert.match(result.openApiSnapshotHash, /^[a-f0-9]{64}$/);
+  assert.match(result.priceSnapshotHash, /^[a-f0-9]{64}$/);
+
+  const rows = db.raw
+    .prepare(
+      `SELECT path, upstream_price_usd_micros, price_verified
+       FROM endpoint_catalog
+       WHERE path IN (
+         '/v1/ios_shortcut/shortcut',
+         '/v1/youtube/web/fetch_video'
+       )
+       ORDER BY path`,
+    )
+    .all()
+    .map((row) => ({ ...row }));
+  assert.deepEqual(rows, [
+    {
+      path: "/v1/ios_shortcut/shortcut",
+      upstream_price_usd_micros: 0,
+      price_verified: 1,
+    },
+    {
+      path: "/v1/youtube/web/fetch_video",
+      upstream_price_usd_micros: 1000,
+      price_verified: 1,
+    },
+  ]);
+
+  const syncState = db.raw
+    .prepare(
+      `SELECT openapi_version, openapi_operation_count,
+              raw_price_row_count, normalized_price_count,
+              openapi_price_mapped_count, price_only_count,
+              openapi_only_count, scope_excluded_count,
+              matched_price_count, positive_price_count,
+              zero_price_count, awaiting_price_count,
+              openapi_snapshot_hash, price_snapshot_hash
+       FROM catalog_sync_state
+       WHERE id = 1`,
+    )
+    .get();
+  assert.deepEqual(
+    {
+      ...syncState,
+      openapi_snapshot_hash: "64-hex",
+      price_snapshot_hash: "64-hex",
+    },
+    {
+      openapi_version: "V5.3.2",
+      openapi_operation_count: 3,
+      raw_price_row_count: 4,
+      normalized_price_count: 3,
+      openapi_price_mapped_count: 2,
+      price_only_count: 1,
+      openapi_only_count: 1,
+      scope_excluded_count: 0,
+      matched_price_count: 2,
+      positive_price_count: 1,
+      zero_price_count: 1,
+      awaiting_price_count: 1,
+      openapi_snapshot_hash: "64-hex",
+      price_snapshot_hash: "64-hex",
+    },
+  );
+  assert.match(syncState.openapi_snapshot_hash, /^[a-f0-9]{64}$/);
+  assert.match(syncState.price_snapshot_hash, /^[a-f0-9]{64}$/);
+
+  const adminCatalog = await fetchWorker(
+    "/api/admin/catalog?limit=1&offset=0",
+    {
+      headers: { authorization: `Bearer ${catalogSecret}` },
+    },
+    env,
+  );
+  assert.equal(adminCatalog.status, 200);
+  const adminCatalogData = await adminCatalog.json();
+  assert.equal(adminCatalogData.sync.coverage.openApiOperations, 3);
+  assert.equal(adminCatalogData.sync.coverage.rawPriceRows, 4);
+  assert.equal(adminCatalogData.sync.coverage.normalizedPrices, 3);
+  assert.equal(adminCatalogData.sync.coverage.openApiPriceMapped, 2);
+  assert.equal(adminCatalogData.sync.coverage.priceOnly, 1);
+  assert.equal(adminCatalogData.sync.coverage.openApiOnly, 1);
+  assert.equal(adminCatalogData.sync.coverage.scopeExcluded, 0);
+  assert.equal(adminCatalogData.sync.coverage.matchedPrices, 2);
+  assert.equal(adminCatalogData.sync.coverage.positivePrices, 1);
+  assert.equal(adminCatalogData.sync.coverage.zeroPrices, 1);
+  assert.equal(adminCatalogData.sync.coverage.awaitingPrice, 1);
+});
+
+test("rejects conflicting duplicate TikHub prices without replacing the live catalog", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  enableCatalogEndpoint(db);
+
+  const previousGeneration = db.raw
+    .prepare(
+      `SELECT last_success_generation
+       FROM catalog_sync_state
+       WHERE id = 1`,
+    )
+    .get().last_success_generation;
+  const catalogSecret = "catalog-conflict-secret-32-minimum";
+  const env = baseEnv({
+    DB: db,
+    TIKHUB_API_KEY: "upstream-key",
+    CATALOG_SYNC_SECRET: catalogSecret,
+  });
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(
+      typeof input === "string" || input instanceof URL ? input : input.url,
+    );
+    if (url.pathname === "/openapi.json") {
+      return Response.json({
+        openapi: "3.1.0",
+        paths: {
+          "/api/v1/youtube/web/fetch_video": {
+            get: {
+              summary: "Fetch a YouTube video",
+              parameters: [],
+            },
+          },
+        },
+      });
+    }
+    const priceRecord = {
+      endpoint_uri: "/api/v1/youtube/web/fetch_video",
+      allow_free_credit: 1,
+      allow_discount: 1,
+      rate_limit: "10/second",
+      endpoint_type: "self-operated",
+      endpoint_owner: "TikHub",
+    };
+    return Response.json({
+      code: 200,
+      data: [
+        { ...priceRecord, endpoint_cost: 0.001 },
+        { ...priceRecord, endpoint_cost: 0.002 },
+      ],
+    });
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const response = await fetchWorker(
+    "/api/admin/catalog/sync",
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${catalogSecret}` },
+    },
+    env,
+  );
+  assert.equal(response.status, 502);
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT last_success_generation
+         FROM catalog_sync_state
+         WHERE id = 1`,
+      )
+      .get().last_success_generation,
+    previousGeneration,
+  );
+  assert.deepEqual(
+    {
+      ...db.raw
+        .prepare(
+          `SELECT enabled, sync_generation
+           FROM endpoint_catalog
+           WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+        )
+        .get(),
+    },
+    {
+      enabled: 1,
+      sync_generation: previousGeneration,
+    },
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM endpoint_catalog
+         WHERE path = '/v1/youtube/web/fetch_video'`,
+      )
+      .get().count,
+    0,
+  );
+  assert.equal(
+    db.raw
+      .prepare("SELECT COUNT(*) AS count FROM catalog_sync_staging")
+      .get().count,
+    0,
+  );
+  assert.equal(
+    db.raw
+      .prepare("SELECT COUNT(*) AS count FROM catalog_sync_locks")
+      .get().count,
+    0,
+  );
+});
+
+test("rejects an explicit unsupported TikHub price method instead of treating it as a wildcard", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  enableCatalogEndpoint(db);
+  const previousGeneration = db.raw
+    .prepare(
+      `SELECT last_success_generation
+       FROM catalog_sync_state
+       WHERE id = 1`,
+    )
+    .get().last_success_generation;
+  const catalogSecret = "catalog-method-secret-32-minimum";
+  const env = baseEnv({
+    DB: db,
+    TIKHUB_API_KEY: "upstream-key",
+    CATALOG_SYNC_SECRET: catalogSecret,
+  });
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(
+      typeof input === "string" || input instanceof URL ? input : input.url,
+    );
+    if (url.pathname === "/openapi.json") {
+      return Response.json({
+        openapi: "3.1.0",
+        paths: {
+          "/api/v1/youtube/web/fetch_video": {
+            get: { parameters: [] },
+          },
+        },
+      });
+    }
+    return Response.json({
+      data: [
+        {
+          endpoint_uri: "/api/v1/youtube/web/fetch_video",
+          endpoint_cost: 0.001,
+          method: "DELETE",
+        },
+      ],
+    });
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const response = await fetchWorker(
+    "/api/admin/catalog/sync",
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${catalogSecret}` },
+    },
+    env,
+  );
+  assert.equal(response.status, 502);
+  assert.equal(
+    (await response.json()).error.code,
+    "catalog_price_method_invalid",
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT last_success_generation
+         FROM catalog_sync_state
+         WHERE id = 1`,
+      )
+      .get().last_success_generation,
+    previousGeneration,
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM endpoint_catalog
+         WHERE path = '/v1/youtube/web/fetch_video'`,
+      )
+      .get().count,
+    0,
+  );
+});
+
+test("rejects malformed official TikHub price envelopes without legacy-field fallback", async (t) => {
+  const cases = [
+    {
+      payload: {
+        code: 200,
+        data: [
+          {
+            endpoint_uri: null,
+            path: "/api/v1/youtube/web/fetch_video",
+            endpoint_cost: 0.001,
+          },
+        ],
+      },
+      code: "catalog_price_schema_invalid",
+    },
+    {
+      payload: {
+        code: 500,
+        data: [
+          {
+            endpoint_uri: "/api/v1/youtube/web/fetch_video",
+            endpoint_cost: 0.001,
+          },
+        ],
+      },
+      code: "catalog_price_response_failed",
+    },
+  ];
+  for (const [index, item] of cases.entries()) {
+    const db = new TestD1();
+    t.after(() => db.close());
+    await migrate(db);
+    enableCatalogEndpoint(db);
+    const catalogSecret = `catalog-price-envelope-secret-32-minimum-${index}`;
+    const env = baseEnv({
+      DB: db,
+      TIKHUB_API_KEY: "upstream-key",
+      CATALOG_SYNC_SECRET: catalogSecret,
+    });
+    const nativeFetch = globalThis.fetch;
+    globalThis.fetch = async (input) => {
+      const url = new URL(
+        typeof input === "string" || input instanceof URL
+          ? input
+          : input.url,
+      );
+      if (url.pathname === "/openapi.json") {
+        return Response.json({
+          openapi: "3.1.0",
+          paths: {
+            "/api/v1/youtube/web/fetch_video": {
+              get: { parameters: [] },
+            },
+          },
+        });
+      }
+      return Response.json(item.payload);
+    };
+    try {
+      const response = await fetchWorker(
+        "/api/admin/catalog/sync",
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${catalogSecret}` },
+        },
+        env,
+      );
+      assert.equal(response.status, 502);
+      assert.equal((await response.json()).error.code, item.code);
+      assert.equal(
+        db.raw
+          .prepare(
+            `SELECT COUNT(*) AS count
+             FROM endpoint_catalog
+             WHERE path = '/v1/youtube/web/fetch_video'`,
+          )
+          .get().count,
+        0,
+      );
+      assert.equal(
+        db.raw
+          .prepare("SELECT COUNT(*) AS count FROM catalog_sync_locks")
+          .get().count,
+        0,
+      );
+    } finally {
+      globalThis.fetch = nativeFetch;
+    }
+  }
+});
+
+test("rejects non-decimal and sub-micro TikHub costs instead of rounding them", async (t) => {
+  const invalidCosts = ["1e-3", "0x10", 0.0000004];
+  for (const [index, endpointCost] of invalidCosts.entries()) {
+    const db = new TestD1();
+    t.after(() => db.close());
+    await migrate(db);
+    enableCatalogEndpoint(db);
+    const catalogSecret = `catalog-price-value-secret-32-minimum-${index}`;
+    const env = baseEnv({
+      DB: db,
+      TIKHUB_API_KEY: "upstream-key",
+      CATALOG_SYNC_SECRET: catalogSecret,
+    });
+    const nativeFetch = globalThis.fetch;
+    globalThis.fetch = async (input) => {
+      const url = new URL(
+        typeof input === "string" || input instanceof URL
+          ? input
+          : input.url,
+      );
+      if (url.pathname === "/openapi.json") {
+        return Response.json({
+          openapi: "3.1.0",
+          paths: {
+            "/api/v1/youtube/web/fetch_video": {
+              get: { parameters: [] },
+            },
+          },
+        });
+      }
+      return Response.json({
+        data: [
+          {
+            endpoint_uri: "/api/v1/youtube/web/fetch_video",
+            endpoint_cost: endpointCost,
+          },
+        ],
+      });
+    };
+    try {
+      const response = await fetchWorker(
+        "/api/admin/catalog/sync",
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${catalogSecret}` },
+        },
+        env,
+      );
+      assert.equal(response.status, 502);
+      assert.equal(
+        (await response.json()).error.code,
+        "catalog_price_value_invalid",
+      );
+      assert.equal(
+        db.raw
+          .prepare(
+            `SELECT COUNT(*) AS count
+             FROM endpoint_catalog
+             WHERE path = '/v1/youtube/web/fetch_video'`,
+          )
+          .get().count,
+        0,
+      );
+      assert.equal(
+        db.raw
+          .prepare("SELECT COUNT(*) AS count FROM catalog_sync_locks")
+          .get().count,
+        0,
+      );
+    } finally {
+      globalThis.fetch = nativeFetch;
+    }
+  }
+});
+
+test("rejects OpenAPI methods that the path-keyed proxy cannot represent safely", async (t) => {
+  const cases = [
+    {
+      operations: {
+        get: { parameters: [] },
+        post: { requestBody: {} },
+      },
+      code: "catalog_openapi_method_collision",
+    },
+    {
+      operations: {
+        put: { requestBody: {} },
+      },
+      code: "catalog_openapi_method_unsupported",
+    },
+  ];
+  for (const [index, item] of cases.entries()) {
+    const db = new TestD1();
+    t.after(() => db.close());
+    await migrate(db);
+    const catalogSecret = `catalog-openapi-method-secret-32-minimum-${index}`;
+    const env = baseEnv({
+      DB: db,
+      TIKHUB_API_KEY: "upstream-key",
+      CATALOG_SYNC_SECRET: catalogSecret,
+    });
+    const nativeFetch = globalThis.fetch;
+    globalThis.fetch = async (input) => {
+      const url = new URL(
+        typeof input === "string" || input instanceof URL
+          ? input
+          : input.url,
+      );
+      if (url.pathname === "/openapi.json") {
+        return Response.json({
+          openapi: "3.1.0",
+          paths: {
+            "/api/v1/youtube/web/fetch_video": item.operations,
+          },
+        });
+      }
+      return Response.json({
+        data: [
+          {
+            endpoint_uri: "/api/v1/youtube/web/fetch_video",
+            endpoint_cost: 0.001,
+          },
+        ],
+      });
+    };
+    try {
+      const response = await fetchWorker(
+        "/api/admin/catalog/sync",
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${catalogSecret}` },
+        },
+        env,
+      );
+      assert.equal(response.status, 502);
+      assert.equal((await response.json()).error.code, item.code);
+      assert.equal(
+        db.raw
+          .prepare("SELECT COUNT(*) AS count FROM catalog_sync_locks")
+          .get().count,
+        0,
+      );
+    } finally {
+      globalThis.fetch = nativeFetch;
+    }
+  }
+});
+
+test("keeps the live catalog when the same TikHub credential returns a partial price snapshot", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  db.raw.exec("DELETE FROM endpoint_catalog");
+  const upstreamKey = "upstream-key";
+  const credentialFingerprint = createHash("sha256")
+    .update(upstreamKey)
+    .digest("hex")
+    .slice(0, 16);
+  const paths = Array.from(
+    { length: 20 },
+    (_, index) => `/v1/youtube/web/fetch_video_${index}`,
+  );
+  const insert = db.raw.prepare(
+    `INSERT INTO endpoint_catalog
+     (path, platform, http_method, summary,
+      upstream_price_usd_micros, customer_price_usd_micros,
+      price_verified, enabled, read_only, sync_generation,
+      reviewed_at, created_at, updated_at)
+     VALUES (?, 'youtube', 'GET', ?, 1000, 2000, 1, 1, 1,
+             'sync-full-prices', CURRENT_TIMESTAMP,
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+  );
+  for (const path of paths) insert.run(path, `Fetch ${path}`);
+  db.raw
+    .prepare(
+      `INSERT INTO catalog_sync_state
+       (id, last_success_generation, credential_source, credential_id,
+        credential_fingerprint, credential_state_version,
+        openapi_operation_count, raw_price_row_count,
+        normalized_price_count, openapi_price_mapped_count,
+        price_only_count, openapi_only_count, scope_excluded_count,
+        matched_price_count, positive_price_count, zero_price_count,
+        awaiting_price_count, openapi_snapshot_hash,
+        price_snapshot_hash, synced_at)
+       VALUES (1, 'sync-full-prices', 'environment', NULL, ?, 0,
+               20, 20, 20, 20, 0, 0, 0, 20, 20, 0, 0, ?, ?,
+               CURRENT_TIMESTAMP)`,
+    )
+    .run(credentialFingerprint, "a".repeat(64), "b".repeat(64));
+
+  const catalogSecret = "catalog-partial-price-secret-32-minimum";
+  const env = baseEnv({
+    DB: db,
+    TIKHUB_API_KEY: upstreamKey,
+    CATALOG_SYNC_SECRET: catalogSecret,
+  });
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(
+      typeof input === "string" || input instanceof URL ? input : input.url,
+    );
+    if (url.pathname === "/openapi.json") {
+      return Response.json({
+        openapi: "3.1.0",
+        paths: Object.fromEntries(
+          paths.map((path) => [
+            `/api${path}`,
+            { get: { summary: `Fetch ${path}`, parameters: [] } },
+          ]),
+        ),
+      });
+    }
+    return Response.json({
+      data: [
+        {
+          endpoint_uri: `/api${paths[0]}`,
+          endpoint_cost: 0.001,
+        },
+      ],
+    });
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const response = await fetchWorker(
+    "/api/admin/catalog/sync",
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${catalogSecret}` },
+    },
+    env,
+  );
+  assert.equal(response.status, 502);
+  assert.equal(
+    (await response.json()).error.code,
+    "catalog_price_snapshot_incomplete",
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT last_success_generation
+         FROM catalog_sync_state
+         WHERE id = 1`,
+      )
+      .get().last_success_generation,
+    "sync-full-prices",
+  );
+  assert.deepEqual(
+    {
+      ...db.raw
+        .prepare(
+          `SELECT COUNT(*) AS count,
+                  SUM(enabled) AS enabled_count,
+                  SUM(reviewed_at IS NOT NULL) AS reviewed_count
+           FROM endpoint_catalog
+           WHERE sync_generation = 'sync-full-prices'`,
+        )
+        .get(),
+    },
+    {
+      count: 20,
+      enabled_count: 20,
+      reviewed_count: 20,
+    },
+  );
+  assert.equal(
+    db.raw
+      .prepare("SELECT COUNT(*) AS count FROM catalog_sync_staging")
+      .get().count,
+    0,
+  );
+  assert.equal(
+    db.raw
+      .prepare("SELECT COUNT(*) AS count FROM catalog_sync_locks")
+      .get().count,
+    0,
+  );
+});
+
 test("keeps the last successful catalog live when a staged sync batch fails", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
@@ -3678,7 +4635,15 @@ test("keeps the last successful catalog live when a staged sync batch fails", as
     return url.pathname === "/openapi.json"
       ? Response.json({ openapi: "3.1.0", paths: openApiPaths })
       : Response.json({
-          data: paths.map((path) => ({ path, price: 0.001 })),
+          data: paths.map((path) => ({
+            endpoint_uri: `/api${path}`,
+            endpoint_cost: 0.001,
+            allow_free_credit: 1,
+            allow_discount: 1,
+            rate_limit: "10/second",
+            endpoint_type: "self-operated",
+            endpoint_owner: "TikHub",
+          })),
         });
   };
   t.after(() => {

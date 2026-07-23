@@ -9,6 +9,40 @@ RelayBase 的用户可见变化、计费语义、安全边界与数据库迁移�
 
 - 待下一轮迭代记录。
 
+## [0.3.0-preview.3] - 2026-07-23
+
+### Added
+
+- D1 迁移 `0011` 持久化 OpenAPI 版本、操作数、价格原始/去重、路径与方法映射、
+  仅价格目录、仅 OpenAPI、Key scope 排除、正价/零价/待核验分解，以及两个原始
+  响应的 SHA-256。
+- 管理后台新增“目录覆盖证明”，展示成功目录代次的覆盖计数、活动 Key 指纹和
+  快照指纹；同步完成提示不再丢弃已核价与待核价数量。
+
+### Fixed
+
+- 目录价格解析改为兼容 TikHub 当前正式字段 `endpoint_uri` /
+  `endpoint_cost`；此前使用旧式 `path` / `price` 形状会使真实全量同步识别为
+  0 条并失败。
+- 显式零成本端点现在会标记为价格已验证；完全相同的重复价格记录安全去重。
+- 同一路径出现冲突成本或冲突显式方法时整次同步 fail closed，保留上一成功目录、
+  清理暂存数据与同步租约，不会随机采用最后一条价格。
+- 价格记录显式声明 GET/POST 之外的方法时不再降级成方法通配符，而是停止同步。
+- 成本使用严格的 USD micro 定点解析；指数/十六进制字符串、负数、超过 6 位小数和
+  小于 1 micro 的非零成本不再被隐式接受或舍入为零。
+- 同一凭据的价格覆盖异常缩小时保留上一成功目录，防止价格接口部分响应批量下架
+  端点并清除人工审核。
+- OpenAPI 同一路径多方法或出现 GET/POST 之外的方法时停止同步，不再以路径数
+  冒充操作数。
+
+### Security
+
+- readiness 与付费代理新增 `0011` schema 与证据自洽校验；数据库未迁移或旧
+  目录尚未重新生成覆盖证据时继续安全关闭，不会沿用旧目录计费。
+- 覆盖卡只在所有计数闭合且两个 64 位快照哈希有效时展示；损坏证据不会被前端
+  当作成功同步。
+- 管理页面只显示快照哈希和截断 Key 指纹，不暴露 TikHub Key 或价格目录原文。
+
 ## [0.3.0-preview.2] - 2026-07-23
 
 ### Fixed
@@ -102,7 +136,8 @@ RelayBase 的用户可见变化、计费语义、安全边界与数据库迁移�
 
 - RelayBase 初始市场页、安全沙盒、基础 TikHub 代理、客户 API Key 与预付余额原型。
 
-[Unreleased]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.2...HEAD
+[Unreleased]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.3...HEAD
+[0.3.0-preview.3]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.2...v0.3.0-preview.3
 [0.3.0-preview.2]: https://github.com/kydlikebtc/RelayBase/compare/v0.3.0-preview.1...v0.3.0-preview.2
 [0.3.0-preview.1]: https://github.com/kydlikebtc/RelayBase/releases/tag/v0.3.0-preview.1
 [0.2.0-preview.1]: https://github.com/kydlikebtc/RelayBase/releases/tag/v0.2.0-preview.1

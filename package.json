@@ -1,6 +1,6 @@
 {
   "name": "relaybase-api",
-  "version": "0.3.0-preview.2",
+  "version": "0.3.0-preview.3",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
