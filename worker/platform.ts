@@ -43,6 +43,31 @@ const NOWPAYMENTS_STATUSES = new Set([
 const NOWPAYMENTS_REVIEW_CREDITABLE_STATUSES = new Set([
   "finished",
 ]);
+const CATALOG_COVERAGE_WHERE = `
+  openapi_operation_count BETWEEN 1 AND 5000
+  AND raw_price_row_count BETWEEN 1 AND 100000
+  AND normalized_price_count BETWEEN 1 AND raw_price_row_count
+  AND openapi_price_mapped_count BETWEEN 1 AND normalized_price_count
+  AND openapi_price_mapped_count <= openapi_operation_count
+  AND price_only_count = normalized_price_count -
+      openapi_price_mapped_count
+  AND openapi_only_count = openapi_operation_count -
+      openapi_price_mapped_count
+  AND scope_excluded_count BETWEEN 0 AND openapi_price_mapped_count
+  AND matched_price_count = openapi_price_mapped_count -
+      scope_excluded_count
+  AND matched_price_count >= 1
+  AND positive_price_count BETWEEN 0 AND matched_price_count
+  AND zero_price_count BETWEEN 0 AND matched_price_count
+  AND positive_price_count + zero_price_count = matched_price_count
+  AND awaiting_price_count BETWEEN 0 AND openapi_operation_count
+  AND matched_price_count + awaiting_price_count =
+      openapi_operation_count
+  AND length(openapi_snapshot_hash) = 64
+  AND openapi_snapshot_hash NOT GLOB '*[^0-9a-f]*'
+  AND length(price_snapshot_hash) = 64
+  AND price_snapshot_hash NOT GLOB '*[^0-9a-f]*'
+`;
 
 export interface PlatformEnv {
   DB?: D1Database;
@@ -104,6 +129,7 @@ type CatalogRecord = {
   enabled: number;
   read_only: number;
   sync_generation: string | null;
+  coverage_verified: number;
 };
 
 type PaymentOrderRecord = {
@@ -2887,6 +2913,12 @@ async function handleProxyRequest(
         `SELECT path, platform, http_method, upstream_price_usd_micros,
                 customer_price_usd_micros, price_verified,
                 enabled, read_only, sync_generation,
+                EXISTS(
+                  SELECT 1
+                  FROM catalog_sync_state
+                  WHERE id = 1
+                    AND ${CATALOG_COVERAGE_WHERE}
+                ) AS coverage_verified,
                 (SELECT request_count
                  FROM upstream_rate_limit_buckets LIMIT 1)
                   AS _upstream_rate_limit_schema,
@@ -2900,6 +2932,9 @@ async function handleProxyRequest(
                 (SELECT last_success_generation
                  FROM catalog_sync_state LIMIT 1)
                   AS _catalog_sync_state_schema,
+                (SELECT openapi_operation_count
+                 FROM catalog_sync_state LIMIT 1)
+                  AS _catalog_coverage_schema,
                 (SELECT generation FROM catalog_sync_staging LIMIT 1)
                   AS _catalog_sync_staging_schema,
                 (SELECT idempotency_hash FROM payment_orders LIMIT 1)
@@ -2926,7 +2961,21 @@ async function handleProxyRequest(
       "数据库迁移尚未完成，已停止真实调用与扣费。",
     );
   }
-  if (!catalog || catalog.enabled !== 1 || catalog.read_only !== 1) {
+  if (!catalog) {
+    throw new PlatformError(
+      404,
+      "endpoint_not_enabled",
+      "该端点尚未通过只读与价格审核。",
+    );
+  }
+  if (catalog.coverage_verified !== 1) {
+    throw new PlatformError(
+      503,
+      "catalog_coverage_unverified",
+      "最近目录缺少完整覆盖证据，已停止真实调用与扣费；请重新同步 TikHub。",
+    );
+  }
+  if (catalog.enabled !== 1 || catalog.read_only !== 1) {
     throw new PlatformError(
       404,
       "endpoint_not_enabled",
@@ -3636,6 +3685,43 @@ async function handleCatalogList(
   const totalRow = await db
     .prepare(`SELECT COUNT(*) AS count FROM endpoint_catalog`)
     .first<{ count: number }>();
+  const syncRow = await db
+    .prepare(
+      `SELECT last_success_generation, credential_fingerprint,
+              openapi_version, openapi_operation_count,
+              raw_price_row_count, normalized_price_count,
+              openapi_price_mapped_count, price_only_count,
+              openapi_only_count, scope_excluded_count,
+              matched_price_count, positive_price_count,
+              zero_price_count, awaiting_price_count,
+              openapi_snapshot_hash, price_snapshot_hash, synced_at,
+              CASE
+                  WHEN ${CATALOG_COVERAGE_WHERE} THEN 1
+                  ELSE 0
+                END AS coverage_verified
+       FROM catalog_sync_state
+       WHERE id = 1`,
+    )
+    .first<{
+      last_success_generation: string;
+      credential_fingerprint: string | null;
+      openapi_version: string | null;
+      openapi_operation_count: number | null;
+      raw_price_row_count: number | null;
+      normalized_price_count: number | null;
+      openapi_price_mapped_count: number | null;
+      price_only_count: number | null;
+      openapi_only_count: number | null;
+      scope_excluded_count: number | null;
+      matched_price_count: number | null;
+      positive_price_count: number | null;
+      zero_price_count: number | null;
+      awaiting_price_count: number | null;
+      openapi_snapshot_hash: string | null;
+      price_snapshot_hash: string | null;
+      synced_at: string;
+      coverage_verified: number;
+    }>();
   const total = Number(totalRow?.count ?? 0);
   const endpoints = (rows.results ?? []).map((row) => ({
     path: row.path,
@@ -3665,6 +3751,44 @@ async function handleCatalogList(
         offset + endpoints.length < total
           ? offset + endpoints.length
           : null,
+      sync: syncRow
+        ? {
+            generation: syncRow.last_success_generation,
+            credentialFingerprint: syncRow.credential_fingerprint,
+            syncedAt: syncRow.synced_at,
+            coverage:
+              syncRow.coverage_verified === 1 &&
+              syncRow.openapi_operation_count != null &&
+              syncRow.raw_price_row_count != null &&
+              syncRow.normalized_price_count != null &&
+              syncRow.openapi_price_mapped_count != null &&
+              syncRow.price_only_count != null &&
+              syncRow.openapi_only_count != null &&
+              syncRow.scope_excluded_count != null &&
+              syncRow.matched_price_count != null &&
+              syncRow.positive_price_count != null &&
+              syncRow.zero_price_count != null &&
+              syncRow.awaiting_price_count != null
+                ? {
+                    openApiVersion: syncRow.openapi_version,
+                    openApiOperations: syncRow.openapi_operation_count,
+                    rawPriceRows: syncRow.raw_price_row_count,
+                    normalizedPrices: syncRow.normalized_price_count,
+                    openApiPriceMapped:
+                      syncRow.openapi_price_mapped_count,
+                    priceOnly: syncRow.price_only_count,
+                    openApiOnly: syncRow.openapi_only_count,
+                    scopeExcluded: syncRow.scope_excluded_count,
+                    matchedPrices: syncRow.matched_price_count,
+                    positivePrices: syncRow.positive_price_count,
+                    zeroPrices: syncRow.zero_price_count,
+                    awaitingPrice: syncRow.awaiting_price_count,
+                    openApiSnapshotHash: syncRow.openapi_snapshot_hash,
+                    priceSnapshotHash: syncRow.price_snapshot_hash,
+                  }
+                : null,
+          }
+        : null,
     },
     200,
     requestId,
@@ -5338,11 +5462,12 @@ async function handleCatalogSync(
       );
     }
 
-    const payload = await readResponseJson(
+    const priceSnapshot = await readResponseJsonSnapshot(
       response,
       MAX_CATALOG_RESPONSE_BYTES,
       "catalog_sync_failed",
     );
+    const payload = priceSnapshot.payload;
     let openApiResponse: Response;
     try {
       openApiResponse = await fetch(
@@ -5374,14 +5499,21 @@ async function handleCatalogSync(
         `TikHub OpenAPI 文档同步失败（${openApiResponse.status}）。`,
       );
     }
-    const openApiPayload = await readResponseJson(
+    const openApiSnapshot = await readResponseJsonSnapshot(
       openApiResponse,
       MAX_OPENAPI_RESPONSE_BYTES,
       "catalog_schema_sync_failed",
     );
-    const prices = extractCatalogPrices(payload);
+    const openApiPayload = openApiSnapshot.payload;
+    const priceCatalog = extractCatalogPrices(payload);
+    const prices = priceCatalog.entries;
     const openApi = extractOpenApiCatalog(openApiPayload);
     const entries = mergeCatalogEntries(
+      prices,
+      openApi,
+      credential.scopes,
+    );
+    const coverageBreakdown = catalogCoverageBreakdown(
       prices,
       openApi,
       credential.scopes,
@@ -5389,6 +5521,29 @@ async function handleCatalogSync(
     const pricedEntries = entries.filter(
       (entry) => entry.priceVerified,
     ).length;
+    const positivePriceEntries = entries.filter(
+      (entry) =>
+        entry.priceVerified && entry.upstreamPriceUsdMicros > 0,
+    ).length;
+    const zeroPriceEntries = entries.filter(
+      (entry) =>
+        entry.priceVerified && entry.upstreamPriceUsdMicros === 0,
+    ).length;
+    const awaitingPriceEntries = entries.length - pricedEntries;
+    if (
+      coverageBreakdown.openApiPriceMapped -
+        coverageBreakdown.scopeExcluded !==
+      pricedEntries
+    ) {
+      throw new PlatformError(
+        502,
+        "catalog_coverage_inconsistent",
+        "目录覆盖计算不一致，本次同步已停止。",
+      );
+    }
+    const openApiVersion = extractOpenApiVersion(openApiPayload);
+    const openApiSnapshotHash = openApiSnapshot.snapshotHash;
+    const priceSnapshotHash = priceSnapshot.snapshotHash;
     if (
       prices.length === 0 ||
       openApi.size === 0 ||
@@ -5410,14 +5565,100 @@ async function handleCatalogSync(
     }
 
     const currentCount = await db
-      .prepare(`SELECT COUNT(*) AS count FROM endpoint_catalog`)
-      .first<{ count: number }>();
+      .prepare(
+        `SELECT COUNT(*) AS count,
+                (
+                  SELECT openapi_operation_count
+                  FROM catalog_sync_state
+                  WHERE id = 1
+                ) AS expected_count,
+                (
+                  SELECT matched_price_count
+                  FROM catalog_sync_state
+                  WHERE id = 1
+                ) AS expected_matched_count,
+                (
+                  SELECT credential_source
+                  FROM catalog_sync_state
+                  WHERE id = 1
+                ) AS previous_credential_source,
+                (
+                  SELECT credential_id
+                  FROM catalog_sync_state
+                  WHERE id = 1
+                ) AS previous_credential_id,
+                (
+                  SELECT credential_fingerprint
+                  FROM catalog_sync_state
+                  WHERE id = 1
+                ) AS previous_credential_fingerprint,
+                (
+                  SELECT credential_state_version
+                  FROM catalog_sync_state
+                  WHERE id = 1
+                ) AS previous_credential_state_version,
+                (
+                  SELECT openapi_snapshot_hash
+                  FROM catalog_sync_state
+                  WHERE id = 1
+                ) AS previous_openapi_snapshot_hash
+         FROM endpoint_catalog
+         WHERE sync_generation = (
+           SELECT last_success_generation
+           FROM catalog_sync_state
+           WHERE id = 1
+         )`,
+      )
+      .first<{
+        count: number;
+        expected_count: number | null;
+        expected_matched_count: number | null;
+        previous_credential_source: string | null;
+        previous_credential_id: string | null;
+        previous_credential_fingerprint: string | null;
+        previous_credential_state_version: number | null;
+        previous_openapi_snapshot_hash: string | null;
+      }>();
     const knownCount = Number(currentCount?.count ?? 0);
+    if (
+      currentCount?.expected_count != null &&
+      Number(currentCount.expected_count) !== knownCount
+    ) {
+      throw new PlatformError(
+        409,
+        "catalog_previous_snapshot_inconsistent",
+        "上一成功目录的覆盖证据与实际端点数量不一致，本次同步已停止。",
+      );
+    }
     if (knownCount >= 20 && entries.length < Math.floor(knownCount / 2)) {
       throw new PlatformError(
         502,
         "catalog_snapshot_incomplete",
         "本次目录数量较历史记录异常减少，已停止同步以避免误停端点。",
+      );
+    }
+    const comparableCredential =
+      currentCount?.previous_credential_source === credential.source &&
+      currentCount.previous_credential_id === credential.id &&
+      currentCount.previous_credential_fingerprint ===
+        credential.fingerprint &&
+      Number(currentCount.previous_credential_state_version) ===
+        credential.stateVersion;
+    const previousMatchedCount = Number(
+      currentCount?.expected_matched_count ?? 0,
+    );
+    if (
+      comparableCredential &&
+      previousMatchedCount >= 20 &&
+      ((currentCount.previous_openapi_snapshot_hash ===
+        openApiSnapshotHash &&
+        pricedEntries < previousMatchedCount) ||
+        pricedEntries < Math.floor(previousMatchedCount / 2))
+    ) {
+      throw new PlatformError(
+        502,
+        "catalog_price_snapshot_incomplete",
+        "本次可验证价格覆盖较上一成功目录异常减少，已停止同步以避免批量下架。",
       );
     }
 
@@ -5622,8 +5863,17 @@ async function handleCatalogSync(
           `INSERT INTO catalog_sync_state
            (id, last_success_generation, credential_source,
             credential_id, credential_fingerprint,
-            credential_state_version, synced_at)
-           SELECT 1, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+            credential_state_version, openapi_version,
+            openapi_operation_count, raw_price_row_count,
+            normalized_price_count, openapi_price_mapped_count,
+            price_only_count, openapi_only_count,
+            scope_excluded_count, matched_price_count,
+            positive_price_count, zero_price_count,
+            awaiting_price_count, openapi_snapshot_hash,
+            price_snapshot_hash, synced_at)
+           SELECT 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?,
+                  CURRENT_TIMESTAMP
            WHERE EXISTS (
              SELECT 1 FROM catalog_sync_locks
              WHERE id = 1 AND generation = ?
@@ -5641,6 +5891,21 @@ async function handleCatalogSync(
              credential_fingerprint = excluded.credential_fingerprint,
              credential_state_version =
                excluded.credential_state_version,
+             openapi_version = excluded.openapi_version,
+             openapi_operation_count = excluded.openapi_operation_count,
+             raw_price_row_count = excluded.raw_price_row_count,
+             normalized_price_count = excluded.normalized_price_count,
+             openapi_price_mapped_count =
+               excluded.openapi_price_mapped_count,
+             price_only_count = excluded.price_only_count,
+             openapi_only_count = excluded.openapi_only_count,
+             scope_excluded_count = excluded.scope_excluded_count,
+             matched_price_count = excluded.matched_price_count,
+             positive_price_count = excluded.positive_price_count,
+             zero_price_count = excluded.zero_price_count,
+             awaiting_price_count = excluded.awaiting_price_count,
+             openapi_snapshot_hash = excluded.openapi_snapshot_hash,
+             price_snapshot_hash = excluded.price_snapshot_hash,
              synced_at = CURRENT_TIMESTAMP`,
         )
         .bind(
@@ -5649,6 +5914,20 @@ async function handleCatalogSync(
           credential.id,
           credential.fingerprint,
           credential.stateVersion,
+          openApiVersion,
+          openApi.size,
+          priceCatalog.rawRecordCount,
+          prices.length,
+          coverageBreakdown.openApiPriceMapped,
+          coverageBreakdown.priceOnly,
+          coverageBreakdown.openApiOnly,
+          coverageBreakdown.scopeExcluded,
+          pricedEntries,
+          positivePriceEntries,
+          zeroPriceEntries,
+          awaitingPriceEntries,
+          openApiSnapshotHash,
+          priceSnapshotHash,
           syncGeneration,
           credential.stateVersion,
           managedCredentialFlag,
@@ -5696,9 +5975,20 @@ async function handleCatalogSync(
       targetId: syncGeneration,
       details: {
         synced,
-        priced: entries.filter((entry) => entry.priceVerified).length,
-        awaitingPrice: entries.filter((entry) => !entry.priceVerified)
-          .length,
+        openApiVersion,
+        openApiOperations: openApi.size,
+        rawPriceRows: priceCatalog.rawRecordCount,
+        normalizedPrices: prices.length,
+        openApiPriceMapped: coverageBreakdown.openApiPriceMapped,
+        priceOnly: coverageBreakdown.priceOnly,
+        openApiOnly: coverageBreakdown.openApiOnly,
+        scopeExcluded: coverageBreakdown.scopeExcluded,
+        priced: pricedEntries,
+        positivePrice: positivePriceEntries,
+        zeroPrice: zeroPriceEntries,
+        awaitingPrice: awaitingPriceEntries,
+        openApiSnapshotHash,
+        priceSnapshotHash,
         disabledMissing: Number(finalization[1]?.meta?.changes ?? 0),
       },
     });
@@ -5706,8 +5996,20 @@ async function handleCatalogSync(
     return jsonResponse(
       {
         synced,
-        priced: entries.filter((entry) => entry.priceVerified).length,
-        awaitingPrice: entries.filter((entry) => !entry.priceVerified).length,
+        openApiVersion,
+        openApiOperations: openApi.size,
+        rawPriceRows: priceCatalog.rawRecordCount,
+        normalizedPrices: prices.length,
+        openApiPriceMapped: coverageBreakdown.openApiPriceMapped,
+        priceOnly: coverageBreakdown.priceOnly,
+        openApiOnly: coverageBreakdown.openApiOnly,
+        scopeExcluded: coverageBreakdown.scopeExcluded,
+        priced: pricedEntries,
+        positivePrice: positivePriceEntries,
+        zeroPrice: zeroPriceEntries,
+        awaitingPrice: awaitingPriceEntries,
+        openApiSnapshotHash,
+        priceSnapshotHash,
         disabledMissing: Number(finalization[1]?.meta?.changes ?? 0),
         note: "新端点默认禁用；已审核端点的上游价格一旦变化会自动停用并清除审核状态，客户价格不会被同步任务静默覆盖。",
       },
@@ -7342,6 +7644,12 @@ async function operationalReadiness(env: PlatformEnv) {
                  )
                LIMIT 1
              ) AS enabled_count,
+             EXISTS(
+               SELECT 1
+               FROM catalog_sync_state
+               WHERE id = 1
+                 AND ${CATALOG_COVERAGE_WHERE}
+             ) AS coverage_verified,
              (SELECT request_count
               FROM upstream_rate_limit_buckets LIMIT 1)
                AS upstream_rate_limit_schema,
@@ -7367,6 +7675,9 @@ async function operationalReadiness(env: PlatformEnv) {
              (SELECT credential_state_version
               FROM catalog_sync_state LIMIT 1)
                AS catalog_credential_state_version,
+             (SELECT openapi_operation_count
+              FROM catalog_sync_state LIMIT 1)
+               AS catalog_coverage_schema,
              (SELECT generation FROM catalog_sync_staging LIMIT 1)
                AS catalog_sync_staging_schema,
              (SELECT idempotency_hash FROM payment_orders LIMIT 1)
@@ -7410,6 +7721,7 @@ async function operationalReadiness(env: PlatformEnv) {
         )
         .first<{
           enabled_count: number;
+          coverage_verified: number;
           reconciliation_recent: number;
           catalog_credential_source: string | null;
           catalog_credential_id: string | null;
@@ -7425,6 +7737,7 @@ async function operationalReadiness(env: PlatformEnv) {
         catalogReady =
           resolved != null &&
           Number(row?.enabled_count ?? 0) > 0 &&
+          Number(row?.coverage_verified ?? 0) === 1 &&
           row?.catalog_credential_source === resolved.source &&
           row.catalog_credential_id === resolved.id &&
           row.catalog_credential_fingerprint === resolved.fingerprint &&
@@ -7663,6 +7976,22 @@ async function readResponseJson(
   errorCode: string,
 ): Promise<unknown> {
   const text = await readResponseText(response, limit, errorCode);
+  return parseResponseJson(text, errorCode);
+}
+
+async function readResponseJsonSnapshot(
+  response: Response,
+  limit: number,
+  errorCode: string,
+): Promise<{ payload: unknown; snapshotHash: string }> {
+  const text = await readResponseText(response, limit, errorCode);
+  return {
+    payload: parseResponseJson(text, errorCode),
+    snapshotHash: await sha256Hex(text),
+  };
+}
+
+function parseResponseJson(text: string, errorCode: string): unknown {
   try {
     const parsed = JSON.parse(text) as unknown;
     if (!isPlainRecord(parsed) && !Array.isArray(parsed)) {
@@ -8064,43 +8393,75 @@ type CatalogSyncEntry = {
   looksReadOnly: boolean;
 };
 
-function extractCatalogPrices(payload: unknown): Array<{
+type CatalogPriceEntry = {
   path: string;
   httpMethod: "GET" | "POST" | null;
   upstreamPriceUsdMicros: number;
-}> {
-  const byPath = new Map<
-    string,
-    {
-      path: string;
-      httpMethod: "GET" | "POST" | null;
-      upstreamPriceUsdMicros: number;
-    }
-  >();
+};
 
-  const visit = (value: unknown): void => {
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item);
-      return;
-    }
-    if (!value || typeof value !== "object") return;
+function extractCatalogPrices(payload: unknown): {
+  entries: CatalogPriceEntry[];
+  rawRecordCount: number;
+} {
+  if (
+    isPlainRecord(payload) &&
+    Object.hasOwn(payload, "code") &&
+    payload.code !== 200 &&
+    payload.code !== "200"
+  ) {
+    throw new PlatformError(
+      502,
+      "catalog_price_response_failed",
+      "TikHub 价格目录返回非成功业务状态，本次同步已停止。",
+    );
+  }
+  const byPath = new Map<string, CatalogPriceEntry>();
+  let rawRecordCount = 0;
 
-    const record = value as Record<string, unknown>;
-    const rawPath = firstString(record, [
-      "path",
-      "endpoint",
-      "api_path",
-      "url",
-      "route",
-    ]);
-    const rawPrice = firstNumber(record, [
-      "price",
-      "cost",
-      "price_per_request",
-      "unit_price",
-      "base_price",
-    ]);
-    if (rawPath && rawPrice != null && rawPrice > 0 && rawPrice <= 100) {
+  const parseRecord = (
+    record: Record<string, unknown>,
+    strictOfficialShape: boolean,
+  ): void => {
+    const rawPath = firstString(
+      record,
+      strictOfficialShape
+        ? ["endpoint_uri"]
+        : ["endpoint_uri", "path", "endpoint", "api_path", "url", "route"],
+    );
+    const price = firstCatalogPriceUsdMicros(
+      record,
+      strictOfficialShape
+        ? ["endpoint_cost"]
+        : [
+            "endpoint_cost",
+            "price",
+            "cost",
+            "price_per_request",
+            "unit_price",
+            "base_price",
+          ],
+    );
+    if (
+      strictOfficialShape &&
+      (!rawPath ||
+        !Object.hasOwn(record, "endpoint_uri") ||
+        !Object.hasOwn(record, "endpoint_cost"))
+    ) {
+      throw new PlatformError(
+        502,
+        "catalog_price_schema_invalid",
+        "TikHub 正式价格目录记录缺少 endpoint_uri 或 endpoint_cost。",
+      );
+    }
+    if (rawPath && price.present && price.usdMicros == null) {
+      throw new PlatformError(
+        502,
+        "catalog_price_value_invalid",
+        "TikHub 价格目录包含无法精确表示的成本，本次同步已停止。",
+      );
+    }
+    if (rawPath && price.usdMicros != null) {
+      rawRecordCount += 1;
       try {
         const path = normalizeCatalogPath(rawPath);
         const rawMethod = firstString(record, [
@@ -8108,28 +8469,122 @@ function extractCatalogPrices(payload: unknown): Array<{
           "http_method",
           "httpMethod",
         ])?.toUpperCase();
-        const httpMethod =
+        if (
+          rawMethod != null &&
+          rawMethod !== "GET" &&
+          rawMethod !== "POST"
+        ) {
+          throw new PlatformError(
+            502,
+            "catalog_price_method_invalid",
+            "TikHub 价格目录包含不受支持的显式请求方法，本次同步已停止。",
+          );
+        }
+        const httpMethod: CatalogPriceEntry["httpMethod"] =
           rawMethod === "GET" || rawMethod === "POST"
             ? rawMethod
             : null;
-        byPath.set(path, {
+        const candidate = {
           path,
           httpMethod,
-          upstreamPriceUsdMicros: Math.max(
-            1,
-            Math.round(rawPrice * 1_000_000),
-          ),
-        });
-      } catch {
+          upstreamPriceUsdMicros: price.usdMicros,
+        };
+        const existing = byPath.get(path);
+        if (
+          existing &&
+          (existing.upstreamPriceUsdMicros !==
+            candidate.upstreamPriceUsdMicros ||
+            (existing.httpMethod != null &&
+              candidate.httpMethod != null &&
+              existing.httpMethod !== candidate.httpMethod))
+        ) {
+          throw new PlatformError(
+            502,
+            "catalog_price_conflict",
+            "TikHub 价格目录包含相互冲突的重复端点，本次同步已停止。",
+          );
+        }
+        byPath.set(
+          path,
+          existing
+            ? {
+                ...existing,
+                httpMethod: existing.httpMethod ?? candidate.httpMethod,
+              }
+            : candidate,
+        );
+      } catch (error) {
+        if (
+          error instanceof PlatformError &&
+          (error.code === "catalog_price_conflict" ||
+            error.code === "catalog_price_method_invalid" ||
+            error.code === "catalog_price_value_invalid" ||
+            error.code === "catalog_price_schema_invalid")
+        ) {
+          throw error;
+        }
+        if (strictOfficialShape) {
+          throw new PlatformError(
+            502,
+            "catalog_price_schema_invalid",
+            "TikHub 正式价格目录包含无效端点路径，本次同步已停止。",
+          );
+        }
         // Ignore non-endpoint URLs and malformed catalog records.
       }
     }
-
-    for (const nested of Object.values(record)) visit(nested);
   };
 
-  visit(payload);
-  return [...byPath.values()];
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (!isPlainRecord(value)) return;
+    parseRecord(value, false);
+    for (const nested of Object.values(value)) visit(nested);
+  };
+
+  const officialRecords =
+    isPlainRecord(payload) &&
+    Array.isArray(payload.data) &&
+    payload.data.some(
+      (item) =>
+        isPlainRecord(item) &&
+        (Object.hasOwn(item, "endpoint_uri") ||
+          Object.hasOwn(item, "endpoint_cost")),
+    )
+      ? payload.data
+      : null;
+  if (officialRecords) {
+    for (const item of officialRecords) {
+      if (!isPlainRecord(item)) {
+        throw new PlatformError(
+          502,
+          "catalog_price_schema_invalid",
+          "TikHub 正式价格目录包含非对象记录，本次同步已停止。",
+        );
+      }
+      parseRecord(item, true);
+    }
+  } else {
+    visit(payload);
+  }
+  return {
+    entries: [...byPath.values()],
+    rawRecordCount,
+  };
+}
+
+function extractOpenApiVersion(payload: unknown): string | null {
+  if (
+    !isPlainRecord(payload) ||
+    !isPlainRecord(payload.info) ||
+    typeof payload.info.version !== "string"
+  ) {
+    return null;
+  }
+  return compactCatalogText(payload.info.version, 80);
 }
 
 function extractOpenApiCatalog(
@@ -8151,17 +8606,45 @@ function extractOpenApiCatalog(
   >();
   for (const [rawPath, pathItem] of Object.entries(payload.paths)) {
     if (!isPlainRecord(pathItem)) continue;
+    const documentedMethods = [
+      "get",
+      "post",
+      "put",
+      "patch",
+      "delete",
+      "head",
+      "options",
+      "trace",
+    ].filter((method) =>
+      isPlainRecord(pathItem[method]),
+    );
+    if (
+      documentedMethods.some(
+        (method) => method !== "get" && method !== "post",
+      )
+    ) {
+      throw new PlatformError(
+        502,
+        "catalog_openapi_method_unsupported",
+        "TikHub OpenAPI 出现 GET/POST 之外的操作，本次同步已停止。",
+      );
+    }
+    if (documentedMethods.length > 1) {
+      throw new PlatformError(
+        502,
+        "catalog_openapi_method_collision",
+        "TikHub OpenAPI 同一路径出现多个请求方法，当前目录模型无法安全区分。",
+      );
+    }
     let selected:
       | Omit<
           CatalogSyncEntry,
           "upstreamPriceUsdMicros" | "priceVerified"
         >
       | null = null;
-    let methodCount = 0;
     for (const method of ["get", "post"] as const) {
       const operation = pathItem[method];
       if (!isPlainRecord(operation)) continue;
-      methodCount += 1;
       try {
         const path = normalizeCatalogPath(rawPath);
         const httpMethod = method.toUpperCase() as "GET" | "POST";
@@ -8192,17 +8675,14 @@ function extractOpenApiCatalog(
       }
     }
     if (selected) {
-      byPath.set(selected.path, {
-        ...selected,
-        looksReadOnly: selected.looksReadOnly && methodCount === 1,
-      });
+      byPath.set(selected.path, selected);
     }
   }
   return byPath;
 }
 
 function mergeCatalogEntries(
-  prices: ReturnType<typeof extractCatalogPrices>,
+  prices: CatalogPriceEntry[],
   openApi: ReturnType<typeof extractOpenApiCatalog>,
   credentialScopes: string[] | null,
 ): CatalogSyncEntry[] {
@@ -8222,6 +8702,46 @@ function mergeCatalogEntries(
       priceVerified: methodMatches,
     };
   });
+}
+
+function catalogCoverageBreakdown(
+  prices: CatalogPriceEntry[],
+  openApi: ReturnType<typeof extractOpenApiCatalog>,
+  credentialScopes: string[] | null,
+): {
+  openApiPriceMapped: number;
+  priceOnly: number;
+  openApiOnly: number;
+  scopeExcluded: number;
+} {
+  const pricesByPath = new Map(prices.map((price) => [price.path, price]));
+  let openApiPriceMapped = 0;
+  let scopeExcluded = 0;
+  for (const metadata of openApi.values()) {
+    const price = pricesByPath.get(metadata.path);
+    if (
+      !price ||
+      (price.httpMethod != null &&
+        price.httpMethod !== metadata.httpMethod)
+    ) {
+      continue;
+    }
+    openApiPriceMapped += 1;
+    if (
+      !tikHubCredentialAllowsPath(
+        credentialScopes,
+        metadata.path,
+      )
+    ) {
+      scopeExcluded += 1;
+    }
+  }
+  return {
+    openApiPriceMapped,
+    priceOnly: prices.length - openApiPriceMapped,
+    openApiOnly: openApi.size - openApiPriceMapped,
+    scopeExcluded,
+  };
 }
 
 function compactCatalogText(value: unknown, maxLength: number): string | null {
@@ -8864,15 +9384,35 @@ function sortObjectDeep(value: unknown): unknown {
 }
 
 function containsUnsafeJsonNumber(value: unknown): boolean {
-  if (typeof value === "number") {
-    return (
-      !Number.isFinite(value) ||
-      (Number.isInteger(value) && !Number.isSafeInteger(value))
-    );
+  const stack: Array<{ value: unknown; depth: number }> = [
+    { value, depth: 0 },
+  ];
+  let visited = 0;
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) break;
+    visited += 1;
+    if (visited > 250_000 || current.depth > 64) return true;
+    if (typeof current.value === "number") {
+      if (
+        !Number.isFinite(current.value) ||
+        (Number.isInteger(current.value) &&
+          !Number.isSafeInteger(current.value))
+      ) {
+        return true;
+      }
+      continue;
+    }
+    const nested = Array.isArray(current.value)
+      ? current.value
+      : isPlainRecord(current.value)
+        ? Object.values(current.value)
+        : [];
+    for (const item of nested) {
+      stack.push({ value: item, depth: current.depth + 1 });
+    }
   }
-  if (Array.isArray(value)) return value.some(containsUnsafeJsonNumber);
-  if (!isPlainRecord(value)) return false;
-  return Object.values(value).some(containsUnsafeJsonNumber);
+  return false;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -8894,22 +9434,46 @@ function firstString(
   return null;
 }
 
-function firstNumber(
+function firstCatalogPriceUsdMicros(
   record: Record<string, unknown>,
   keys: string[],
-): number | null {
+): { present: boolean; usdMicros: number | null } {
   for (const key of keys) {
+    if (!Object.hasOwn(record, key)) continue;
     const value = record[key];
-    if (typeof value === "string" && value.trim() === "") continue;
-    if (
-      (typeof value === "number" || typeof value === "string") &&
-      value !== ""
-    ) {
-      const parsed = Number(value);
-      if (Number.isFinite(parsed)) return parsed;
+    if (typeof value === "number") {
+      if (!Number.isFinite(value) || value < 0 || value > 100) {
+        return { present: true, usdMicros: null };
+      }
+      const scaled = value * 1_000_000;
+      const rounded = Math.round(scaled);
+      if (
+        !Number.isSafeInteger(rounded) ||
+        Math.abs(scaled - rounded) > 0.000001 ||
+        (value > 0 && rounded === 0)
+      ) {
+        return { present: true, usdMicros: null };
+      }
+      return { present: true, usdMicros: Math.max(0, rounded) };
     }
+    if (typeof value === "string") {
+      const match =
+        /^(0|[1-9]\d{0,2})(?:\.(\d{1,6}))?$/.exec(value);
+      if (!match) return { present: true, usdMicros: null };
+      const whole = Number(match[1]);
+      const fraction = Number((match[2] ?? "").padEnd(6, "0"));
+      const usdMicros = whole * 1_000_000 + fraction;
+      return {
+        present: true,
+        usdMicros:
+          Number.isSafeInteger(usdMicros) && usdMicros <= 100_000_000
+            ? usdMicros
+            : null,
+      };
+    }
+    return { present: true, usdMicros: null };
   }
-  return null;
+  return { present: false, usdMicros: null };
 }
 
 function safeDecodeURIComponent(value: string): string | null {
