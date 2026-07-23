@@ -277,6 +277,54 @@ export const operationHeartbeats = sqliteTable("operation_heartbeats", {
   detailsJson: text("details_json"),
 });
 
+export const upstreamCredentials = sqliteTable(
+  "upstream_credentials",
+  {
+    id: text("id").primaryKey(),
+    provider: text("provider").notNull().default("tikhub"),
+    label: text("label").notNull(),
+    encryptedSecret: text("encrypted_secret").notNull(),
+    secretHash: text("secret_hash").notNull(),
+    verifiedScopesJson: text("verified_scopes_json"),
+    expiresAt: text("expires_at"),
+    verifiedAt: text("verified_at"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    lastUsedAt: text("last_used_at"),
+    revokedAt: text("revoked_at"),
+  },
+  (table) => [
+    uniqueIndex("upstream_credentials_provider_hash_unique").on(
+      table.provider,
+      table.secretHash,
+    ),
+    index("upstream_credentials_provider_created_idx").on(
+      table.provider,
+      table.createdAt,
+    ),
+  ],
+);
+
+export const upstreamCredentialState = sqliteTable(
+  "upstream_credential_state",
+  {
+    provider: text("provider").primaryKey(),
+    managedEnabled: integer("managed_enabled", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    activeCredentialId: text("active_credential_id").references(
+      () => upstreamCredentials.id,
+      { onDelete: "restrict" },
+    ),
+    version: integer("version").notNull().default(0),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("upstream_credential_state_active_unique").on(
+      table.activeCredentialId,
+    ),
+  ],
+);
+
 export const paymentRateLimitBuckets = sqliteTable(
   "payment_rate_limit_buckets",
   {
@@ -337,6 +385,10 @@ export const catalogSyncLocks = sqliteTable("catalog_sync_locks", {
 export const catalogSyncState = sqliteTable("catalog_sync_state", {
   id: integer("id").primaryKey(),
   lastSuccessGeneration: text("last_success_generation").notNull(),
+  credentialSource: text("credential_source"),
+  credentialId: text("credential_id"),
+  credentialFingerprint: text("credential_fingerprint"),
+  credentialStateVersion: integer("credential_state_version"),
   syncedAt: text("synced_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
@@ -159,6 +159,8 @@ const migrationFiles = [
   "drizzle/0006_needy_barracuda.sql",
   "drizzle/0007_ambiguous_colonel_america.sql",
   "drizzle/0008_good_apocalypse.sql",
+  "drizzle/0009_conscious_unicorn.sql",
+  "drizzle/0010_solid_wasp.sql",
 ];
 
 async function migrate(db, names = migrationFiles) {
@@ -174,18 +176,28 @@ function enableCatalogEndpoint(
   db,
   path = "/v1/tiktok/web/fetch_user_profile",
   customerPriceUsdMicros = 2000,
+  upstreamApiKey = "upstream-key",
 ) {
   const generation = "sync-test-complete";
+  const credentialFingerprint = createHash("sha256")
+    .update(upstreamApiKey)
+    .digest("hex")
+    .slice(0, 16);
   db.raw
     .prepare(
       `INSERT INTO catalog_sync_state
-       (id, last_success_generation, synced_at)
-       VALUES (1, ?, CURRENT_TIMESTAMP)
+       (id, last_success_generation, credential_source, credential_id,
+        credential_fingerprint, credential_state_version, synced_at)
+       VALUES (1, ?, 'environment', NULL, ?, 0, CURRENT_TIMESTAMP)
        ON CONFLICT(id) DO UPDATE SET
          last_success_generation = excluded.last_success_generation,
+         credential_source = excluded.credential_source,
+         credential_id = excluded.credential_id,
+         credential_fingerprint = excluded.credential_fingerprint,
+         credential_state_version = excluded.credential_state_version,
          synced_at = CURRENT_TIMESTAMP`,
     )
-    .run(generation);
+    .run(generation, credentialFingerprint);
   db.raw
     .prepare(
       `UPDATE endpoint_catalog
@@ -429,6 +441,302 @@ test("upgrades populated payment events through the auth and review migrations",
          WHERE name = 'resolution_request_hash'`,
       )
       .get()?.present,
+  );
+  const credentialState = db.raw
+    .prepare(
+      `SELECT managed_enabled, active_credential_id, version
+       FROM upstream_credential_state
+       WHERE provider = 'tikhub'`,
+    )
+    .get();
+  assert.equal(credentialState.managed_enabled, 0);
+  assert.equal(credentialState.active_credential_id, null);
+  assert.equal(credentialState.version, 0);
+  assert.ok(
+    db.raw
+      .prepare(
+        `SELECT 1 AS present
+         FROM pragma_table_info('catalog_sync_state')
+         WHERE name = 'credential_fingerprint'`,
+      )
+      .get()?.present,
+  );
+  assert.equal(
+    db.raw.prepare("PRAGMA foreign_key_check").all().length,
+    0,
+  );
+});
+
+test("encrypts, verifies, rotates and fail-closes managed TikHub credentials", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+
+  const adminSecret = "managed-upstream-admin-secret-32-minimum";
+  const managedApiKey = "tikhub-managed-secret-value-0001";
+  const legacyApiKey = "tikhub-legacy-environment-secret";
+  const encryptionKey = Buffer.alloc(32, 7).toString("base64url");
+  const env = baseEnv({
+    DB: db,
+    ADMIN_MASTER_SECRET: adminSecret,
+    TIKHUB_API_KEY: legacyApiKey,
+    TIKHUB_CREDENTIALS_ENCRYPTION_KEY: encryptionKey,
+    LEGAL_REVIEW_CONFIRMED: "true",
+    RESELLER_AUTHORIZED: "true",
+  });
+  const adminHeaders = {
+    authorization: `Bearer ${adminSecret}`,
+    origin: "http://localhost",
+    "content-type": "application/json",
+  };
+
+  const initialList = await fetchWorker(
+    "/api/admin/upstream-credentials",
+    {
+      headers: { authorization: `Bearer ${adminSecret}` },
+    },
+    env,
+  );
+  assert.equal(initialList.status, 200);
+  const initialData = await initialList.json();
+  assert.equal(initialData.activeSource, "environment");
+  assert.equal(initialData.managedEnabled, false);
+  assert.equal(initialData.stateVersion, 0);
+  assert.doesNotMatch(JSON.stringify(initialData), new RegExp(legacyApiKey));
+
+  const createdResponse = await fetchWorker(
+    "/api/admin/upstream-credentials",
+    {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({
+        label: "TikHub production",
+        apiKey: managedApiKey,
+        activate: false,
+        expectedVersion: 0,
+      }),
+    },
+    env,
+  );
+  assert.equal(createdResponse.status, 201);
+  const created = await createdResponse.json();
+  assert.equal(created.credential.status, "standby");
+  assert.equal(created.verified, false);
+  assert.equal(created.activationConflict, false);
+  assert.doesNotMatch(JSON.stringify(created), new RegExp(managedApiKey));
+
+  const stored = db.raw
+    .prepare(
+      `SELECT encrypted_secret, secret_hash
+       FROM upstream_credentials
+       WHERE id = ?`,
+    )
+    .get(created.credential.id);
+  assert.match(stored.encrypted_secret, /^v1\.[A-Za-z0-9_-]{16}\./);
+  assert.equal(stored.secret_hash.length, 64);
+  assert.doesNotMatch(stored.encrypted_secret, new RegExp(managedApiKey));
+
+  const nativeFetch = globalThis.fetch;
+  const upstreamAuthorizations = [];
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(
+      typeof input === "string" || input instanceof URL ? input : input.url,
+    );
+    upstreamAuthorizations.push(new Headers(init?.headers).get("authorization"));
+    if (url.pathname === "/api/v1/tikhub/user/get_user_info") {
+      return Response.json({
+        code: 200,
+        router: url.pathname,
+        api_key_data: {
+          api_key_name: "Managed test key",
+          api_key_scopes: ["/api/v1/tiktok/"],
+          created_at: "2026-07-01T00:00:00Z",
+          expires_at: "2030-07-01T00:00:00Z",
+          api_key_status: 1,
+        },
+        user_data: {
+          email: "owner@example.com",
+          balance: 50,
+          free_credit: 0,
+          email_verified: true,
+          account_disabled: false,
+          is_active: true,
+        },
+      });
+    }
+    if (url.pathname === "/api/v1/tikhub/user/get_all_endpoints_info") {
+      return Response.json({
+        data: [
+          {
+            path: "/v1/tiktok/web/fetch_user_profile",
+            method: "GET",
+            price: 0.001,
+          },
+        ],
+      });
+    }
+    if (url.pathname === "/openapi.json") {
+      return Response.json({
+        openapi: "3.1.0",
+        paths: {
+          "/api/v1/tiktok/web/fetch_user_profile": {
+            get: {
+              summary: "Fetch TikTok user profile",
+              parameters: [],
+            },
+          },
+        },
+      });
+    }
+    throw new Error(`Unexpected upstream URL ${url.href}`);
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const activateResponse = await fetchWorker(
+    "/api/admin/upstream-credentials",
+    {
+      method: "PATCH",
+      headers: adminHeaders,
+      body: JSON.stringify({
+        id: created.credential.id,
+        action: "activate",
+        expectedVersion: 0,
+      }),
+    },
+    env,
+  );
+  assert.equal(activateResponse.status, 200);
+  assert.equal((await activateResponse.json()).credential.status, "active");
+  assert.equal(
+    upstreamAuthorizations.at(-1),
+    `Bearer ${managedApiKey}`,
+  );
+
+  const staleActivation = await fetchWorker(
+    "/api/admin/upstream-credentials",
+    {
+      method: "PATCH",
+      headers: adminHeaders,
+      body: JSON.stringify({
+        id: created.credential.id,
+        action: "activate",
+        expectedVersion: 0,
+      }),
+    },
+    env,
+  );
+  assert.equal(staleActivation.status, 409);
+  assert.equal(
+    (await staleActivation.json()).error.code,
+    "upstream_credential_update_conflict",
+  );
+
+  const synced = await fetchWorker(
+    "/api/admin/catalog/sync",
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${adminSecret}` },
+    },
+    env,
+  );
+  assert.equal(synced.status, 200);
+  assert.equal((await synced.json()).priced, 1);
+  assert.equal(
+    upstreamAuthorizations.at(-2),
+    `Bearer ${managedApiKey}`,
+  );
+
+  const managedList = await fetchWorker(
+    "/api/admin/upstream-credentials",
+    {
+      headers: { authorization: `Bearer ${adminSecret}` },
+    },
+    env,
+  );
+  assert.equal(managedList.status, 200);
+  const managedData = await managedList.json();
+  assert.equal(managedData.activeSource, "managed");
+  assert.equal(managedData.stateVersion, 1);
+  assert.equal(managedData.credentials[0].status, "active");
+  const managedListText = JSON.stringify(managedData);
+  assert.doesNotMatch(managedListText, new RegExp(managedApiKey));
+  assert.doesNotMatch(managedListText, /encrypted_secret|secret_hash/);
+  assert.doesNotMatch(managedListText, new RegExp(stored.encrypted_secret));
+
+  const wrongKeyEnv = {
+    ...env,
+    TIKHUB_CREDENTIALS_ENCRYPTION_KEY: Buffer.alloc(32, 8).toString(
+      "base64url",
+    ),
+  };
+  const wrongKeyReadiness = await fetchWorker(
+    "/api/readiness",
+    {},
+    wrongKeyEnv,
+  );
+  assert.equal(wrongKeyReadiness.status, 503);
+  const wrongKeyData = await wrongKeyReadiness.json();
+  assert.equal(wrongKeyData.capabilities.upstreamConfigured, false);
+  assert.equal(wrongKeyData.capabilities.proxyEnabled, false);
+
+  const beforeProxyRows = db.raw
+    .prepare("SELECT COUNT(*) AS count FROM proxy_requests")
+    .get().count;
+  const wrongKeyProxy = await fetchWorker(
+    "/v1/tiktok/web/fetch_user_profile?uniqueId=blocked",
+    {
+      headers: {
+        authorization: "Bearer rb_live_not-used",
+        "idempotency-key": "managed-wrong-kek-proxy",
+      },
+    },
+    wrongKeyEnv,
+  );
+  assert.equal(wrongKeyProxy.status, 503);
+  assert.equal(
+    db.raw.prepare("SELECT COUNT(*) AS count FROM proxy_requests").get()
+      .count,
+    beforeProxyRows,
+  );
+
+  const revoked = await fetchWorker(
+    "/api/admin/upstream-credentials",
+    {
+      method: "PATCH",
+      headers: adminHeaders,
+      body: JSON.stringify({
+        id: created.credential.id,
+        action: "revoke",
+        expectedVersion: 1,
+      }),
+    },
+    env,
+  );
+  assert.equal(revoked.status, 200);
+  assert.equal((await revoked.json()).credential.status, "revoked");
+
+  const afterRevoke = await fetchWorker(
+    "/api/admin/upstream-credentials",
+    {
+      headers: { authorization: `Bearer ${adminSecret}` },
+    },
+    env,
+  );
+  assert.equal(afterRevoke.status, 200);
+  const afterRevokeData = await afterRevoke.json();
+  assert.equal(afterRevokeData.managedEnabled, true);
+  assert.equal(afterRevokeData.activeSource, "none");
+  assert.equal(afterRevokeData.activeCredentialId, null);
+  assert.equal(afterRevokeData.activeFingerprint, null);
+  assert.equal(afterRevokeData.stateVersion, 2);
+
+  const failClosedReadiness = await fetchWorker("/api/readiness", {}, env);
+  assert.equal(failClosedReadiness.status, 503);
+  assert.equal(
+    (await failClosedReadiness.json()).capabilities.upstreamConfigured,
+    false,
   );
 });
 
@@ -867,7 +1175,12 @@ test("creates hashed customer keys and proxies with idempotent billing", async (
   const user = db.raw
     .prepare("SELECT id FROM users WHERE email = ?")
     .get("owner@example.com");
-  enableCatalogEndpoint(db);
+  enableCatalogEndpoint(
+    db,
+    "/v1/tiktok/web/fetch_user_profile",
+    2000,
+    "upstream-secret",
+  );
 
   const noBalance = await fetchWorker(
     "/v1/tiktok/web/fetch_user_profile?uniqueId=no-balance",
@@ -1908,7 +2221,52 @@ test("holds paid failures for review and safely recovers a verified orphan payme
   assert.equal(reviews.length, 1);
   assert.equal(reviews[0].reason, "terminal_with_funds");
 
+  const unsafeReject = await fetchWorker(
+    "/api/admin/payment-reviews/resolve",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${paymentAdminSecret}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        caseId: reviews[0].id,
+        action: "reject",
+        note: "Funds are present, so rejection must remain blocked.",
+      }),
+    },
+    env,
+  );
+  assert.equal(unsafeReject.status, 409);
+  assert.equal(
+    (await unsafeReject.json()).error.code,
+    "payment_review_reject_not_safe",
+  );
+
   verifiedStatus = "finished";
+  const excessiveCredit = await fetchWorker(
+    "/api/admin/payment-reviews/resolve",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${paymentAdminSecret}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        caseId: reviews[0].id,
+        action: "credit",
+        creditUsdMicros: 10000000,
+        note: "This exceeds the verified proportional receipt.",
+      }),
+    },
+    env,
+  );
+  assert.equal(excessiveCredit.status, 400);
+  assert.equal(
+    (await excessiveCredit.json()).error.code,
+    "review_credit_exceeds_verified_payment",
+  );
+
   const resolveReview = () =>
     fetchWorker(
       "/api/admin/payment-reviews/resolve",
@@ -1969,6 +2327,102 @@ test("holds paid failures for review and safely recovers a verified orphan payme
     .get(`nowpayments-review:${reviews[0].id}:credit`);
   assert.equal(credits.count, 1);
   assert.equal(credits.balance, 2000000);
+});
+
+test("reopens a rejected payment review when provider later reports funds", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  db.raw
+    .prepare(
+      `INSERT INTO users (id, email, display_name)
+       VALUES ('usr-late-funds', 'late-funds@example.com', 'Late Funds')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO payment_orders
+       (id, user_id, provider, provider_payment_id, amount_usd_micros,
+        pay_currency, pay_amount, status)
+       VALUES ('pay_late_funds', 'usr-late-funds', 'nowpayments',
+               'np-late-funds', 10000000, 'usdttrc20', '10',
+               'manual_resolved')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO payment_review_cases
+       (id, order_id, provider_payment_id, reason, status, evidence_json,
+        resolution_action, resolution_request_hash, resolution_note,
+        resolution_reference, resolved_at)
+       VALUES ('prv_late_funds_case', 'pay_late_funds',
+               'np-late-funds', 'provider_data_mismatch', 'resolved', '{}',
+               'reject', 'late-funds-reject-hash',
+               'Provider previously reported zero funds.',
+               'nowpayments:np-late-funds:failed', CURRENT_TIMESTAMP)`,
+    )
+    .run();
+
+  const ipnSecret = "late-funds-ipn-secret";
+  const env = baseEnv({
+    DB: db,
+    NOWPAYMENTS_API_KEY: "provider-test-key",
+    NOWPAYMENTS_IPN_SECRET: ipnSecret,
+  });
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    Response.json({
+      payment_id: "np-late-funds",
+      payment_status: "finished",
+      order_id: "pay_late_funds",
+      price_amount: 10,
+      price_currency: "usd",
+      pay_amount: "10",
+      actually_paid: "1",
+      pay_currency: "usdttrc20",
+    });
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const payload = {
+    payment_id: "np-late-funds",
+    payment_status: "finished",
+    order_id: "pay_late_funds",
+  };
+  const webhook = await fetchWorker(
+    "/api/payments/nowpayments/ipn",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-nowpayments-sig": nowPaymentsSignature(ipnSecret, payload),
+      },
+      body: JSON.stringify(payload),
+    },
+    env,
+  );
+  assert.equal(webhook.status, 200);
+
+  const reopened = db.raw
+    .prepare(
+      `SELECT status, reason, resolution_action, resolved_at
+       FROM payment_review_cases
+       WHERE id = 'prv_late_funds_case'`,
+    )
+    .get();
+  assert.equal(reopened.status, "open");
+  assert.equal(reopened.reason, "funds_after_manual_rejection");
+  assert.equal(reopened.resolution_action, null);
+  assert.equal(reopened.resolved_at, null);
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT status FROM payment_orders WHERE id = 'pay_late_funds'`,
+      )
+      .get().status,
+    "manual_review",
+  );
 });
 
 test("reviews repeated deposits with null order ids and reverses only the refunded child credit", async (t) => {
@@ -2266,7 +2720,7 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
   const completed = await sync();
   assert.equal(completed.status, 200);
   assert.equal((await completed.json()).synced, 1);
-  assert.equal(upstreamReads, 4);
+  assert.equal(upstreamReads, 2);
   assert.equal(
     db.raw
       .prepare("SELECT COUNT(*) AS count FROM catalog_sync_locks")
