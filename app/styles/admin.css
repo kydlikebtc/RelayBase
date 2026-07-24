@@ -3572,3 +3572,555 @@
     animation: none;
   }
 }
+
+/* Warm editorial design-system pass */
+.admin-login-page,
+.admin-page {
+  background: var(--bg);
+}
+
+.admin-login-card {
+  border-color: var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: 0 24px 70px rgb(44 44 44 / 0.08);
+}
+
+.admin-login-card::before {
+  top: 22px;
+  right: 24px;
+  width: 48px;
+  height: 3px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--tan);
+  transform: none;
+}
+
+.admin-login-mark {
+  border: 0;
+  border-radius: 13px;
+  background: var(--accent);
+  box-shadow: none;
+  font-weight: 650;
+}
+
+.admin-login-card h1,
+.admin-topbar h1 {
+  font-size: clamp(38px, 5vw, 54px);
+  font-weight: 520;
+  letter-spacing: -0.04em;
+  line-height: 1.08;
+}
+
+.admin-login-intro {
+  color: var(--ink-2);
+}
+
+.admin-login-card form > label:first-child,
+.admin-toolbar label > span,
+.admin-price-editor label > span,
+.admin-catalog-batch-controls label > span,
+.admin-catalog-batch-confirmation label > span {
+  color: var(--ink-3);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+}
+
+.admin-login-card input[type="password"],
+.admin-toolbar input,
+.admin-toolbar select,
+.admin-price-editor input,
+.admin-catalog-batch-controls input,
+.admin-catalog-batch-controls select,
+.admin-catalog-batch-confirmation input,
+.admin-upstream-config-grid input,
+.admin-upstream-config-grid select,
+.admin-upstream-config-grid textarea,
+.admin-upstream-form > label:not(.admin-memory-option) input,
+.admin-pending-catalog-toolbar input,
+.admin-pending-price-control input,
+.admin-review-dialog input,
+.admin-review-dialog textarea {
+  border-color: var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.admin-login-card input[type="password"]:focus,
+.admin-toolbar input:focus,
+.admin-toolbar select:focus,
+.admin-price-editor input:focus,
+.admin-catalog-batch-controls input:focus,
+.admin-catalog-batch-controls select:focus,
+.admin-catalog-batch-confirmation input:focus,
+.admin-upstream-config-grid input:focus,
+.admin-upstream-config-grid select:focus,
+.admin-upstream-config-grid textarea:focus,
+.admin-pending-catalog-toolbar input:focus,
+.admin-pending-price-control input:focus,
+.admin-review-dialog input:focus,
+.admin-review-dialog textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgb(196 148 106 / 0.12);
+}
+
+.admin-memory-option input {
+  accent-color: var(--accent);
+}
+
+.admin-form-error {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--border));
+  border-radius: 10px;
+  color: #74453f;
+  background: #f9eeeb;
+}
+
+.admin-security-note {
+  border-color: var(--border);
+  border-radius: 11px;
+  background: var(--bg-alt);
+}
+
+.admin-shell {
+  max-width: var(--max-width);
+  padding-top: 52px;
+}
+
+.admin-eyebrow {
+  color: var(--ink-3);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+}
+
+.admin-readiness,
+.admin-account-status,
+.admin-payment-status,
+.admin-method,
+.admin-platform,
+.admin-http-status,
+.admin-pending-status,
+.admin-catalog-batch-status,
+.admin-catalog-batch-item-result {
+  border: 0;
+  border-radius: 999px;
+}
+
+.admin-readiness {
+  color: #725b34;
+  background: #faf4e8;
+}
+
+.admin-readiness i {
+  border: 0;
+}
+
+.admin-readiness.is-ready {
+  color: #46633e;
+  background: #f0f5ed;
+}
+
+.admin-tabs {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-alt);
+}
+
+.admin-tabs button {
+  min-height: 48px;
+  border: 0;
+  border-radius: 10px;
+  color: var(--ink-2);
+  background: transparent;
+  font-weight: 600;
+}
+
+.admin-tabs button:hover {
+  background: var(--surface);
+}
+
+.admin-tabs button.is-active {
+  color: white;
+  background: var(--charcoal);
+}
+
+.admin-tabs button.is-active::after {
+  display: none;
+}
+
+.admin-tabs button span {
+  border: 0;
+  color: white;
+  background: var(--danger);
+}
+
+.admin-notice,
+.admin-readiness-alert,
+.admin-pending-catalog-warning,
+.admin-catalog-batch-alert,
+.admin-catalog-proof-missing {
+  border-color: color-mix(in srgb, var(--warning) 28%, var(--border));
+  border-radius: 11px;
+  color: #725b34;
+  background: #faf4e8;
+}
+
+.admin-notice > span {
+  border: 0;
+  color: white;
+  background: var(--accent);
+}
+
+.admin-section {
+  margin-top: 48px;
+}
+
+.admin-section-head {
+  border-bottom-color: var(--border);
+}
+
+.admin-section-head h2 {
+  font-size: clamp(28px, 4vw, 40px);
+  font-weight: 520;
+  letter-spacing: -0.03em;
+}
+
+.admin-state,
+.admin-empty {
+  border-color: var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.admin-state-error {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--border));
+  background: #f9eeeb;
+}
+
+.admin-upstream-config-card,
+.admin-upstream-strip,
+.admin-upstream-form,
+.admin-upstream-credential,
+.admin-panel,
+.admin-pending-catalog,
+.admin-catalog-proof,
+.admin-catalog-batch,
+.admin-catalog-batch-receipt,
+.admin-user-card,
+.admin-endpoint-card,
+.admin-review-queue,
+.admin-review-case,
+.admin-payment-card,
+.admin-dialog {
+  border-color: var(--border);
+  border-radius: 15px;
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.admin-upstream-config-card,
+.admin-pending-catalog,
+.admin-catalog-batch,
+.admin-review-queue {
+  border-top: 3px solid var(--tan);
+}
+
+.admin-upstream-config-head h3,
+.admin-upstream-form h3,
+.admin-pending-catalog-head h3,
+.admin-catalog-batch-head h3,
+.admin-review-queue-head h3,
+.admin-payment-records-head h3,
+.admin-panel-head h3,
+.admin-dialog h2 {
+  font-weight: 620;
+}
+
+.admin-upstream-config-status span,
+.admin-upstream-config-status span.is-enabled,
+.admin-upstream-strip > div > span,
+.admin-upstream-strip > div > span.is-configured,
+.admin-endpoint-flags span,
+.admin-endpoint-taxonomy span {
+  border: 0;
+  border-radius: 999px;
+}
+
+.admin-upstream-config-status span.is-enabled,
+.admin-upstream-strip > div > span.is-configured,
+.admin-account-status.is-active,
+.admin-payment-status.is-finished {
+  color: white;
+  background: var(--green);
+}
+
+.admin-upstream-config-grid input,
+.admin-upstream-config-grid select,
+.admin-upstream-config-grid textarea {
+  background: var(--bg);
+}
+
+.admin-upstream-config-impact,
+.admin-security-note,
+.admin-endpoint-safety-reasons,
+.admin-endpoint-details,
+.admin-review-evidence,
+.admin-catalog-batch-digests,
+.admin-catalog-batch-apply-result {
+  border-color: var(--border);
+  border-radius: 11px;
+  background: var(--bg-alt);
+}
+
+.admin-upstream-strip {
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.admin-upstream-strip dl,
+.admin-user-card dl,
+.admin-payment-card dl,
+.admin-review-case > dl,
+.admin-review-dialog > dl,
+.admin-price-editor dl,
+.admin-endpoint-taxonomy {
+  border-color: var(--border);
+}
+
+.admin-upstream-strip dl > div,
+.admin-user-card dl > div,
+.admin-payment-card dl > div,
+.admin-review-case > dl > div,
+.admin-review-dialog > dl > div,
+.admin-price-editor dl > div {
+  border-color: var(--border);
+}
+
+.admin-upstream-source-grid {
+  gap: 12px;
+  border: 0;
+}
+
+.admin-upstream-source-grid article {
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--tan);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.admin-upstream-source-grid strong {
+  font-weight: 380;
+}
+
+.admin-upstream-credential.is-active,
+.admin-endpoint-card.is-enabled {
+  border-color: color-mix(in srgb, var(--green) 36%, var(--border));
+}
+
+.admin-metrics {
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  border: 0;
+}
+
+.admin-metrics article {
+  min-height: 150px;
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--tan);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.admin-metrics article:nth-child(2) {
+  border-top-color: var(--brown);
+}
+
+.admin-metrics article:nth-child(3) {
+  border-top-color: var(--green);
+}
+
+.admin-metrics article:nth-child(4) {
+  border-top-color: var(--charcoal);
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.admin-metrics article:nth-child(4) span,
+.admin-metrics article:nth-child(4) small {
+  color: var(--ink-3);
+}
+
+.admin-metrics strong {
+  font-weight: 360;
+  letter-spacing: -0.04em;
+}
+
+.admin-panel-head,
+.admin-pending-catalog-head,
+.admin-catalog-batch-head,
+.admin-review-queue-head,
+.admin-payment-records-head {
+  border-bottom-color: var(--border);
+}
+
+.admin-index {
+  border: 0;
+  color: var(--accent);
+  background: transparent;
+  font-size: 28px;
+  font-weight: 300;
+}
+
+.admin-table-wrap,
+.admin-pending-catalog-table-wrap,
+.admin-catalog-batch-table-wrap {
+  border-color: var(--border);
+}
+
+.admin-table th,
+.admin-pending-catalog-table th {
+  color: var(--ink-3);
+  background: var(--bg-alt);
+  font-weight: 600;
+}
+
+.admin-table th,
+.admin-table td,
+.admin-pending-catalog-table th,
+.admin-pending-catalog-table td,
+.admin-catalog-batch-table th,
+.admin-catalog-batch-table td {
+  border-color: var(--border);
+}
+
+.admin-platform {
+  color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+.admin-method,
+.admin-http-status.is-success {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 10%, var(--surface));
+}
+
+.admin-toolbar,
+.admin-pending-catalog-toolbar,
+.admin-catalog-batch-selector,
+.admin-catalog-batch-controls,
+.admin-catalog-batch-confirmation,
+.admin-price-editor {
+  border-color: var(--border);
+  border-radius: 11px;
+  background: var(--bg-alt);
+}
+
+.admin-catalog-batch-counts,
+.admin-catalog-batch-totals {
+  gap: 10px;
+  border: 0;
+}
+
+.admin-catalog-batch-counts article,
+.admin-catalog-batch-totals > div {
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface);
+}
+
+.admin-catalog-batch-counts strong,
+.admin-catalog-batch-totals strong {
+  font-weight: 380;
+}
+
+.admin-user-card,
+.admin-endpoint-card,
+.admin-review-case,
+.admin-payment-card {
+  transition:
+    border-color 160ms ease,
+    transform 160ms ease;
+}
+
+.admin-user-card:hover,
+.admin-endpoint-card:hover,
+.admin-review-case:hover,
+.admin-payment-card:hover {
+  border-color: var(--tan);
+  transform: translateY(-1px);
+}
+
+.admin-user-identity > span {
+  border: 0;
+  border-radius: 10px;
+  color: white;
+  background: var(--accent);
+}
+
+.admin-endpoint-head code,
+.admin-review-identifiers,
+.admin-payment-refs {
+  border-color: var(--border);
+  border-radius: 9px;
+  background: var(--bg-alt);
+}
+
+.admin-endpoint-details pre,
+.admin-review-evidence pre,
+.admin-catalog-batch-apply-result pre {
+  border-color: #403c37;
+  border-radius: 9px;
+  color: #e8e3dc;
+  background: var(--code);
+}
+
+.admin-dialog-backdrop {
+  background: rgb(44 44 44 / 0.38);
+  backdrop-filter: blur(6px);
+}
+
+.admin-dialog {
+  box-shadow: 0 24px 80px rgb(44 44 44 / 0.2);
+}
+
+.admin-button-danger,
+.admin-button-danger-ghost {
+  border-color: var(--danger);
+  color: white;
+  background: var(--danger);
+}
+
+.admin-button-danger-ghost {
+  color: var(--danger);
+  background: transparent;
+}
+
+@media (max-width: 820px) {
+  .admin-shell {
+    padding-top: 42px;
+  }
+
+  .admin-tabs {
+    overflow-x: auto;
+    grid-template-columns: repeat(5, minmax(136px, 1fr));
+  }
+
+  .admin-metrics {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 620px) {
+  .admin-login-card h1,
+  .admin-topbar h1 {
+    font-size: 40px;
+    font-weight: 560;
+  }
+
+  .admin-section-head h2 {
+    font-weight: 560;
+  }
+}
