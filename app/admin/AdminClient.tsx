@@ -2140,28 +2140,28 @@ function CatalogBatchReceipt({
               {response.items.map((item) => (
                 <tr key={item.path}>
                   <td>
-                    <span className="admin-platform">{item.platform}</span>
-                    <span className="admin-method">{item.method}</span>
-                    <code title={item.path}>{item.path}</code>
+                    <div className="admin-route-primary">
+                      <span className="admin-method">{item.method}</span>
+                      <code title={item.path}>{item.path}</code>
+                    </div>
                     <small>
-                      {catalogDataTypeLabel(item.dataType)} ({item.dataType}) ·{" "}
+                      {item.platform} · {catalogDataTypeLabel(item.dataType)} ·{" "}
                       {catalogSurfaceLabel(item.surface)}
                     </small>
-                    {item.tags.length ? (
-                      <small title={item.tags.join(" · ")}>
-                        标签 {item.tags.join(" · ")}
-                      </small>
-                    ) : null}
-                    {item.operationId ? (
-                      <small title={item.operationId}>
-                        operationId {item.operationId}
-                      </small>
-                    ) : null}
-                    <small>
-                      revision {item.expectedRevision} ·{" "}
-                      {item.itemDigest.slice(0, 12)}
-                    </small>
-                    {item.summary ? <small>{item.summary}</small> : null}
+                    <details className="admin-pending-row-details">
+                      <summary>技术信息</summary>
+                      {item.summary ? <span>{item.summary}</span> : null}
+                      <span>
+                        operationId {item.operationId ?? "未提供"}
+                      </span>
+                      <span>
+                        revision {item.expectedRevision} ·{" "}
+                        {item.itemDigest.slice(0, 12)}
+                      </span>
+                      {item.tags.length ? (
+                        <span>标签 {item.tags.join(" · ")}</span>
+                      ) : null}
+                    </details>
                   </td>
                   <td>
                     <strong>
@@ -5434,12 +5434,10 @@ export function AdminClient() {
                         <table className="admin-pending-catalog-table">
                           <thead>
                             <tr>
-                              <th>路径</th>
-                              <th>平台</th>
-                              <th>数据类型 / 入口</th>
+                              <th>待同步服务</th>
+                              <th>平台 / 分类</th>
                               <th>成本</th>
                               <th>客户价</th>
-                              <th>速率</th>
                               <th>状态</th>
                             </tr>
                           </thead>
@@ -5464,22 +5462,36 @@ export function AdminClient() {
                                       {endpoint.path}
                                     </code>
                                     <small>{endpoint.summary}</small>
+                                    <details className="admin-pending-row-details">
+                                      <summary>技术信息</summary>
+                                      <span>
+                                        调用入口：
+                                        {catalogSurfaceLabel(endpoint.surface)}
+                                      </span>
+                                      <span>
+                                        速率：
+                                        {endpoint.rateLimitRps === null
+                                          ? "未提供"
+                                          : `${endpoint.rateLimitRps.toLocaleString(
+                                              "en-US",
+                                              {
+                                                maximumFractionDigits: 3,
+                                              },
+                                            )} RPS`}
+                                      </span>
+                                      <span>
+                                        {endpoint.rateLimit ??
+                                          "无原始速率说明"}
+                                      </span>
+                                    </details>
                                   </td>
                                   <td>
                                     <strong>{endpoint.platform}</strong>
-                                  </td>
-                                  <td>
-                                    <span>
+                                    <small>
                                       {catalogDataTypeLabel(
                                         endpoint.dataType,
-                                      )}{" "}
-                                      <code>{endpoint.dataType}</code>
-                                    </span>
-                                    <small>
-                                      {catalogSurfaceLabel(
-                                        endpoint.surface,
-                                      )}{" "}
-                                      / {endpoint.surface}
+                                      )}{" · "}
+                                      {catalogSurfaceLabel(endpoint.surface)}
                                     </small>
                                   </td>
                                   <td>
@@ -5539,22 +5551,6 @@ export function AdminClient() {
                                         不得低于成本，最多 6 位小数
                                       </small>
                                     ) : null}
-                                  </td>
-                                  <td>
-                                    <strong>
-                                      {endpoint.rateLimitRps === null
-                                        ? "未提供"
-                                        : `${endpoint.rateLimitRps.toLocaleString(
-                                            "en-US",
-                                            {
-                                              maximumFractionDigits: 3,
-                                            },
-                                          )} RPS`}
-                                    </strong>
-                                    <small>
-                                      {endpoint.rateLimit ??
-                                        "无原始速率说明"}
-                                    </small>
                                   </td>
                                   <td>
                                     <span className="admin-pending-status">
@@ -5820,74 +5816,6 @@ export function AdminClient() {
                           </select>
                         </label>
                         <label>
-                          <span>数据类型</span>
-                          <select
-                            value={catalogDataType}
-                            onChange={(event) => {
-                              const value = event.target.value;
-                              if (
-                                value === "all" ||
-                                isCatalogDataType(value)
-                              ) {
-                                setCatalogDataType(value);
-                              }
-                            }}
-                          >
-                            <option value="all">全部数据类型</option>
-                            {catalogDataTypes.map((dataType) => (
-                              <option value={dataType} key={dataType}>
-                                {catalogDataTypeLabel(dataType)} · {dataType}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <label>
-                          <span>标签（精确匹配）</span>
-                          <select
-                            value={catalogTag ?? ""}
-                            onChange={(event) => {
-                              const value = event.target.value;
-                              if (value === "") {
-                                setCatalogTag(null);
-                              } else if (isCatalogTag(value)) {
-                                setCatalogTag(value);
-                              }
-                            }}
-                          >
-                            <option value="">全部标签</option>
-                            {catalogTags.map((tag) => (
-                              <option
-                                value={tag}
-                                key={normalizeCatalogTagKey(tag)}
-                              >
-                                {tag}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <label>
-                          <span>调用入口</span>
-                          <select
-                            value={catalogSurface}
-                            onChange={(event) => {
-                              const value = event.target.value;
-                              if (
-                                value === "all" ||
-                                isCatalogSurface(value)
-                              ) {
-                                setCatalogSurface(value);
-                              }
-                            }}
-                          >
-                            <option value="all">全部入口</option>
-                            {catalogSurfaces.map((surface) => (
-                              <option value={surface} key={surface}>
-                                {catalogSurfaceLabel(surface)} · {surface}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <label>
                           <span>上架状态</span>
                           <select
                             value={catalogStatus}
@@ -5923,6 +5851,86 @@ export function AdminClient() {
                             <option value="prohibited">禁止公开</option>
                           </select>
                         </label>
+                        <details className="admin-catalog-advanced-filters">
+                          <summary>
+                            更多筛选
+                            {catalogDataType !== "all" ||
+                            catalogTag !== null ||
+                            catalogSurface !== "all"
+                              ? " · 已启用"
+                              : ""}
+                          </summary>
+                          <div>
+                            <label>
+                              <span>数据类型</span>
+                              <select
+                                value={catalogDataType}
+                                onChange={(event) => {
+                                  const value = event.target.value;
+                                  if (
+                                    value === "all" ||
+                                    isCatalogDataType(value)
+                                  ) {
+                                    setCatalogDataType(value);
+                                  }
+                                }}
+                              >
+                                <option value="all">全部数据类型</option>
+                                {catalogDataTypes.map((dataType) => (
+                                  <option value={dataType} key={dataType}>
+                                    {catalogDataTypeLabel(dataType)} · {dataType}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label>
+                              <span>标签</span>
+                              <select
+                                value={catalogTag ?? ""}
+                                onChange={(event) => {
+                                  const value = event.target.value;
+                                  if (value === "") {
+                                    setCatalogTag(null);
+                                  } else if (isCatalogTag(value)) {
+                                    setCatalogTag(value);
+                                  }
+                                }}
+                              >
+                                <option value="">全部标签</option>
+                                {catalogTags.map((tag) => (
+                                  <option
+                                    value={tag}
+                                    key={normalizeCatalogTagKey(tag)}
+                                  >
+                                    {tag}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label>
+                              <span>调用入口</span>
+                              <select
+                                value={catalogSurface}
+                                onChange={(event) => {
+                                  const value = event.target.value;
+                                  if (
+                                    value === "all" ||
+                                    isCatalogSurface(value)
+                                  ) {
+                                    setCatalogSurface(value);
+                                  }
+                                }}
+                              >
+                                <option value="all">全部入口</option>
+                                {catalogSurfaces.map((surface) => (
+                                  <option value={surface} key={surface}>
+                                    {catalogSurfaceLabel(surface)} · {surface}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+                        </details>
                         <p>
                           本地显示{" "}
                           <strong>{visibleEndpoints.length}</strong> /{" "}
@@ -6071,288 +6079,262 @@ export function AdminClient() {
                   catalogView === "pricing" ? (
                     <>
                   {visibleEndpoints.length ? (
-                    <div className="admin-catalog-list">
-                      {visibleEndpoints.map((endpoint) => {
-                        const draft = priceDrafts[endpoint.path] ?? "";
-                        const parsedDraft = parseUsdInput(draft);
-                        const priceChanged =
-                          parsedDraft !== null &&
-                          parsedDraft !== endpoint.customerPriceUsdMicros;
-                        const invalidPrice =
-                          parsedDraft === null ||
-                          parsedDraft < endpoint.upstreamPriceUsdMicros;
-                        const margin =
-                          endpoint.customerPriceUsdMicros -
-                          endpoint.upstreamPriceUsdMicros;
-                        return (
-                          <article
-                            className={`admin-endpoint-card ${
-                              endpoint.enabled ? "is-enabled" : ""
-                            }`}
-                            key={endpoint.path}
-                          >
-                            <div className="admin-endpoint-head">
-                              <div>
-                                <span className="admin-platform">
-                                  {endpoint.platform}
-                                </span>
-                                <span className="admin-method">
-                                  {endpoint.method}
-                                </span>
-                                <code>{endpoint.path}</code>
-                              </div>
-                              <div className="admin-endpoint-flags">
-                                <span
-                                  className={`admin-safety-badge is-${endpoint.safetyClassification}`}
-                                  title={
-                                    endpoint.safetyReasons.length
-                                      ? endpoint.safetyReasons.join("；")
-                                      : "服务端未返回补充安全依据"
-                                  }
-                                >
-                                  {catalogSafetyLabel(
-                                    endpoint.safetyClassification,
-                                  )}{" "}
-                                  / policy v{endpoint.safetyPolicyVersion}
-                                </span>
-                                <span
-                                  className={
-                                    endpoint.presentInLatestSync
-                                      ? "is-current"
-                                      : "is-stale"
-                                  }
-                                >
-                                  {endpoint.presentInLatestSync
-                                    ? "本次同步存在"
-                                    : "上游已缺失"}
-                                </span>
-                                <span>
-                                  {endpoint.readOnly
-                                    ? "只读已复核"
-                                    : "未确认只读"}
-                                </span>
-                                <span
-                                  className={
-                                    endpoint.priceVerified
-                                      ? "is-current"
-                                      : "is-stale"
-                                  }
-                                >
-                                  {endpoint.priceVerified
-                                    ? "成本已核验"
-                                    : "等待成本"}
-                                </span>
-                              </div>
-                            </div>
-                            <div className="admin-endpoint-taxonomy">
-                              <span>
-                                数据类型{" "}
-                                <strong>
-                                  {catalogDataTypeLabel(endpoint.dataType)}
-                                </strong>{" "}
-                                <code>{endpoint.dataType}</code>
-                              </span>
-                              <span>
-                                入口{" "}
-                                <strong>
-                                  {catalogSurfaceLabel(endpoint.surface)}
-                                </strong>{" "}
-                                <code>{endpoint.surface}</code>
-                              </span>
-                              <span title={endpoint.tags.join(" · ")}>
-                                标签{" "}
-                                <strong>
-                                  {endpoint.tags.length
-                                    ? endpoint.tags.join(" · ")
-                                    : "无"}
-                                </strong>
-                              </span>
-                              <span title={endpoint.operationId ?? undefined}>
-                                operationId{" "}
-                                <code>{endpoint.operationId ?? "未提供"}</code>
-                              </span>
-                            </div>
-                            {endpoint.safetyReasons.length ? (
-                              <div className="admin-endpoint-safety-reasons">
-                                <span>安全分类依据</span>
-                                <ul>
-                                  {endpoint.safetyReasons.map(
-                                    (reason, index) => (
-                                      <li key={`${reason}-${index}`}>
-                                        <code>{reason}</code>
-                                      </li>
-                                    ),
-                                  )}
-                                </ul>
-                              </div>
-                            ) : null}
-                            {endpoint.summary ||
-                            endpoint.description ||
-                            endpoint.parameterSchema !== null ? (
-                              <details className="admin-endpoint-details">
-                                <summary>
-                                  <span>
-                                    {endpoint.summary ?? "查看接口数据定义"}
-                                  </span>
-                                  <b>展开详情</b>
-                                </summary>
-                                {endpoint.description ? (
-                                  <p>{endpoint.description}</p>
-                                ) : null}
-                                {endpoint.parameterSchema !== null ? (
-                                  <div>
-                                    <span>参数与数据类型</span>
-                                    <pre>
-                                      {JSON.stringify(
-                                        endpoint.parameterSchema,
-                                        null,
-                                        2,
-                                      )}
-                                    </pre>
+                    <div className="admin-table-wrap admin-route-list-wrap">
+                      <table className="admin-table admin-route-list">
+                        <thead>
+                          <tr>
+                            <th>路由</th>
+                            <th>平台 / 分类</th>
+                            <th>成本</th>
+                            <th>客户价</th>
+                            <th>毛利</th>
+                            <th>校验</th>
+                            <th>状态</th>
+                            <th>操作</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {visibleEndpoints.map((endpoint) => {
+                            const draft = priceDrafts[endpoint.path] ?? "";
+                            const parsedDraft = parseUsdInput(draft);
+                            const priceChanged =
+                              parsedDraft !== null &&
+                              parsedDraft !== endpoint.customerPriceUsdMicros;
+                            const invalidPrice =
+                              parsedDraft === null ||
+                              parsedDraft < endpoint.upstreamPriceUsdMicros;
+                            const margin =
+                              endpoint.customerPriceUsdMicros -
+                              endpoint.upstreamPriceUsdMicros;
+                            return (
+                              <tr key={endpoint.path}>
+                                <td className="admin-route-cell">
+                                  <div className="admin-route-primary">
+                                    <span className="admin-method">
+                                      {endpoint.method}
+                                    </span>
+                                    <code title={endpoint.path}>
+                                      {endpoint.path}
+                                    </code>
                                   </div>
-                                ) : (
-                                  <p>上游目录未提供结构化参数定义。</p>
-                                )}
-                              </details>
-                            ) : null}
-                            {catalogView === "pricing" ? (
-                              <div className="admin-price-editor">
-                                <dl>
-                                  <div>
-                                    <dt>上游成本 / 次</dt>
-                                    <dd>
-                                      {formatUsd(
-                                        endpoint.upstreamPriceUsdMicros,
-                                        6,
-                                      )}
-                                    </dd>
-                                  </div>
-                                  <div>
-                                    <dt>当前毛利 / 次</dt>
-                                    <dd>{formatUsd(margin, 6)}</dd>
-                                  </div>
-                                </dl>
-                                <label>
-                                  <span>客户价 / 次（USD）</span>
-                                  <div>
-                                    <b>$</b>
-                                    <input
-                                      inputMode="decimal"
-                                      value={draft}
-                                      aria-invalid={invalidPrice}
-                                      onChange={(event) =>
-                                        setPriceDrafts((current) => ({
-                                          ...current,
-                                          [endpoint.path]: event.target.value,
-                                        }))
-                                      }
-                                    />
-                                    <button
-                                      className="button button-blue button-small"
-                                      disabled={
-                                        savingPath === endpoint.path ||
-                                        invalidPrice ||
-                                        !priceChanged
-                                      }
-                                      onClick={() =>
-                                        void saveEndpointPrice(endpoint)
-                                      }
-                                    >
-                                      {savingPath === endpoint.path
-                                        ? "保存中"
-                                        : "保存价格"}
-                                    </button>
-                                  </div>
-                                  {invalidPrice ? (
-                                    <small>
-                                      最多 6 位小数，且不得低于上游成本。
+                                  {endpoint.summary ? (
+                                    <small title={endpoint.summary}>
+                                      {endpoint.summary}
                                     </small>
                                   ) : null}
-                                </label>
-                              </div>
-                            ) : (
-                              <dl className="admin-route-price-summary">
-                                <div>
-                                  <dt>上游成本 / 次</dt>
-                                  <dd>
+                                  <details className="admin-route-row-details">
+                                    <summary>接口详情</summary>
+                                    <div className="admin-route-detail-grid">
+                                      <p>
+                                        <span>operationId</span>
+                                        <code>
+                                          {endpoint.operationId ?? "未提供"}
+                                        </code>
+                                      </p>
+                                      <p>
+                                        <span>标签</span>
+                                        <strong>
+                                          {endpoint.tags.length
+                                            ? endpoint.tags.join(" · ")
+                                            : "无"}
+                                        </strong>
+                                      </p>
+                                      <p>
+                                        <span>安全策略</span>
+                                        <strong>
+                                          {catalogSafetyLabel(
+                                            endpoint.safetyClassification,
+                                          )}{" "}
+                                          · v{endpoint.safetyPolicyVersion}
+                                        </strong>
+                                      </p>
+                                      <p>
+                                        <span>Revision</span>
+                                        <strong>{endpoint.revision}</strong>
+                                      </p>
+                                    </div>
+                                    {endpoint.description ? (
+                                      <p className="admin-route-description">
+                                        {endpoint.description}
+                                      </p>
+                                    ) : null}
+                                    {endpoint.safetyReasons.length ? (
+                                      <p className="admin-route-description">
+                                        安全依据：
+                                        {endpoint.safetyReasons.join("；")}
+                                      </p>
+                                    ) : null}
+                                    {endpoint.parameterSchema !== null ? (
+                                      <pre>
+                                        {JSON.stringify(
+                                          endpoint.parameterSchema,
+                                          null,
+                                          2,
+                                        )}
+                                      </pre>
+                                    ) : null}
+                                  </details>
+                                </td>
+                                <td>
+                                  <strong>{endpoint.platform}</strong>
+                                  <small>
+                                    {catalogDataTypeLabel(endpoint.dataType)} ·{" "}
+                                    {catalogSurfaceLabel(endpoint.surface)}
+                                  </small>
+                                </td>
+                                <td>
+                                  <strong>
                                     {formatUsd(
                                       endpoint.upstreamPriceUsdMicros,
                                       6,
                                     )}
-                                  </dd>
-                                </div>
-                                <div>
-                                  <dt>客户价 / 次</dt>
-                                  <dd>
-                                    {formatUsd(
-                                      endpoint.customerPriceUsdMicros,
-                                      6,
-                                    )}
-                                  </dd>
-                                </div>
-                                <div>
-                                  <dt>当前毛利 / 次</dt>
-                                  <dd>{formatUsd(margin, 6)}</dd>
-                                </div>
-                              </dl>
-                            )}
-                            <footer>
-                              <div>
-                                <span
-                                  className={`admin-account-status ${
-                                    endpoint.enabled
-                                      ? "is-active"
-                                      : "is-suspended"
-                                  }`}
-                                >
-                                  {endpoint.enabled ? "已上架" : "已下架"}
-                                </span>
-                                <small>
-                                  审核：{formatDate(endpoint.reviewedAt)}
-                                </small>
-                              </div>
-                              {catalogView === "pricing" ? (
-                                <button
-                                  className={`button button-small ${
-                                    endpoint.enabled
-                                      ? "admin-button-danger-ghost"
-                                      : "button-dark"
-                                  }`}
-                                  disabled={
-                                    !endpoint.enabled &&
-                                    (!endpoint.presentInLatestSync ||
-                                      !endpoint.priceVerified ||
-                                      endpoint.safetyClassification !==
-                                        "safe_data_read" ||
-                                      endpoint.safetyPolicyVersion !==
-                                        CATALOG_SAFETY_POLICY_VERSION ||
-                                      invalidPrice)
-                                  }
-                                  onClick={() =>
-                                    setConfirmAction({
-                                      kind: "endpoint",
-                                      endpoint,
-                                      nextEnabled: !endpoint.enabled,
-                                    })
-                                  }
-                                >
-                                  {endpoint.enabled
-                                    ? "下架接口"
-                                    : "审核并上架"}
-                                </button>
-                              ) : (
-                                <button
-                                  className="button button-ghost button-small"
-                                  type="button"
-                                  onClick={() => setCatalogView("pricing")}
-                                >
-                                  进入定价发布
-                                </button>
-                              )}
-                            </footer>
-                          </article>
-                        );
-                      })}
+                                  </strong>
+                                  <small>/ 次</small>
+                                </td>
+                                <td>
+                                  {catalogView === "pricing" ? (
+                                    <div className="admin-route-price-control">
+                                      <span aria-hidden="true">$</span>
+                                      <input
+                                        inputMode="decimal"
+                                        value={draft}
+                                        aria-label={`${endpoint.path} 客户价（USD / 次）`}
+                                        aria-invalid={invalidPrice}
+                                        onChange={(event) =>
+                                          setPriceDrafts((current) => ({
+                                            ...current,
+                                            [endpoint.path]: event.target.value,
+                                          }))
+                                        }
+                                      />
+                                      <button
+                                        className="button button-blue button-small"
+                                        type="button"
+                                        disabled={
+                                          savingPath === endpoint.path ||
+                                          invalidPrice ||
+                                          !priceChanged
+                                        }
+                                        onClick={() =>
+                                          void saveEndpointPrice(endpoint)
+                                        }
+                                      >
+                                        {savingPath === endpoint.path
+                                          ? "保存中"
+                                          : "保存"}
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <strong>
+                                      {formatUsd(
+                                        endpoint.customerPriceUsdMicros,
+                                        6,
+                                      )}
+                                    </strong>
+                                  )}
+                                  {invalidPrice ? (
+                                    <small className="is-error">不得低于成本</small>
+                                  ) : null}
+                                </td>
+                                <td>
+                                  <strong
+                                    className={
+                                      margin < 0
+                                        ? "is-negative-balance"
+                                        : undefined
+                                    }
+                                  >
+                                    {formatUsd(margin, 6)}
+                                  </strong>
+                                </td>
+                                <td>
+                                  <div className="admin-route-checks">
+                                    <span
+                                      className={`admin-safety-badge is-${endpoint.safetyClassification}`}
+                                    >
+                                      {catalogSafetyLabel(
+                                        endpoint.safetyClassification,
+                                      )}
+                                    </span>
+                                    <small
+                                      className={
+                                        endpoint.presentInLatestSync &&
+                                        endpoint.priceVerified &&
+                                        endpoint.readOnly
+                                          ? "is-ok"
+                                          : "is-warning"
+                                      }
+                                    >
+                                      {endpoint.presentInLatestSync
+                                        ? endpoint.priceVerified
+                                          ? endpoint.readOnly
+                                            ? "同步 / 成本 / 只读已确认"
+                                            : "只读待确认"
+                                          : "成本待核验"
+                                        : "上游已缺失"}
+                                    </small>
+                                  </div>
+                                </td>
+                                <td>
+                                  <span
+                                    className={`admin-account-status ${
+                                      endpoint.enabled
+                                        ? "is-active"
+                                        : "is-suspended"
+                                    }`}
+                                  >
+                                    {endpoint.enabled ? "已上架" : "已下架"}
+                                  </span>
+                                  <small>
+                                    {endpoint.reviewedAt
+                                      ? formatDate(endpoint.reviewedAt)
+                                      : "未审核"}
+                                  </small>
+                                </td>
+                                <td>
+                                  {catalogView === "pricing" ? (
+                                    <button
+                                      className={`button button-small ${
+                                        endpoint.enabled
+                                          ? "admin-button-danger-ghost"
+                                          : "button-dark"
+                                      }`}
+                                      type="button"
+                                      disabled={
+                                        !endpoint.enabled &&
+                                        (!endpoint.presentInLatestSync ||
+                                          !endpoint.priceVerified ||
+                                          endpoint.safetyClassification !==
+                                            "safe_data_read" ||
+                                          endpoint.safetyPolicyVersion !==
+                                            CATALOG_SAFETY_POLICY_VERSION ||
+                                          invalidPrice)
+                                      }
+                                      onClick={() =>
+                                        setConfirmAction({
+                                          kind: "endpoint",
+                                          endpoint,
+                                          nextEnabled: !endpoint.enabled,
+                                        })
+                                      }
+                                    >
+                                      {endpoint.enabled ? "下架" : "审核上架"}
+                                    </button>
+                                  ) : (
+                                    <button
+                                      className="button button-ghost button-small"
+                                      type="button"
+                                      onClick={() => setCatalogView("pricing")}
+                                    >
+                                      管理
+                                    </button>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
                     </div>
                   ) : (
                     <div className="admin-empty">
