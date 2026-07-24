@@ -384,7 +384,8 @@ test("renders the finished product routes without starter metadata", async () =>
     ["/docs", "Build your first request"],
     ["/catalog", "Multi-platform data market"],
     ["/pricing", "Pay only for real requests"],
-    ["/console", "控制台"],
+    ["/console", "Console"],
+    ["/login", "Enter your"],
   ]) {
     const response = await fetchWorker(path, {
       headers: { accept: "text/html" },
@@ -415,6 +416,8 @@ test("renders the Chinese public experience when the locale cookie is set", asyn
     ["/docs", "把第一条请求跑起来"],
     ["/catalog", "多平台数据市场"],
     ["/pricing", "只为真实请求付费"],
+    ["/console", "控制台"],
+    ["/login", "进入你的"],
   ]) {
     const response = await fetchWorker(path, {
       headers: {

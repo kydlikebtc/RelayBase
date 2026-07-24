@@ -1,18 +1,25 @@
 import type { Metadata } from "next";
 import { chatGPTSignInPath } from "../chatgpt-auth";
+import { getLocale } from "../locale";
 import { LoginClient } from "./LoginClient";
 import "../styles/login.css";
 
 export const dynamic = "force-dynamic";
 
-export const metadata: Metadata = {
-  title: "登录",
-  description: "使用 Google、EVM 钱包或托管身份登录 RelayBase。",
-  robots: {
-    index: false,
-    follow: false,
-  },
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const locale = await getLocale();
+  return {
+    title: locale === "zh" ? "登录" : "Sign in",
+    description:
+      locale === "zh"
+        ? "使用 Google、EVM 钱包或托管身份登录 RelayBase。"
+        : "Sign in to RelayBase with Google, an EVM wallet or a managed identity.",
+    robots: {
+      index: false,
+      follow: false,
+    },
+  };
+}
 
 type LoginPageProps = {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
@@ -25,12 +32,15 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
   const returnTo = safeReturnPath(rawReturnTo);
   const initialErrorCode =
     typeof query.error === "string" ? query.error.slice(0, 100) : null;
+  const locale = await getLocale();
 
   return (
     <LoginClient
+      key={locale}
       returnTo={returnTo}
       chatGPTSignInPath={chatGPTSignInPath(returnTo)}
       initialErrorCode={initialErrorCode}
+      locale={locale}
     />
   );
 }

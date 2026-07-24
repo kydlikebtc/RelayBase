@@ -10,6 +10,7 @@ import {
 } from "react";
 import { PlatformIcon } from "../components/PlatformIcon";
 import type { Locale } from "../locale";
+import { platformDisplayName } from "../platform-names";
 
 const PAGE_SIZE = 20;
 const MAX_FACET_OPTIONS = 500;
@@ -857,6 +858,18 @@ function localizedFacetLabel<T extends string>(
   locale: Locale,
 ): string {
   const label = facetLabel(options, value);
+  const languageParts = label
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (languageParts.length > 1) {
+    return locale === "zh"
+      ? (languageParts.find((part) => /[\u3400-\u9FFF]/.test(part)) ??
+        languageParts[0])
+      : (languageParts.find(
+          (part) => !/[\u3400-\u9FFF]/.test(part),
+        ) ?? humanizeFacet(String(value)));
+  }
   if (locale === "zh" || !/[\u3400-\u9FFF]/.test(label)) return label;
   return humanizeFacet(String(value));
 }
@@ -1573,8 +1586,12 @@ export default function CatalogClient({ locale }: { locale: Locale }) {
   function renderEndpointCard(endpoint: MarketplaceEndpoint) {
     const selected = selectedEndpoint?.id === endpoint.id;
     const platformLabel = facets
-      ? localizedFacetLabel(facets.platforms, endpoint.platform, locale)
-      : endpoint.platform;
+      ? platformDisplayName(
+          endpoint.platform,
+          facetLabel(facets.platforms, endpoint.platform),
+          locale,
+        )
+      : platformDisplayName(endpoint.platform, null, locale);
     const dataTypeLabel = facets
       ? localizedFacetLabel(facets.dataTypes, endpoint.dataType, locale)
       : locale === "en"
@@ -1898,7 +1915,13 @@ export default function CatalogClient({ locale }: { locale: Locale }) {
                     className="marketplace-platform-code"
                   />
                   <span>
-                    <strong>{option.label}</strong>
+                    <strong>
+                      {platformDisplayName(
+                        option.value,
+                        option.label,
+                        locale,
+                      )}
+                    </strong>
                     <small>{c.dataProduct}</small>
                   </span>
                   <b>{option.count.toLocaleString()}</b>
@@ -1927,9 +1950,9 @@ export default function CatalogClient({ locale }: { locale: Locale }) {
                 <small>{c.selectedPlatform}</small>
                 <h3>
                   {activePlatform
-                    ? localizedFacetLabel(
-                        facets?.platforms ?? [],
+                    ? platformDisplayName(
                         activePlatform.value,
+                        activePlatform.label,
                         locale,
                       )
                     : c.allPlatformTitle}
@@ -1937,9 +1960,9 @@ export default function CatalogClient({ locale }: { locale: Locale }) {
                 <p>
                   {activePlatform
                     ? c.activePlatformBody(
-                        localizedFacetLabel(
-                          facets?.platforms ?? [],
+                        platformDisplayName(
                           activePlatform.value,
+                          activePlatform.label,
                           locale,
                         ),
                       )

@@ -3,6 +3,8 @@
 import type { FormEvent, MouseEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatGPTUser } from "../chatgpt-auth";
+import type { Locale } from "../locale";
+import { platformDisplayName } from "../platform-names";
 
 type ApiKeyRecord = {
   id: string;
@@ -120,6 +122,219 @@ const currencyOptions = [
   { value: "usdcbase", label: "USDC · Base" },
 ] as const;
 
+const consoleCopy = {
+  en: {
+    requestFailed: (status: number) => `Request failed (HTTP ${status})`,
+    sessionExpired: "Your session has expired. Sign in again.",
+    emptyResponse: "The service returned an empty response. Try again shortly.",
+    invalidDashboard:
+      "The console returned an invalid data shape. Refresh and contact support if it continues.",
+    never: "Never",
+    dashboardLoadFailed: "The console could not load account data.",
+    sessionCheckFailed: (status: number) =>
+      `Session check failed (HTTP ${status}).`,
+    invalidSession: "The sign-in session returned unverifiable data.",
+    sessionUnknown: "The current sign-in state could not be confirmed.",
+    keyCreated:
+      "API Key created. Copy it now; the full secret will not be shown again.",
+    keyCreateFailed: "API Key creation failed.",
+    revokeConfirm: (label: string) =>
+      `Revoke “${label}”? Requests using this Key will fail immediately.`,
+    keyRevoked: (label: string) => `“${label}” was revoked.`,
+    keyRevokeFailed: "API Key revocation failed.",
+    invoiceCreated:
+      "Top-up order created. Pay the exact asset, network and amount shown.",
+    invoiceCreateFailed: "Top-up order creation failed.",
+    signoutFailed: (status: number) => `Sign out failed (HTTP ${status}).`,
+    invalidSignout: "The sign-out service returned an invalid response.",
+    signoutFallback: "Sign out failed.",
+    copyFailed: "Copy failed. Select and copy the value manually.",
+    checkingAccount: "Checking account",
+    signedOutUser: "Signed-out user",
+    console: "Console",
+    syncAfterLogin: "Sign in to sync account data",
+    signingOut: "Signing out",
+    signOut: "Sign out",
+    checking: "Checking",
+    signIn: "Sign in",
+    checkingSessionTitle: "Confirming your sign-in session.",
+    checkingSessionBody:
+      "The console will load the matching account as soon as the session check completes.",
+    loginTitle: "Sign in to load balance, Keys and the request ledger.",
+    loginBody:
+      "Use Google, an EVM wallet or a ChatGPT-managed identity. Signing in does not top up your balance or expose source credentials to the browser.",
+    chooseLogin: "Choose a sign-in method",
+    retry: "Retry",
+    closeNotice: "Close notification",
+    accountOverview: "Account overview",
+    availableBalance: "Available balance",
+    calls30d: "30-day calls",
+    spend30d: "30-day spend",
+    successRate: "Success rate",
+    newKeyLabel: "New Key name",
+    keyPlaceholder: "For example: Production",
+    creating: "Creating…",
+    createKey: "＋ Create Key",
+    showOnce: "Shown once",
+    closeNewKey: "Close new Key notice",
+    saveSecret:
+      "Copy it now and store it in a server-side secret manager. The full value cannot be viewed again.",
+    keyCopied: "API Key copied.",
+    copy: "Copy",
+    loadingKeys: "Loading Keys…",
+    created: "Created",
+    used: "Used",
+    revoking: "Revoking…",
+    revoke: "Revoke",
+    noKeys: "No API Keys yet.",
+    loginForKeys: "Sign in to manage API Keys.",
+    topupTitle: "Balance top-up",
+    topupAmount: "Top-up amount (USD)",
+    assetNetwork: "Payment asset / network",
+    creatingInvoice: "Creating top-up order…",
+    topup: (amount: number) => `Top up $${amount}`,
+    clearanceClosed:
+      "Live top-ups are unavailable until the required payment-method clarification is recorded.",
+    topupUnavailable:
+      "Top-ups are not available yet and will open when proxy, merchant and compliance readiness are complete.",
+    topupSafety:
+      "Send funds only to the network and address shown on the order. Balance changes after on-chain confirmation.",
+    invoiceTitle: "Top-up order created",
+    closeInvoice: "Close top-up order",
+    amountDue: "Amount due",
+    receivingAddress: "Receiving address",
+    addressPending: "Waiting for the payment service to generate an address",
+    addressCopied: "Payment address copied.",
+    copyAddress: "Copy address",
+    currentStatus: "Current status",
+    balanceAutoUpdate: "Balance updates automatically after confirmation",
+    openInvoice: "Open full top-up order ↗",
+    recentRequests: "Recent requests",
+    apiDocs: "API docs ↗",
+    time: "Time",
+    request: "Request",
+    platform: "Platform",
+    status: "Status",
+    latency: "Latency",
+    cost: "Cost",
+    refunded: "Refunded",
+    noRequestsUser:
+      "Create a Key and send your first request. Status, latency and cost will appear here.",
+    noRequestsGuest: "Sign in to view real request records.",
+    quickstart: "View quickstart →",
+    consoleLogin: "Sign in to console →",
+    recentTopups: "Recent top-ups",
+    refreshing: "Refreshing…",
+    refreshStatus: "Refresh status ↻",
+    credited: "Credited",
+    reversed: "Reversed",
+    continuePayment: "Continue payment",
+    noTopups: "No top-up records yet.",
+    loginForTopups: "Sign in to view top-up status.",
+  },
+  zh: {
+    requestFailed: (status: number) => `请求失败（HTTP ${status}）`,
+    sessionExpired: "登录状态已失效，请重新登录。",
+    emptyResponse: "服务返回了空响应，请稍后重试。",
+    invalidDashboard: "控制台数据格式异常，请刷新重试；若问题持续存在，请联系支持。",
+    never: "从未",
+    dashboardLoadFailed: "控制台数据加载失败。",
+    sessionCheckFailed: (status: number) => `会话检查失败（HTTP ${status}）。`,
+    invalidSession: "登录会话返回了无法验证的数据。",
+    sessionUnknown: "无法确认当前登录状态。",
+    keyCreated: "API Key 已创建。请立即复制，密钥不会再次完整显示。",
+    keyCreateFailed: "密钥创建失败。",
+    revokeConfirm: (label: string) =>
+      `确定撤销“${label}”吗？使用该密钥的请求将立即失败。`,
+    keyRevoked: (label: string) => `“${label}”已撤销。`,
+    keyRevokeFailed: "密钥撤销失败。",
+    invoiceCreated: "充值单已创建，请严格按指定币种、网络和数量支付。",
+    invoiceCreateFailed: "充值单创建失败。",
+    signoutFailed: (status: number) => `退出失败（HTTP ${status}）。`,
+    invalidSignout: "退出接口返回了无法验证的数据。",
+    signoutFallback: "退出失败。",
+    copyFailed: "复制失败，请手动选择并复制。",
+    checkingAccount: "正在确认账户",
+    signedOutUser: "未登录用户",
+    console: "控制台",
+    syncAfterLogin: "登录后同步账户数据",
+    signingOut: "退出中",
+    signOut: "退出",
+    checking: "检查中",
+    signIn: "登录",
+    checkingSessionTitle: "正在确认你的登录会话。",
+    checkingSessionBody: "会话检查完成后，控制台会自动加载对应账户的数据。",
+    loginTitle: "登录后加载你的余额、密钥和请求账本。",
+    loginBody:
+      "支持 Google、EVM 钱包与 ChatGPT 托管身份。登录不会自动充值，也不会向浏览器暴露任何来源凭据。",
+    chooseLogin: "选择登录方式",
+    retry: "重试",
+    closeNotice: "关闭提示",
+    accountOverview: "账户概览",
+    availableBalance: "可用余额",
+    calls30d: "30 天调用",
+    spend30d: "30 天支出",
+    successRate: "成功率",
+    newKeyLabel: "新密钥名称",
+    keyPlaceholder: "例如：Production",
+    creating: "创建中…",
+    createKey: "＋ 创建 Key",
+    showOnce: "只显示这一次",
+    closeNewKey: "关闭新密钥提示",
+    saveSecret: "立即复制并保存到服务端密钥管理工具。离开后无法再次查看完整值。",
+    keyCopied: "API Key 已复制。",
+    copy: "复制",
+    loadingKeys: "正在加载密钥…",
+    created: "创建",
+    used: "使用",
+    revoking: "撤销中…",
+    revoke: "撤销",
+    noKeys: "还没有 API Key。",
+    loginForKeys: "登录后管理你的 API Key。",
+    topupTitle: "余额充值",
+    topupAmount: "充值金额（USD）",
+    assetNetwork: "支付币种 / 网络",
+    creatingInvoice: "正在创建充值单…",
+    topup: (amount: number) => `充值 $${amount}`,
+    clearanceClosed:
+      "真实充值尚未开放：仍需归档稳定币仅作为 API 付款方式的书面澄清。",
+    topupUnavailable:
+      "当前充值功能尚未开放，将在数据代理、商户与合规条件全部就绪后启用。",
+    topupSafety: "只向充值单指定的网络和地址转账。链上确认前，余额不会改变。",
+    invoiceTitle: "充值单已创建",
+    closeInvoice: "关闭充值单",
+    amountDue: "应付数量",
+    receivingAddress: "收款地址",
+    addressPending: "等待支付服务生成地址",
+    addressCopied: "支付地址已复制。",
+    copyAddress: "复制地址",
+    currentStatus: "当前状态",
+    balanceAutoUpdate: "到账后自动更新余额",
+    openInvoice: "打开完整充值单 ↗",
+    recentRequests: "最近请求",
+    apiDocs: "API 文档 ↗",
+    time: "时间",
+    request: "请求",
+    platform: "平台",
+    status: "状态",
+    latency: "延迟",
+    cost: "费用",
+    refunded: "已退回",
+    noRequestsUser: "创建 Key 并发出第一条请求后，状态、延迟与费用会出现在这里。",
+    noRequestsGuest: "登录后查看真实的请求记录。",
+    quickstart: "查看快速开始 →",
+    consoleLogin: "登录控制台 →",
+    recentTopups: "最近充值",
+    refreshing: "刷新中…",
+    refreshStatus: "刷新状态 ↻",
+    credited: "已入账",
+    reversed: "已冲销",
+    continuePayment: "继续支付",
+    noTopups: "暂无充值记录。",
+    loginForTopups: "登录后查看充值状态。",
+  },
+} as const;
+
 class ApiRequestError extends Error {
   constructor(
     message: string,
@@ -129,7 +344,34 @@ class ApiRequestError extends Error {
   }
 }
 
-async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
+function englishApiError(
+  code: string | undefined,
+  status: number,
+): string {
+  const messages: Record<string, string> = {
+    authentication_required: "Sign in to continue.",
+    invalid_api_key: "The API Key is invalid or has been revoked.",
+    insufficient_balance: "The available balance is insufficient.",
+    invalid_request: "The request is invalid.",
+    invalid_payment: "The top-up request is invalid.",
+    payments_not_enabled: "Top-ups are not currently available.",
+    rate_limit_exceeded: "Too many requests. Try again shortly.",
+    schema_not_ready: "Account storage is not ready. Try again shortly.",
+    user_suspended: "This account is unavailable. Contact support.",
+  };
+  return (
+    (code ? messages[code] : undefined) ??
+    (status === 401
+      ? consoleCopy.en.sessionExpired
+      : consoleCopy.en.requestFailed(status))
+  );
+}
+
+async function apiRequest<T>(
+  url: string,
+  locale: Locale,
+  init?: RequestInit,
+): Promise<T> {
   const response = await fetch(url, {
     ...init,
     headers: {
@@ -144,15 +386,17 @@ async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const message =
-      payload?.error?.message ??
-      (response.status === 401
-        ? "登录状态已失效，请重新登录。"
-        : `请求失败（HTTP ${response.status}）`);
+      locale === "zh"
+        ? (payload?.error?.message ??
+          (response.status === 401
+            ? consoleCopy.zh.sessionExpired
+            : consoleCopy.zh.requestFailed(response.status)))
+        : englishApiError(payload?.error?.code, response.status);
     throw new ApiRequestError(message, response.status);
   }
 
   if (!payload) {
-    throw new Error("服务返回了空响应，请稍后重试。");
+    throw new Error(consoleCopy[locale].emptyResponse);
   }
 
   return payload;
@@ -288,11 +532,9 @@ function isDashboardData(value: unknown): value is DashboardData {
   );
 }
 
-function parseDashboardData(value: unknown): DashboardData {
+function parseDashboardData(value: unknown, locale: Locale): DashboardData {
   if (!isDashboardData(value)) {
-    throw new Error(
-      "控制台数据格式异常，请刷新重试；若问题持续存在，请联系支持。",
-    );
+    throw new Error(consoleCopy[locale].invalidDashboard);
   }
   return value;
 }
@@ -308,37 +550,61 @@ function formatRate(value: number | null | undefined) {
   return `${percent.toFixed(1)}%`;
 }
 
-function formatDate(value: string | null | undefined, includeTime = false) {
-  if (!value) return "从未";
+function formatDate(
+  value: string | null | undefined,
+  locale: Locale,
+  includeTime = false,
+) {
+  if (!value) return consoleCopy[locale].never;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("zh-CN", {
+  return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", {
     month: "2-digit",
     day: "2-digit",
     ...(includeTime ? { hour: "2-digit", minute: "2-digit" } : {}),
   }).format(date);
 }
 
-function paymentStatus(status: string) {
-  const labels: Record<string, string> = {
-    pending: "待确认",
-    waiting: "等待付款",
-    confirming: "确认中",
-    confirmed: "已确认",
-    sending: "入账处理中",
-    partially_paid: "金额不足",
-    finished: "已到账",
-    completed: "已到账",
-    paid: "已到账",
-    failed: "失败",
-    expired: "已过期",
-    refunded: "已退款",
-    manual_review: "人工复核",
-    manual_resolved: "复核已结案",
-    provider_error: "通道异常",
-    creating: "创建中",
+function paymentStatus(status: string, locale: Locale) {
+  const labels: Record<Locale, Record<string, string>> = {
+    en: {
+      pending: "Pending",
+      waiting: "Awaiting payment",
+      confirming: "Confirming",
+      confirmed: "Confirmed",
+      sending: "Crediting",
+      partially_paid: "Underpaid",
+      finished: "Credited",
+      completed: "Credited",
+      paid: "Credited",
+      failed: "Failed",
+      expired: "Expired",
+      refunded: "Refunded",
+      manual_review: "Manual review",
+      manual_resolved: "Review resolved",
+      provider_error: "Payment channel error",
+      creating: "Creating",
+    },
+    zh: {
+      pending: "待确认",
+      waiting: "等待付款",
+      confirming: "确认中",
+      confirmed: "已确认",
+      sending: "入账处理中",
+      partially_paid: "金额不足",
+      finished: "已到账",
+      completed: "已到账",
+      paid: "已到账",
+      failed: "失败",
+      expired: "已过期",
+      refunded: "已退款",
+      manual_review: "人工复核",
+      manual_resolved: "复核已结案",
+      provider_error: "通道异常",
+      creating: "创建中",
+    },
   };
-  return labels[status.toLowerCase()] ?? status;
+  return labels[locale][status.toLowerCase()] ?? status;
 }
 
 function paymentStatusClass(status: string) {
@@ -346,27 +612,50 @@ function paymentStatusClass(status: string) {
   return normalized || "unknown";
 }
 
-function paymentReviewReason(reason: string | null) {
+function paymentReviewReason(reason: string | null, locale: Locale) {
   if (!reason) return null;
-  const labels: Record<string, string> = {
-    orphan_payment: "未绑定订单",
-    order_mismatch: "订单绑定不一致",
-    amount_mismatch: "付款金额不一致",
-    currency_mismatch: "付款币种不一致",
-    partial_payment: "付款金额不足",
-    paid_after_expiration: "过期后付款",
-    terminal_status_conflict: "终态冲突",
-    refund_requires_review: "退款待复核",
-    provider_payload_mismatch: "服务商数据不一致",
-    repeated_deposit: "疑似重复付款",
-    terminal_with_funds: "终态订单仍有到账",
-    underpaid_finished: "到账金额不足",
-    provider_data_mismatch: "服务商数据不一致",
-    partially_paid: "部分付款",
-    overpaid_finished: "到账金额超出订单",
-    funds_after_manual_rejection: "拒绝结案后检测到资金",
+  const labels: Record<Locale, Record<string, string>> = {
+    en: {
+      orphan_payment: "Unmatched payment",
+      order_mismatch: "Order mismatch",
+      amount_mismatch: "Amount mismatch",
+      currency_mismatch: "Asset mismatch",
+      partial_payment: "Partial payment",
+      paid_after_expiration: "Paid after expiration",
+      terminal_status_conflict: "Final-status conflict",
+      refund_requires_review: "Refund review",
+      provider_payload_mismatch: "Payment-provider data mismatch",
+      repeated_deposit: "Possible repeated payment",
+      terminal_with_funds: "Funds on a finalized order",
+      underpaid_finished: "Confirmed amount is insufficient",
+      provider_data_mismatch: "Payment-provider data mismatch",
+      partially_paid: "Partial payment",
+      overpaid_finished: "Confirmed amount exceeds order",
+      funds_after_manual_rejection: "Funds detected after rejection",
+    },
+    zh: {
+      orphan_payment: "未绑定订单",
+      order_mismatch: "订单绑定不一致",
+      amount_mismatch: "付款金额不一致",
+      currency_mismatch: "付款币种不一致",
+      partial_payment: "付款金额不足",
+      paid_after_expiration: "过期后付款",
+      terminal_status_conflict: "终态冲突",
+      refund_requires_review: "退款待复核",
+      provider_payload_mismatch: "服务商数据不一致",
+      repeated_deposit: "疑似重复付款",
+      terminal_with_funds: "终态订单仍有到账",
+      underpaid_finished: "到账金额不足",
+      provider_data_mismatch: "服务商数据不一致",
+      partially_paid: "部分付款",
+      overpaid_finished: "到账金额超出订单",
+      funds_after_manual_rejection: "拒绝结案后检测到资金",
+    },
   };
-  return labels[reason] ?? "支付信息待复核";
+  return (
+    labels[locale][reason] ??
+    (locale === "zh" ? "支付信息待复核" : "Payment details require review")
+  );
 }
 
 function currencyLabel(currency: string) {
@@ -378,10 +667,13 @@ function currencyLabel(currency: string) {
 export function ConsoleClient({
   chatGPTUser,
   chatGPTSignOutPath,
+  locale,
 }: {
   chatGPTUser: ChatGPTUser | null;
   chatGPTSignOutPath: string;
+  locale: Locale;
 }) {
+  const c = consoleCopy[locale];
   const [sessionUser, setSessionUser] = useState<SessionUser | null>(() =>
     chatGPTUser
       ? {
@@ -435,10 +727,12 @@ export function ConsoleClient({
     setLoading(true);
     setError(null);
     try {
-      const payload = await apiRequest<unknown>("/api/dashboard", {
-        cache: "no-store",
-      });
-      const data = parseDashboardData(payload);
+      const payload = await apiRequest<unknown>(
+        "/api/dashboard",
+        locale,
+        { cache: "no-store" },
+      );
+      const data = parseDashboardData(payload, locale);
       setDashboard(data);
     } catch (requestError) {
       if (requestError instanceof ApiRequestError && requestError.status === 401) {
@@ -450,12 +744,12 @@ export function ConsoleClient({
       setError(
         requestError instanceof Error
           ? requestError.message
-          : "控制台数据加载失败。",
+          : c.dashboardLoadFailed,
       );
     } finally {
       setLoading(false);
     }
-  }, [user]);
+  }, [c.dashboardLoadFailed, locale, user]);
 
   useEffect(() => {
     if (chatGPTUser) return;
@@ -475,10 +769,10 @@ export function ConsoleClient({
           return;
         }
         if (!response.ok) {
-          throw new Error(`会话检查失败（HTTP ${response.status}）。`);
+          throw new Error(c.sessionCheckFailed(response.status));
         }
         if (!isAuthMeResponse(payload)) {
-          throw new Error("登录会话返回了无法验证的数据。");
+          throw new Error(c.invalidSession);
         }
         setSessionUser(payload.user);
       } catch (requestError) {
@@ -487,7 +781,7 @@ export function ConsoleClient({
         setError(
           requestError instanceof Error
             ? requestError.message
-            : "无法确认当前登录状态。",
+            : c.sessionUnknown,
         );
       } finally {
         if (!controller.signal.aborted) setAuthChecking(false);
@@ -498,7 +792,7 @@ export function ConsoleClient({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [chatGPTUser]);
+  }, [c, chatGPTUser]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -545,17 +839,21 @@ export function ConsoleClient({
     setError(null);
     setNotice(null);
     try {
-      const result = await apiRequest<{ key: CreatedKey }>("/api/keys", {
-        method: "POST",
-        body: JSON.stringify({ label }),
-      });
+      const result = await apiRequest<{ key: CreatedKey }>(
+        "/api/keys",
+        locale,
+        {
+          method: "POST",
+          body: JSON.stringify({ label }),
+        },
+      );
       setCreatedKey(result.key);
       setKeyLabel("");
-      setNotice("API Key 已创建。请立即复制，密钥不会再次完整显示。");
+      setNotice(c.keyCreated);
       await refreshDashboard();
     } catch (requestError) {
       setError(
-        requestError instanceof Error ? requestError.message : "密钥创建失败。",
+        requestError instanceof Error ? requestError.message : c.keyCreateFailed,
       );
     } finally {
       setCreatingKey(false);
@@ -565,7 +863,7 @@ export function ConsoleClient({
   async function revokeKey(key: ApiKeyRecord) {
     if (!user || key.revokedAt) return;
     const confirmed = window.confirm(
-      `确定撤销“${key.label}”吗？使用该密钥的请求将立即失败。`,
+      c.revokeConfirm(key.label),
     );
     if (!confirmed) return;
 
@@ -573,15 +871,15 @@ export function ConsoleClient({
     setError(null);
     setNotice(null);
     try {
-      await apiRequest<{ ok: true }>("/api/keys", {
+      await apiRequest<{ ok: true }>("/api/keys", locale, {
         method: "DELETE",
         body: JSON.stringify({ id: key.id }),
       });
-      setNotice(`“${key.label}”已撤销。`);
+      setNotice(c.keyRevoked(key.label));
       await refreshDashboard();
     } catch (requestError) {
       setError(
-        requestError instanceof Error ? requestError.message : "密钥撤销失败。",
+        requestError instanceof Error ? requestError.message : c.keyRevokeFailed,
       );
     } finally {
       setRevokingId(null);
@@ -602,6 +900,7 @@ export function ConsoleClient({
           : `payment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const result = await apiRequest<{ payment: PaymentInvoice }>(
         "/api/payments",
+        locale,
         {
           method: "POST",
           headers: {
@@ -612,13 +911,13 @@ export function ConsoleClient({
       );
       paymentAttemptKey.current = null;
       setInvoice(result.payment);
-      setNotice("充值单已创建，请严格按指定币种、网络和数量支付。");
+      setNotice(c.invoiceCreated);
       await refreshDashboard();
     } catch (requestError) {
       setError(
         requestError instanceof Error
           ? requestError.message
-          : "充值单创建失败。",
+          : c.invoiceCreateFailed,
       );
     } finally {
       setCreatingPayment(false);
@@ -640,17 +939,17 @@ export function ConsoleClient({
       });
       const payload: unknown = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(`退出失败（HTTP ${response.status}）。`);
+        throw new Error(c.signoutFailed(response.status));
       }
       if (!isSignoutResponse(payload)) {
-        throw new Error("退出接口返回了无法验证的数据。");
+        throw new Error(c.invalidSignout);
       }
       window.location.assign(
         user?.provider === "chatgpt" ? chatGPTSignOutPath : "/",
       );
     } catch (requestError) {
       setError(
-        requestError instanceof Error ? requestError.message : "退出失败。",
+        requestError instanceof Error ? requestError.message : c.signoutFallback,
       );
       setSigningOut(false);
     }
@@ -661,14 +960,14 @@ export function ConsoleClient({
       await navigator.clipboard.writeText(value);
       setNotice(successMessage);
     } catch {
-      setError("复制失败，请手动选择并复制。");
+      setError(c.copyFailed);
     }
   }
 
   const displayName =
     dashboard?.user.displayName ??
     user?.displayName ??
-    (authChecking ? "正在确认账户" : "未登录用户");
+    (authChecking ? c.checkingAccount : c.signedOutUser);
   const email =
     dashboard?.user.email ??
     user?.email ??
@@ -687,7 +986,7 @@ export function ConsoleClient({
       <div className="console-topline">
         <div>
           <span className="console-breadcrumb">WORKSPACE / OVERVIEW</span>
-          <h1>控制台</h1>
+          <h1>{c.console}</h1>
         </div>
         <div className="console-user">
           <span className="console-avatar" aria-hidden="true">
@@ -695,7 +994,7 @@ export function ConsoleClient({
           </span>
           <div>
             <b>{displayName}</b>
-            <span>{email || "登录后同步账户数据"}</span>
+            <span>{email || c.syncAfterLogin}</span>
           </div>
           {user ? (
             <a
@@ -703,10 +1002,12 @@ export function ConsoleClient({
               onClick={(event) => void signOut(event)}
               aria-disabled={signingOut}
             >
-              {signingOut ? "退出中" : "退出"}
+              {signingOut ? c.signingOut : c.signOut}
             </a>
           ) : (
-            <a href={loginPath}>{authChecking ? "检查中" : "登录"}</a>
+            <a href={loginPath}>
+              {authChecking ? c.checking : c.signIn}
+            </a>
           )}
         </div>
       </div>
@@ -718,8 +1019,8 @@ export function ConsoleClient({
           </div>
           <div>
             <span>CHECKING SESSION</span>
-            <h2>正在确认你的登录会话。</h2>
-            <p>会话检查完成后，控制台会自动加载对应账户的数据。</p>
+            <h2>{c.checkingSessionTitle}</h2>
+            <p>{c.checkingSessionBody}</p>
           </div>
         </section>
       ) : null}
@@ -731,14 +1032,11 @@ export function ConsoleClient({
           </div>
           <div>
             <span>IDENTITY REQUIRED</span>
-            <h2>登录后加载你的余额、密钥和请求账本。</h2>
-            <p>
-              支持 Google、EVM 钱包与 ChatGPT
-              托管身份。登录不会自动充值，也不会向浏览器暴露任何上游凭据。
-            </p>
+            <h2>{c.loginTitle}</h2>
+            <p>{c.loginBody}</p>
           </div>
           <a className="button button-lime" href={loginPath}>
-            选择登录方式
+            {c.chooseLogin}
             <span aria-hidden="true">→</span>
           </a>
         </section>
@@ -750,7 +1048,7 @@ export function ConsoleClient({
             <span>!</span>
             <p>{error}</p>
             <button type="button" onClick={() => void refreshDashboard()}>
-              重试
+              {c.retry}
             </button>
           </div>
         ) : null}
@@ -760,7 +1058,7 @@ export function ConsoleClient({
             <p>{notice}</p>
             <button
               type="button"
-              aria-label="关闭提示"
+              aria-label={c.closeNotice}
               onClick={() => setNotice(null)}
             >
               ×
@@ -769,10 +1067,10 @@ export function ConsoleClient({
         ) : null}
       </div>
 
-      <section className="stat-grid" aria-label="账户概览">
+      <section className="stat-grid" aria-label={c.accountOverview}>
         <article className="stat-card stat-card-balance">
           <div>
-            <span>可用余额</span>
+            <span>{c.availableBalance}</span>
             <i className="stat-live">LIVE</i>
           </div>
           <strong className={loading ? "loading-value" : ""}>
@@ -782,7 +1080,7 @@ export function ConsoleClient({
         </article>
         <article className="stat-card">
           <div>
-            <span>30 天调用</span>
+            <span>{c.calls30d}</span>
             <b aria-hidden="true">↗</b>
           </div>
           <strong className={loading ? "loading-value" : ""}>
@@ -792,7 +1090,7 @@ export function ConsoleClient({
         </article>
         <article className="stat-card">
           <div>
-            <span>30 天支出</span>
+            <span>{c.spend30d}</span>
             <b aria-hidden="true">↘</b>
           </div>
           <strong className={loading ? "loading-value" : ""}>
@@ -802,7 +1100,7 @@ export function ConsoleClient({
         </article>
         <article className="stat-card">
           <div>
-            <span>成功率</span>
+            <span>{c.successRate}</span>
             <b aria-hidden="true">◎</b>
           </div>
           <strong className={loading ? "loading-value" : ""}>
@@ -825,13 +1123,13 @@ export function ConsoleClient({
           </div>
 
           <form className="key-form" onSubmit={createKey}>
-            <label htmlFor="key-label">新密钥名称</label>
+            <label htmlFor="key-label">{c.newKeyLabel}</label>
             <div>
               <input
                 id="key-label"
                 value={keyLabel}
                 onChange={(event) => setKeyLabel(event.target.value)}
-                placeholder="例如：Production"
+                placeholder={c.keyPlaceholder}
                 maxLength={64}
                 disabled={!user || creatingKey}
                 required
@@ -841,7 +1139,7 @@ export function ConsoleClient({
                 type="submit"
                 disabled={!user || creatingKey || !keyLabel.trim()}
               >
-                {creatingKey ? "创建中…" : "＋ 创建 Key"}
+                {creatingKey ? c.creating : c.createKey}
               </button>
             </div>
           </form>
@@ -849,27 +1147,25 @@ export function ConsoleClient({
           {createdKey ? (
             <div className="created-key-card">
               <div>
-                <span>只显示这一次</span>
+                <span>{c.showOnce}</span>
                 <button
                   type="button"
-                  aria-label="关闭新密钥提示"
+                  aria-label={c.closeNewKey}
                   onClick={() => setCreatedKey(null)}
                 >
                   ×
                 </button>
               </div>
-              <p>
-                立即复制并保存到服务端密钥管理工具。离开后无法再次查看完整值。
-              </p>
+              <p>{c.saveSecret}</p>
               <div className="secret-value">
                 <code>{createdKey.secret}</code>
                 <button
                   type="button"
                   onClick={() =>
-                    void copyText(createdKey.secret, "API Key 已复制。")
+                    void copyText(createdKey.secret, c.keyCopied)
                   }
                 >
-                  复制
+                  {c.copy}
                 </button>
               </div>
             </div>
@@ -877,7 +1173,7 @@ export function ConsoleClient({
 
           <div className="key-list">
             {loading ? (
-              <div className="panel-loading">正在加载密钥…</div>
+              <div className="panel-loading">{c.loadingKeys}</div>
             ) : activeKeys.length > 0 ? (
               activeKeys.map((key) => (
                 <article className="key-row" key={key.id}>
@@ -892,8 +1188,12 @@ export function ConsoleClient({
                     <code>{key.prefix}••••••••••••</code>
                   </div>
                   <div className="key-meta">
-                    <span>创建 {formatDate(key.createdAt)}</span>
-                    <span>使用 {formatDate(key.lastUsedAt, true)}</span>
+                    <span>
+                      {c.created} {formatDate(key.createdAt, locale)}
+                    </span>
+                    <span>
+                      {c.used} {formatDate(key.lastUsedAt, locale, true)}
+                    </span>
                   </div>
                   <button
                     className="key-revoke"
@@ -901,14 +1201,14 @@ export function ConsoleClient({
                     disabled={revokingId === key.id}
                     onClick={() => void revokeKey(key)}
                   >
-                    {revokingId === key.id ? "撤销中…" : "撤销"}
+                    {revokingId === key.id ? c.revoking : c.revoke}
                   </button>
                 </article>
               ))
             ) : (
               <div className="panel-empty">
                 <span>KEY_00</span>
-                <p>{user ? "还没有 API Key。" : "登录后管理你的 API Key。"}</p>
+                <p>{user ? c.noKeys : c.loginForKeys}</p>
               </div>
             )}
           </div>
@@ -918,7 +1218,7 @@ export function ConsoleClient({
           <div className="panel-heading">
             <div>
               <span>FUNDS / 02</span>
-              <h2>余额充值</h2>
+              <h2>{c.topupTitle}</h2>
             </div>
             <span className="pay-badge">STABLECOIN</span>
           </div>
@@ -928,7 +1228,7 @@ export function ConsoleClient({
                 !user || loading || creatingPayment || !paymentsEnabled
               }
             >
-              <legend>充值金额（USD）</legend>
+              <legend>{c.topupAmount}</legend>
               <div className="amount-options">
                 {amountOptions.map((amount) => (
                   <label key={amount}>
@@ -947,7 +1247,7 @@ export function ConsoleClient({
                 ))}
               </div>
               <label className="currency-select">
-                <span>支付币种 / 网络</span>
+                <span>{c.assetNetwork}</span>
                 <select
                   value={payCurrency}
                   onChange={(event) =>
@@ -974,16 +1274,16 @@ export function ConsoleClient({
                 !user || loading || creatingPayment || !paymentsEnabled
               }
             >
-              {creatingPayment ? "正在创建充值单…" : `充值 $${amountUsd}`}
+              {creatingPayment ? c.creatingInvoice : c.topup(amountUsd)}
               <span aria-hidden="true">↗</span>
             </button>
           </form>
           <p className="topup-warning">
             {user && !loading && !paymentsEnabled
               ? !commercialClearanceConfirmed
-                ? "真实充值保持关闭：尚未归档 上游 对稳定币仅作为 API 付款方式的书面澄清。"
-                : "当前充值功能尚未开放，将在数据代理、商户与合规条件全部就绪后启用。"
-              : "只向充值单指定的网络和地址转账。链上确认前，余额不会改变。"}
+                ? c.clearanceClosed
+                : c.topupUnavailable
+              : c.topupSafety}
           </p>
         </aside>
       </div>
@@ -993,11 +1293,11 @@ export function ConsoleClient({
           <div className="invoice-title">
             <div>
               <span>PAYMENT INVOICE</span>
-              <h2>充值单已创建</h2>
+              <h2>{c.invoiceTitle}</h2>
             </div>
             <button
               type="button"
-              aria-label="关闭充值单"
+              aria-label={c.closeInvoice}
               onClick={() => setInvoice(null)}
             >
               ×
@@ -1005,33 +1305,33 @@ export function ConsoleClient({
           </div>
           <div className="invoice-grid">
             <div>
-              <span>应付数量</span>
+              <span>{c.amountDue}</span>
               <strong>{visibleInvoice.payAmount ?? "—"}</strong>
               <small>{currencyLabel(visibleInvoice.payCurrency)}</small>
             </div>
             <div className="invoice-address">
-              <span>收款地址</span>
-              <code>{visibleInvoice.payAddress ?? "等待支付服务生成地址"}</code>
+              <span>{c.receivingAddress}</span>
+              <code>{visibleInvoice.payAddress ?? c.addressPending}</code>
               {visibleInvoice.payAddress ? (
                 <button
                   type="button"
                   onClick={() =>
                     void copyText(
                       visibleInvoice.payAddress!,
-                      "支付地址已复制。",
+                      c.addressCopied,
                     )
                   }
                 >
-                  复制地址
+                  {c.copyAddress}
                 </button>
               ) : null}
             </div>
             <div>
-              <span>当前状态</span>
+              <span>{c.currentStatus}</span>
               <strong className="invoice-status">
-                {paymentStatus(visibleInvoice.status)}
+                {paymentStatus(visibleInvoice.status, locale)}
               </strong>
-              <small>到账后自动更新余额</small>
+              <small>{c.balanceAutoUpdate}</small>
             </div>
           </div>
           {visibleInvoice.invoiceUrl ? (
@@ -1041,7 +1341,7 @@ export function ConsoleClient({
               target="_blank"
               rel="noreferrer"
             >
-              打开完整充值单 ↗
+              {c.openInvoice}
             </a>
           ) : null}
         </section>
@@ -1051,33 +1351,39 @@ export function ConsoleClient({
         <div className="panel-heading">
           <div>
             <span>REQUESTS / 03</span>
-            <h2>最近请求</h2>
+            <h2>{c.recentRequests}</h2>
           </div>
-          <a href="/docs">API 文档 ↗</a>
+          <a href="/docs">{c.apiDocs}</a>
         </div>
         <div className="requests-table-wrap">
           <table className="requests-table">
             <thead>
               <tr>
-                <th>时间</th>
-                <th>请求</th>
-                <th>平台</th>
-                <th>状态</th>
-                <th>延迟</th>
-                <th>费用</th>
+                <th>{c.time}</th>
+                <th>{c.request}</th>
+                <th>{c.platform}</th>
+                <th>{c.status}</th>
+                <th>{c.latency}</th>
+                <th>{c.cost}</th>
               </tr>
             </thead>
             <tbody>
               {recentCalls.map((call) => (
                 <tr key={call.id}>
-                  <td>{formatDate(call.createdAt, true)}</td>
+                  <td>{formatDate(call.createdAt, locale, true)}</td>
                   <td>
                     <span className="request-path">
                       <i>{call.method}</i>
                       <code>{call.path}</code>
                     </span>
                   </td>
-                  <td>{call.platform}</td>
+                  <td>
+                    {platformDisplayName(
+                      call.platform,
+                      call.platform,
+                      locale,
+                    )}
+                  </td>
                   <td>
                     <span
                       className={`request-status ${
@@ -1093,7 +1399,7 @@ export function ConsoleClient({
                   <td>
                     {formatUsd(call.refunded ? 0 : call.costUsdMicros, 4)}
                     {call.refunded ? (
-                      <small className="request-refunded">已退回</small>
+                      <small className="request-refunded">{c.refunded}</small>
                     ) : null}
                   </td>
                 </tr>
@@ -1105,11 +1411,11 @@ export function ConsoleClient({
               <span>NO REQUESTS YET</span>
               <p>
                 {user
-                  ? "创建 Key 并发出第一条请求后，状态、延迟与费用会出现在这里。"
-                  : "登录后查看真实的请求记录。"}
+                  ? c.noRequestsUser
+                  : c.noRequestsGuest}
               </p>
               <a href={user ? "/docs" : loginPath}>
-                {user ? "查看快速开始 →" : "登录控制台 →"}
+                {user ? c.quickstart : c.consoleLogin}
               </a>
             </div>
           ) : null}
@@ -1120,14 +1426,14 @@ export function ConsoleClient({
         <div className="panel-heading">
           <div>
             <span>LEDGER / 04</span>
-            <h2>最近充值</h2>
+            <h2>{c.recentTopups}</h2>
           </div>
           <button
             type="button"
             onClick={() => void refreshDashboard()}
             disabled={!user || loading}
           >
-            {loading ? "刷新中…" : "刷新状态 ↻"}
+            {loading ? c.refreshing : c.refreshStatus}
           </button>
         </div>
         {recentPayments.length > 0 ? (
@@ -1141,20 +1447,20 @@ export function ConsoleClient({
                 <div>
                   <b>{formatUsd(payment.amountUsdMicros)}</b>
                   <span>
-                    已入账 {formatUsd(payment.creditedUsdMicros)}
+                    {c.credited} {formatUsd(payment.creditedUsdMicros)}
                     {payment.reversedUsdMicros > 0
-                      ? ` · 已冲销 ${formatUsd(payment.reversedUsdMicros)}`
+                      ? ` · ${c.reversed} ${formatUsd(payment.reversedUsdMicros)}`
                       : ""}
                     {" · "}
                     {currencyLabel(payment.payCurrency)}
-                    {paymentReviewReason(payment.reviewReason)
-                      ? ` · ${paymentReviewReason(payment.reviewReason)}`
+                    {paymentReviewReason(payment.reviewReason, locale)
+                      ? ` · ${paymentReviewReason(payment.reviewReason, locale)}`
                       : ""}
                   </span>
                 </div>
                 <code>{payment.id}</code>
-                <span>{formatDate(payment.createdAt, true)}</span>
-                <strong>{paymentStatus(payment.status)}</strong>
+                <span>{formatDate(payment.createdAt, locale, true)}</span>
+                <strong>{paymentStatus(payment.status, locale)}</strong>
                 {payment.payAddress &&
                 ![
                   "finished",
@@ -1178,7 +1484,7 @@ export function ConsoleClient({
                       })
                     }
                   >
-                    继续支付
+                    {c.continuePayment}
                   </button>
                 ) : null}
               </article>
@@ -1187,7 +1493,7 @@ export function ConsoleClient({
         ) : (
           <div className="panel-empty panel-empty-inline">
             <span>PAY_00</span>
-            <p>{user ? "暂无充值记录。" : "登录后查看充值状态。"}</p>
+            <p>{user ? c.noTopups : c.loginForTopups}</p>
           </div>
         )}
       </section>
