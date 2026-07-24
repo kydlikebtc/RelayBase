@@ -76,6 +76,11 @@ const errors = [
   ["404", "marketplace_endpoint_not_found", "参考市场中没有匹配的 path 与 method"],
   ["429", "rate_limit_exceeded", "客户、账户或共享上游达到速率限制"],
   ["502", "upstream_unavailable", "上游网络不可用；请求已退款"],
+  [
+    "503",
+    "tikhub_crypto_payment_not_cleared",
+    "TikHub 对稳定币付款模式的书面澄清尚未归档；代理与充值关闭",
+  ],
   ["503", "upstream_not_authorized", "当前部署仍处于安全沙盒"],
 ] as const;
 
@@ -223,7 +228,9 @@ GET ${origin}/api/marketplace/detail?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_prof
     "path": "/v1/tiktok/web/fetch_user_profile",
     "method": "GET",
     "availability": "pending",
+    "dataType": "profile_creator",
     "tags": ["TikTok-Web-API"],
+    "surface": "web",
     "operationId": "fetch_user_profile_api_v1_tiktok_web_fetch_user_profile_get",
     "description": "Get user profile",
     "parameters": [
@@ -274,20 +281,30 @@ GET ${origin}/api/marketplace/detail?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_prof
                 <p>
                   只有真实 TikHub Key、完整同步与覆盖证明、安全审核、核价上架和近期
                   对账健康全部满足，并且实时 OpenAPI 的哈希与操作数和本页参考快照
-                  完全一致、全部 (method, path) 身份集合无缺失或重复时，端点才会
-                  成为 available。价格和速率在未开放时可以为 null。
+                  完全一致、全部 (method, path) 身份集合无缺失或重复，且每条实时
+                  dataType、tags、surface 与 operationId 都和参考记录一致时，端点
+                  才会成为 available。价格和速率在未开放时可以为 null。
                 </p>
               </div>
             </div>
             <CodePanel title="Callable endpoint catalog" language="HTTP">
               {`GET ${origin}/api/catalog
-GET ${origin}/api/catalog?platform=tiktok&limit=100`}
+GET ${origin}/api/catalog?platform=tiktok&dataType=profile_creator&tag=TikTok-Web-API&surface=web&limit=100`}
             </CodePanel>
             <p>
               <code>/api/catalog</code> 是端点级已开放清单。客户还必须确认响应中的{" "}
               <code>mode=live</code>，并满足最新 readiness、账户、余额和限流条件。
+              列表支持精确的 <code>platform</code>、<code>dataType</code>、
+              <code>tag</code> 与 <code>surface</code> 筛选；每条端点返回当前成功
+              同步代次的 <code>dataType</code>、<code>tags</code>、
+              <code>surface</code> 和 <code>operationId</code>，方便客户按同一
+              分类构建调用与报价页面。
               <code>priceUsdMicros</code> 是每次上游 HTTP 200 成功请求的客户价格；
-              未出现在该目录中的路径不能调用。
+              未出现在该目录中的路径不能调用。真实代理与充值还要求服务端已归档
+              TikHub 对稳定币付款模式的书面澄清；缺失时两者都会安全关闭。
+              <code>capabilities.taxonomyReady</code> 还必须为 true；畸形 v1
+              operation、归一化路径冲突或疑似密钥/Token 的分类标签都会让整次同步
+              失败并保留上一成功目录。
             </p>
           </section>
 
@@ -477,6 +494,8 @@ X-RelayBase-Balance-Usd-Micros: 24998000`}
                 <b>以控制台状态和余额为准</b>
                 <p>
                   链上确认完成后，充值会幂等入账。重复支付通知不会重复增加余额。
+                  最近充值会分别显示订单金额、实际入账、退款冲销和复核状态；支付商
+                  回调缺失时，服务端定时对账还会复查待确认及近期失败/过期订单。
                 </p>
               </div>
             </div>

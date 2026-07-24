@@ -4,6 +4,12 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  TIKHUB_DATA_TYPES as DATA_TYPES,
+  TIKHUB_SURFACES as SURFACES,
+  tikhubDataTypeFor as dataTypeFor,
+  tikhubSurfaceForPath as surfaceFor,
+} from "../shared/tikhub-taxonomy.mjs";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, "..");
@@ -23,24 +29,6 @@ const HTTP_METHODS = [
   "head",
   "options",
   "trace",
-];
-const SURFACES = ["app", "web", "app_web", "other"];
-const DATA_TYPES = [
-  "account",
-  "analytics_trends",
-  "comments",
-  "commerce_marketing",
-  "content",
-  "email",
-  "live",
-  "media_download",
-  "profile_creator",
-  "search_discovery",
-  "social_graph",
-  "system",
-  "taxonomy",
-  "utility",
-  "other",
 ];
 const LIMITS = Object.freeze({
   maxSnapshotBytes: 16 * 1024 * 1024,
@@ -437,11 +425,50 @@ function redactInputMetadata(value, state, fieldName, depth = 0) {
   );
 }
 
-function sortedUniqueStrings(value) {
-  if (!Array.isArray(value)) return [];
-  return [...new Set(value.filter((item) => typeof item === "string"))].sort(
-    compareText,
-  );
+function normalizeOperationTags(value, identity) {
+  if (value == null) return [];
+  if (
+    !Array.isArray(value) ||
+    value.length > 100 ||
+    !value.every(
+      (tag) =>
+        typeof tag === "string" &&
+        tag.length > 0 &&
+        tag.length <= 160 &&
+        tag.trim() === tag &&
+        !/[?&#=\u0000-\u001F\u007F]/.test(tag) &&
+        redactSensitiveText(tag) === tag,
+    )
+  ) {
+    throw new Error(`${identity} has invalid or sensitive tags metadata.`);
+  }
+  return [...new Set(value)].sort(compareText);
+}
+
+function normalizeOperationId(value, identity) {
+  if (value == null) return null;
+  if (typeof value !== "string") {
+    throw new Error(`${identity} operationId must be a string or null.`);
+  }
+  const trimmed = value.trim();
+  if (
+    trimmed.length < 1 ||
+    trimmed.length > 500 ||
+    /[\u0000-\u001F\u007F]/.test(trimmed)
+  ) {
+    throw new Error(`${identity} has invalid operationId metadata.`);
+  }
+  const redacted = redactSensitiveText(trimmed);
+  if (
+    typeof redacted !== "string" ||
+    redacted.length < 1 ||
+    redacted.length > 500 ||
+    redacted.trim() !== redacted ||
+    /[\u0000-\u001F\u007F]/.test(redacted)
+  ) {
+    throw new Error(`${identity} has invalid redacted operationId metadata.`);
+  }
+  return redacted;
 }
 
 function increment(counter, key) {
@@ -752,231 +779,6 @@ function platformForPath(sourcePath) {
   return segments[2].toLowerCase();
 }
 
-function surfaceFor(sourcePath, tags) {
-  const segments = sourcePath
-    .split("/")
-    .filter(Boolean)
-    .slice(3, -1)
-    .map((segment) => segment.toLowerCase());
-  const tagText = tags.join(" ").toLowerCase();
-  const hybrid =
-    tagText.includes("hybrid") ||
-    segments.some((segment) => segment.includes("hybrid"));
-  const app =
-    /(?:^|[-_\s])app(?:[-_\s]|$)/.test(tagText) ||
-    /(?:^|[-_\s])ios(?:[-_\s]|$)/.test(tagText) ||
-    segments.some(
-      (segment) =>
-        segment === "app" ||
-        segment.startsWith("app_") ||
-        segment.startsWith("ios"),
-    );
-  const web =
-    /(?:^|[-_\s])web(?:[-_\s]|$)/.test(tagText) ||
-    segments.some(
-      (segment) => segment === "web" || segment.startsWith("web_"),
-    );
-
-  if (hybrid || (app && web)) return "app_web";
-  if (app) return "app";
-  if (web) return "web";
-  return "other";
-}
-
-function matchesAny(text, expressions) {
-  return expressions.some((expression) => expression.test(text));
-}
-
-function dataTypeFor({ platform, sourcePath, tags, operationId }) {
-  const rawText = [platform, sourcePath, operationId ?? "", ...tags]
-    .join(" ")
-    .toLowerCase();
-  const text = rawText.replace(/[^a-z0-9]+/g, " ");
-
-  if (["health", "demo", "ios_shortcut"].includes(platform)) return "system";
-  if (
-    platform === "temp_mail" ||
-    matchesAny(text, [/\btemp mail\b/, /\binbox\b/, /\bemail\b/])
-  ) {
-    return "email";
-  }
-  if (
-    platform === "tikhub" &&
-    matchesAny(text, [
-      /\buser\b/,
-      /\bapi key\b/,
-      /\bbalance\b/,
-      /\bcredential\b/,
-    ])
-  ) {
-    return "account";
-  }
-  if (
-    matchesAny(text, [
-      /\bshop\b/,
-      /\bads\b/,
-      /\bdouplus\b/,
-      /\bxingtu\b/,
-      /\bpgy\b/,
-      /\bproduct\b/,
-      /\border\b/,
-      /\be commerce\b/,
-      /\baffiliate\b/,
-      /\bshowcase\b/,
-    ])
-  ) {
-    return "commerce_marketing";
-  }
-  if (
-    matchesAny(text, [
-      /\bindex api\b/,
-      /\banalytics api\b/,
-      /\bbillboard api\b/,
-      /\banalytics?\b/,
-      /\banalys(?:e|is)\b/,
-      /\bstats?\b/,
-      /\binsights?\b/,
-      /\boverview\b/,
-      /\bdiagnosis\b/,
-      /\baudience\b/,
-      /\bperformance\b/,
-      /\bmetrics?\b/,
-      /\bindex\b/,
-      /\bestimate\b/,
-    ])
-  ) {
-    return "analytics_trends";
-  }
-  if (
-    matchesAny(text, [
-      /\blive\b/,
-      /\bliveroom\b/,
-      /\blive room\b/,
-      /\bwebcast\b/,
-      /\bgift\b/,
-    ])
-  ) {
-    return "live";
-  }
-  if (
-    matchesAny(text, [
-      /\bcomment/,
-      /\brepl(?:y|ies)\b/,
-      /\bdanmaku\b/,
-      /\bbullet chat\b/,
-      /\bdiscussion\b/,
-    ])
-  ) {
-    return "comments";
-  }
-  if (
-    matchesAny(text, [
-      /\bfollowers?\b/,
-      /\bfollowing\b/,
-      /\bfans?\b/,
-      /\bfriends?\b/,
-      /\bsocial[_-]?graph\b/,
-    ])
-  ) {
-    return "social_graph";
-  }
-  if (
-    matchesAny(text, [
-      /\bsearch/,
-      /\bsuggest/,
-      /\bautocomplete\b/,
-      /\blookup\b/,
-      /\bfeed\b/,
-      /\brecommend/,
-      /\bdiscover/,
-      /\bexplore\b/,
-      /\bhot\b/,
-    ])
-  ) {
-    return "search_discovery";
-  }
-  if (
-    matchesAny(text, [
-      /\bdownload/,
-      /\bplay url\b/,
-      /\baudio url\b/,
-      /\bimage url\b/,
-      /\bstream url\b/,
-      /\bwatermark\b/,
-    ])
-  ) {
-    return "media_download";
-  }
-  if (
-    matchesAny(text, [
-      /\bhashtag\b/,
-      /\bchallenge\b/,
-      /\btopic\b/,
-      /\bmusic\b/,
-      /\bsound\b/,
-      /\baudio\b/,
-      /\bsong\b/,
-      /\blocation\b/,
-      /\bkeyword\b/,
-    ])
-  ) {
-    return "taxonomy";
-  }
-  if (
-    matchesAny(text, [
-      /\bprofile\b/,
-      /\bauthor\b/,
-      /\bcreator\b/,
-      /\bblogger\b/,
-      /\binfluencer\b/,
-      /\buser\b/,
-      /\baccount\b/,
-      /\bchannel\b/,
-      /\bkol\b/,
-    ])
-  ) {
-    return "profile_creator";
-  }
-  if (
-    matchesAny(text, [
-      /\bvideo/,
-      /\baweme\b/,
-      /\breels?\b/,
-      /\bshorts?\b/,
-      /\bitem\b/,
-      /\bnotes?\b/,
-      /\bposts?\b/,
-      /\barticle\b/,
-      /\bstory\b/,
-      /\bcontent\b/,
-      /\bmedia\b/,
-      /\bimages?\b/,
-      /\bphotos?\b/,
-      /\bcollections?\b/,
-    ])
-  ) {
-    return "content";
-  }
-  if (
-    matchesAny(text, [
-      /\bparse\b/,
-      /\bresolve\b/,
-      /\bconvert\b/,
-      /\bgenerate\b/,
-      /\bencrypt\b/,
-      /\bdecrypt\b/,
-      /\bsignature\b/,
-      /\bversion\b/,
-      /\bdemo\b/,
-      /\bshortcut\b/,
-      /\bhybrid\b/,
-    ])
-  ) {
-    return "utility";
-  }
-  return "other";
-}
-
 function responseStatusCompare(left, right) {
   const leftNumber = /^\d+$/.test(left) ? Number(left) : Number.POSITIVE_INFINITY;
   const rightNumber = /^\d+$/.test(right)
@@ -1143,16 +945,6 @@ function verifyCatalog(catalog, discoveredOperationCount) {
       typeof operation.platform !== "string" ||
       operation.platform !== operation.path.split("/")[2] ||
       !Array.isArray(operation.tags) ||
-      operation.tags.length > 100 ||
-      !operation.tags.every(
-        (tag) =>
-          typeof tag === "string" &&
-          tag.length > 0 &&
-          tag.length <= 160 &&
-          tag.trim() === tag &&
-          !/[?&#=\u0000-\u001F\u007F]/.test(tag),
-      ) ||
-      new Set(operation.tags).size !== operation.tags.length ||
       !Array.isArray(operation.parameters) ||
       operation.parameters.length > 200 ||
       (operation.requestBody !== null &&
@@ -1166,12 +958,32 @@ function verifyCatalog(catalog, discoveredOperationCount) {
         (typeof operation.description !== "string" ||
           operation.description.length > 20_000)) ||
       (operation.operationId !== null &&
-        (typeof operation.operationId !== "string" ||
-          operation.operationId.length > 500))
+        typeof operation.operationId !== "string")
     ) {
       throw new Error("Generated catalog contains an invalid operation.");
     }
     const identity = `${operation.method} ${operation.path}`;
+    let normalizedTags;
+    let normalizedOperationId;
+    try {
+      normalizedTags = normalizeOperationTags(operation.tags, identity);
+      normalizedOperationId = normalizeOperationId(
+        operation.operationId,
+        identity,
+      );
+    } catch (error) {
+      throw new Error(
+        `Generated catalog contains invalid taxonomy metadata: ${error.message}`,
+      );
+    }
+    if (
+      JSON.stringify(normalizedTags) !== JSON.stringify(operation.tags) ||
+      normalizedOperationId !== operation.operationId
+    ) {
+      throw new Error(
+        `Generated catalog taxonomy is not canonical for ${identity}.`,
+      );
+    }
     if (identities.has(identity)) {
       throw new Error(`Duplicate operation identity: ${identity}`);
     }
@@ -1355,10 +1167,13 @@ export function buildCatalog(root, snapshotSha256, snapshotBytes) {
       const upperMethod = method.toUpperCase();
       const path = relayBasePath(sourcePath);
       const identity = `${upperMethod} ${path}`;
-      const tags = sortedUniqueStrings(operation.tags);
+      const tags = normalizeOperationTags(operation.tags, identity);
       const platform = platformForPath(sourcePath);
       const surface = surfaceFor(sourcePath, tags);
-      const operationId = compactText(operation.operationId);
+      const operationId = normalizeOperationId(
+        operation.operationId,
+        identity,
+      );
       const dataType = dataTypeFor({
         platform,
         sourcePath,
@@ -1408,7 +1223,7 @@ export function buildCatalog(root, snapshotSha256, snapshotBytes) {
         dataType,
         summary: redactSensitiveText(compactText(operation.summary)),
         description: publicDescription(operation.description),
-        operationId: redactSensitiveText(operationId),
+        operationId,
         parameters,
         requestBody,
         responses: extractResponses(operation, identity),

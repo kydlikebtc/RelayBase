@@ -1,6 +1,12 @@
 import { recoverMessageAddress } from "viem";
 import packageJson from "../package.json";
 import tikHubCatalogReferenceJson from "../data/tikhub-catalog-reference.json";
+import {
+  TIKHUB_DATA_TYPES,
+  TIKHUB_SURFACES,
+  tikhubDataTypeFor,
+  tikhubSurfaceForPath,
+} from "../shared/tikhub-taxonomy.mjs";
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -80,6 +86,41 @@ const CATALOG_COVERAGE_WHERE = `
   AND length(price_snapshot_hash) = 64
   AND price_snapshot_hash NOT GLOB '*[^0-9a-f]*'
 `;
+const CATALOG_DATA_TYPE_SQL_VALUES =
+  "'account','analytics_trends','comments','commerce_marketing'," +
+  "'content','email','live','media_download','profile_creator'," +
+  "'search_discovery','social_graph','system','taxonomy','utility','other'";
+const CATALOG_SURFACE_SQL_VALUES = "'app','web','app_web','other'";
+
+function catalogTaxonomyValidWhere(alias: string): string {
+  const safeTags =
+    `CASE WHEN json_valid(${alias}.tags_json) ` +
+    `AND json_type(${alias}.tags_json) = 'array' ` +
+    `THEN ${alias}.tags_json ELSE '[]' END`;
+  return `
+    ${alias}.data_type IN (${CATALOG_DATA_TYPE_SQL_VALUES})
+    AND ${alias}.surface IN (${CATALOG_SURFACE_SQL_VALUES})
+    AND json_valid(${alias}.tags_json)
+    AND json_type(${alias}.tags_json) = 'array'
+    AND json_array_length(${alias}.tags_json) BETWEEN 0 AND 100
+    AND NOT EXISTS (
+      SELECT 1 FROM json_each(${safeTags}) AS taxonomy_tag
+      WHERE taxonomy_tag.type != 'text'
+        OR length(taxonomy_tag.value) NOT BETWEEN 1 AND 160
+        OR trim(taxonomy_tag.value) != taxonomy_tag.value
+    )
+    AND (
+      SELECT COUNT(*) FROM json_each(${safeTags})
+    ) = (
+      SELECT COUNT(DISTINCT taxonomy_tag.value)
+      FROM json_each(${safeTags}) AS taxonomy_tag
+    )
+    AND (
+      ${alias}.operation_id IS NULL
+      OR length(${alias}.operation_id) BETWEEN 1 AND 500
+    )
+  `;
+}
 
 export interface PlatformEnv {
   DB?: D1Database;
@@ -91,9 +132,9 @@ export interface PlatformEnv {
   NOWPAYMENTS_API_KEY?: string;
   NOWPAYMENTS_IPN_SECRET?: string;
   CRYPTO_PAYMENTS_ENABLED?: string;
+  TIKHUB_CRYPTO_PAYMENT_CLEARED?: string;
   LEGAL_REVIEW_CONFIRMED?: string;
   PUBLIC_APP_URL?: string;
-  DEFAULT_REQUEST_COST_USD_MICROS?: string;
   API_RATE_LIMIT_RPM?: string;
   UPSTREAM_TIMEOUT_MS?: string;
   UPSTREAM_MAX_RESPONSE_BYTES?: string;
@@ -135,6 +176,10 @@ type CatalogRecord = {
   path: string;
   platform: string;
   http_method: string;
+  data_type: CatalogDataType;
+  tags_json: string;
+  surface: MarketplaceSurface;
+  operation_id: string | null;
   upstream_price_usd_micros: number;
   customer_price_usd_micros: number;
   price_verified: number;
@@ -150,6 +195,22 @@ type CatalogRecord = {
 };
 
 type MarketplaceSurface = "app" | "web" | "app_web" | "other";
+type CatalogDataType =
+  | "account"
+  | "analytics_trends"
+  | "comments"
+  | "commerce_marketing"
+  | "content"
+  | "email"
+  | "live"
+  | "media_download"
+  | "profile_creator"
+  | "search_discovery"
+  | "social_graph"
+  | "system"
+  | "taxonomy"
+  | "utility"
+  | "other";
 type MarketplaceAvailability = "available" | "pending" | "restricted";
 
 type MarketplaceReferenceEndpoint = {
@@ -216,6 +277,10 @@ type MarketplaceCatalogOverlay = {
   path: string;
   platform: string;
   http_method: string;
+  data_type: CatalogDataType;
+  tags_json: string;
+  surface: MarketplaceSurface;
+  operation_id: string | null;
   summary: string | null;
   description: string | null;
   parameter_schema_json: string | null;
@@ -307,6 +372,10 @@ type CatalogBatchItemRecord = {
   ordinal: number;
   platform: string;
   http_method: string;
+  data_type: CatalogDataType;
+  tags_json: string;
+  surface: MarketplaceSurface;
+  operation_id: string | null;
   summary: string | null;
   expected_revision: number;
   original_upstream_price_usd_micros: number;
@@ -1399,83 +1468,49 @@ async function upsertAuthIdentity(
   const candidateUserId = `usr_${(
     await sha256Hex(`${input.provider}:${input.subject}`)
   ).slice(0, 24)}`;
-  const insertedUser = await db
-    .prepare(
-      `INSERT OR IGNORE INTO users
-       (id, email, display_name, status, created_at, updated_at)
-       VALUES (?, ?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-    )
-    .bind(candidateUserId, syntheticEmail, input.displayName)
-    .run();
-  if (Number(insertedUser.meta?.changes ?? 0) !== 1) {
-    const racedIdentity = await db
-      .prepare(
-        `SELECT u.id, u.email, u.display_name, u.status,
-                ai.wallet_address
-         FROM auth_identities ai
-         JOIN users u ON u.id = ai.user_id
-         WHERE ai.provider = ? AND ai.subject = ?`,
-      )
-      .bind(input.provider, input.subject)
-      .first<{
-        id: string;
-        email: string;
-        display_name: string | null;
-        status: string;
-        wallet_address: string | null;
-      }>();
-    if (racedIdentity?.status === "active") {
-      return {
-        id: racedIdentity.id,
-        email: racedIdentity.email,
-        displayName:
-          racedIdentity.display_name ?? input.displayName,
-        provider: input.provider,
-        walletAddress: racedIdentity.wallet_address,
-      };
-    }
-    throw new PlatformError(
-      409,
-      "identity_link_required",
-      "该邮箱已有 RelayBase 账户；为保护余额与 API Key，请通过受控账户恢复完成关联。",
-    );
-  }
-  const user = await db
-    .prepare(
-      `SELECT id, email, display_name, status
-       FROM users
-       WHERE email = ?`,
-    )
-    .bind(syntheticEmail)
-    .first<{
-      id: string;
-      email: string;
-      display_name: string | null;
-      status: string;
-    }>();
-  if (!user || user.status !== "active") {
-    throw new PlatformError(403, "account_suspended", "账户当前不可用。");
-  }
-
   const identityId = `aid_${(
     await sha256Hex(`${input.provider}:${input.subject}`)
   ).slice(0, 28)}`;
-  await db
-    .prepare(
-      `INSERT OR IGNORE INTO auth_identities
-       (id, user_id, provider, subject, email, wallet_address,
-        created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-    )
-    .bind(
-      identityId,
-      user.id,
-      input.provider,
-      input.subject,
-      input.email,
-      input.walletAddress,
-    )
-    .run();
+  await db.batch([
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO users
+         (id, email, display_name, status, created_at, updated_at)
+         SELECT ?, ?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+         WHERE NOT EXISTS (
+           SELECT 1
+           FROM auth_identities
+           WHERE provider = ? AND subject = ?
+         )`,
+      )
+      .bind(
+        candidateUserId,
+        syntheticEmail,
+        input.displayName,
+        input.provider,
+        input.subject,
+      ),
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO auth_identities
+         (id, user_id, provider, subject, email, wallet_address,
+          created_at, updated_at)
+         SELECT ?, u.id, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+         FROM users u
+         WHERE u.id = ?
+           AND u.email = ?
+           AND u.status = 'active'`,
+      )
+      .bind(
+        identityId,
+        input.provider,
+        input.subject,
+        input.email,
+        input.walletAddress,
+        candidateUserId,
+        syntheticEmail,
+      ),
+  ]);
   const linked = await db
     .prepare(
       `SELECT u.id, u.email, u.display_name, u.status,
@@ -1492,20 +1527,30 @@ async function upsertAuthIdentity(
       status: string;
       wallet_address: string | null;
     }>();
-  if (!linked || linked.status !== "active") {
-    throw new PlatformError(
-      409,
-      "identity_link_conflict",
-      "该身份已关联到其他不可用账户。",
-    );
+  if (linked?.status === "active") {
+    return {
+      id: linked.id,
+      email: linked.email,
+      displayName: linked.display_name ?? input.displayName,
+      provider: input.provider,
+      walletAddress: linked.wallet_address,
+    };
   }
-  return {
-    id: linked.id,
-    email: linked.email,
-    displayName: linked.display_name ?? input.displayName,
-    provider: input.provider,
-    walletAddress: linked.wallet_address,
-  };
+  if (linked) {
+    throw new PlatformError(403, "account_suspended", "账户当前不可用。");
+  }
+  const candidate = await db
+    .prepare(`SELECT status FROM users WHERE id = ? AND email = ?`)
+    .bind(candidateUserId, syntheticEmail)
+    .first<{ status: string }>();
+  if (candidate && candidate.status !== "active") {
+    throw new PlatformError(403, "account_suspended", "账户当前不可用。");
+  }
+  throw new PlatformError(
+    409,
+    "identity_link_required",
+    "该邮箱已有 RelayBase 账户；为保护余额与 API Key，请通过受控账户恢复完成关联。",
+  );
 }
 
 async function createAuthSession(
@@ -1520,7 +1565,7 @@ async function createAuthSession(
   const expiresAt = new Date(
     Date.now() + ttlDays * 24 * 60 * 60_000,
   ).toISOString();
-  await db.batch([
+  const sessionResults = await db.batch([
     db
       .prepare(
         `DELETE FROM auth_sessions
@@ -1545,10 +1590,17 @@ async function createAuthSession(
       .prepare(
         `INSERT INTO auth_sessions
          (token_hash, user_id, provider, created_at, last_seen_at, expires_at)
-         VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)`,
+         SELECT ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?
+         WHERE EXISTS (
+           SELECT 1 FROM users
+           WHERE id = ? AND status = 'active'
+         )`,
       )
-      .bind(tokenHash, user.id, user.provider, expiresAt),
+      .bind(tokenHash, user.id, user.provider, expiresAt, user.id),
   ]);
+  if (Number(sessionResults[2]?.meta?.changes ?? 0) !== 1) {
+    throw new PlatformError(403, "account_suspended", "账户当前不可用。");
+  }
   return {
     cookie: authCookie(
       SESSION_COOKIE,
@@ -1818,11 +1870,46 @@ async function handleDashboard(
       .bind(user.id),
     db
       .prepare(
-        `SELECT id, amount_usd_micros, pay_currency, pay_amount,
-                pay_address, invoice_url, status, created_at, updated_at
-         FROM payment_orders
-         WHERE user_id = ?
-         ORDER BY created_at DESC
+        `SELECT p.id, p.amount_usd_micros, p.pay_currency, p.pay_amount,
+                p.pay_address, p.invoice_url, p.status,
+                p.credited_usd_micros,
+                COALESCE((
+                  SELECT -SUM(l.delta_usd_micros)
+                  FROM balance_ledger l
+                  WHERE l.user_id = p.user_id
+                    AND l.delta_usd_micros < 0
+                    AND (
+                      l.reference_id =
+                        'nowpayments:' || p.provider_payment_id || ':reversal'
+                      OR EXISTS (
+                        SELECT 1
+                        FROM payment_review_cases r
+                        WHERE r.order_id = p.id
+                          AND l.reference_id =
+                            'nowpayments-review:' || r.id || ':reversal'
+                      )
+                    )
+                ), 0) AS reversed_usd_micros,
+                (
+                  SELECT r.reason
+                  FROM payment_review_cases r
+                  WHERE r.order_id = p.id
+                  ORDER BY CASE r.status WHEN 'open' THEN 0 ELSE 1 END,
+                           r.created_at DESC
+                  LIMIT 1
+                ) AS review_reason,
+                (
+                  SELECT r.status
+                  FROM payment_review_cases r
+                  WHERE r.order_id = p.id
+                  ORDER BY CASE r.status WHEN 'open' THEN 0 ELSE 1 END,
+                           r.created_at DESC
+                  LIMIT 1
+                ) AS review_status,
+                p.created_at, p.updated_at
+         FROM payment_orders p
+         WHERE p.user_id = ?
+         ORDER BY p.created_at DESC
          LIMIT 10`,
       )
       .bind(user.id),
@@ -1886,6 +1973,10 @@ async function handleDashboard(
         pay_address: string | null;
         invoice_url: string | null;
         status: string;
+        credited_usd_micros: number;
+        reversed_usd_micros: number;
+        review_reason: string | null;
+        review_status: string | null;
         created_at: string;
         updated_at: string;
       }>(paymentsResult).map((row) => ({
@@ -1896,6 +1987,10 @@ async function handleDashboard(
         payAddress: row.pay_address,
         invoiceUrl: safeInvoiceUrl(row.invoice_url),
         status: row.status,
+        creditedUsdMicros: Number(row.credited_usd_micros),
+        reversedUsdMicros: Number(row.reversed_usd_micros),
+        reviewReason: row.review_reason,
+        reviewStatus: row.review_status,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       })),
@@ -1947,29 +2042,42 @@ async function handleCreateApiKey(
   const rateLimit = clampInteger(env.API_RATE_LIMIT_RPM, 60, 1, 600);
   const createdAt = new Date().toISOString();
 
-  const inserted = await db
-    .prepare(
-      `INSERT INTO api_keys
-       (id, user_id, label, key_prefix, key_hash, rate_limit_rpm, created_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?
-       WHERE (
-         SELECT COUNT(*)
-         FROM api_keys
-         WHERE user_id = ? AND revoked_at IS NULL
-       ) < 5`,
-    )
-    .bind(
-      id,
-      user.id,
-      label,
-      prefix,
-      keyHash,
-      rateLimit,
-      createdAt,
-      user.id,
-    )
-    .run();
+  const [inserted, statusResult] = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO api_keys
+         (id, user_id, label, key_prefix, key_hash, rate_limit_rpm, created_at)
+         SELECT ?, ?, ?, ?, ?, ?, ?
+         WHERE EXISTS (
+           SELECT 1 FROM users
+           WHERE id = ? AND status = 'active'
+         )
+           AND (
+             SELECT COUNT(*)
+             FROM api_keys
+             WHERE user_id = ? AND revoked_at IS NULL
+           ) < 5`,
+      )
+      .bind(
+        id,
+        user.id,
+        label,
+        prefix,
+        keyHash,
+        rateLimit,
+        createdAt,
+        user.id,
+        user.id,
+      ),
+    db
+      .prepare(`SELECT status FROM users WHERE id = ?`)
+      .bind(user.id),
+  ]);
   if (Number(inserted.meta?.changes ?? 0) !== 1) {
+    const currentStatus = firstResult<{ status: string }>(statusResult)?.status;
+    if (currentStatus !== "active") {
+      throw new PlatformError(403, "account_suspended", "账户当前不可用。");
+    }
     throw new PlatformError(
       409,
       "api_key_limit",
@@ -2037,6 +2145,13 @@ async function handleCreatePayment(
       503,
       "payments_in_sandbox",
       "真实加密充值尚未启用；完成商户审核与法律审查后方可开放。",
+    );
+  }
+  if (env.TIKHUB_CRYPTO_PAYMENT_CLEARED !== "true") {
+    throw new PlatformError(
+      503,
+      "tikhub_crypto_payment_not_cleared",
+      "TikHub 对稳定币仅作为 API 服务付款方式的书面澄清尚未归档，真实充值保持关闭。",
     );
   }
   const readiness = await operationalReadiness(env);
@@ -3078,6 +3193,20 @@ async function handleProxyRequest(
       "数据库迁移尚未完成，已停止真实调用与扣费。",
     );
   }
+  if (
+    readiness.capabilities.databaseConfigured &&
+    readiness.capabilities.configurationValid &&
+    readiness.capabilities.legalReviewConfirmed &&
+    readiness.capabilities.resellerAuthorized &&
+    readiness.capabilities.upstreamConfigured &&
+    !readiness.capabilities.tikhubCryptoPaymentCleared
+  ) {
+    throw new PlatformError(
+      503,
+      "tikhub_crypto_payment_not_cleared",
+      "TikHub 对稳定币仅作为 API 服务付款方式的书面澄清尚未归档，真实代理保持关闭。",
+    );
+  }
   if (!readiness.capabilities.proxyEnabled) {
     throw new PlatformError(
       503,
@@ -3137,7 +3266,8 @@ async function handleProxyRequest(
   try {
     catalog = await db
       .prepare(
-        `SELECT path, platform, http_method, upstream_price_usd_micros,
+        `SELECT path, platform, http_method, data_type, tags_json, surface,
+                operation_id, upstream_price_usd_micros,
                 customer_price_usd_micros, price_verified,
                 enabled, read_only, safety_classification,
                 safety_policy_version, sync_generation,
@@ -3168,6 +3298,10 @@ async function handleProxyRequest(
                 (SELECT safety_classification
                  FROM catalog_sync_staging LIMIT 1)
                   AS _catalog_staging_safety_schema,
+                (SELECT data_type || tags_json || surface ||
+                        COALESCE(operation_id, '')
+                 FROM catalog_sync_staging LIMIT 1)
+                  AS _catalog_staging_taxonomy_schema,
                 (SELECT idempotency_hash FROM payment_orders LIMIT 1)
                   AS _payment_idempotency_schema,
                 (SELECT upstream_cost_usd_micros FROM api_calls LIMIT 1)
@@ -3180,10 +3314,15 @@ async function handleProxyRequest(
                   AS _catalog_batch_plans_schema,
                 (SELECT expected_revision
                  FROM catalog_batch_plan_items LIMIT 1)
-                  AS _catalog_batch_items_schema
+                  AS _catalog_batch_items_schema,
+                (SELECT data_type || tags_json || surface ||
+                        COALESCE(operation_id, '')
+                 FROM catalog_batch_plan_items LIMIT 1)
+                  AS _catalog_batch_items_taxonomy_schema
          FROM endpoint_catalog
          WHERE path = ?
            AND price_verified = 1
+           AND ${catalogTaxonomyValidWhere("endpoint_catalog")}
            AND sync_generation = (
              SELECT last_success_generation
              FROM catalog_sync_state
@@ -3206,6 +3345,7 @@ async function handleProxyRequest(
       "该端点尚未通过只读与价格审核。",
     );
   }
+  strictStoredCatalogTaxonomy(catalog);
   if (catalog.coverage_verified !== 1) {
     throw new PlatformError(
       503,
@@ -3825,10 +3965,8 @@ function marketplaceReference(): MarketplaceReference {
       endpoint.path.includes("//") ||
       endpoint.path.endsWith("/") ||
       endpoint.platform !== endpoint.path.split("/")[2] ||
-      !["app", "web", "app_web", "other"].includes(endpoint.surface) ||
-      typeof endpoint.dataType !== "string" ||
-      endpoint.dataType.length < 1 ||
-      endpoint.dataType.length > 80 ||
+      !TIKHUB_SURFACES.includes(endpoint.surface) ||
+      !TIKHUB_DATA_TYPES.includes(endpoint.dataType) ||
       !Array.isArray(endpoint.tags) ||
       endpoint.tags.length > 100 ||
       !endpoint.tags.every(
@@ -3840,6 +3978,18 @@ function marketplaceReference(): MarketplaceReference {
           !/[?&#=\u0000-\u001F\u007F]/.test(tag),
       ) ||
       new Set(endpoint.tags).size !== endpoint.tags.length ||
+      JSON.stringify(endpoint.tags) !==
+        JSON.stringify(
+          [...endpoint.tags].sort((left, right) =>
+            left < right ? -1 : left > right ? 1 : 0,
+          ),
+        ) ||
+      (endpoint.operationId !== null &&
+        (typeof endpoint.operationId !== "string" ||
+          endpoint.operationId.length < 1 ||
+          endpoint.operationId.length > 500 ||
+          endpoint.operationId.trim() !== endpoint.operationId ||
+          /[\u0000-\u001F\u007F]/.test(endpoint.operationId))) ||
       !Array.isArray(endpoint.parameters) ||
       endpoint.parameters.length > 200 ||
       !endpoint.parameters.every(isPlainRecord) ||
@@ -3924,6 +4074,8 @@ async function loadMarketplaceCatalogOverlay(
   try {
     const catalogResult = await env.DB.prepare(
       `SELECT endpoint.path, endpoint.platform, endpoint.http_method,
+              endpoint.data_type, endpoint.tags_json, endpoint.surface,
+              endpoint.operation_id,
               endpoint.summary, endpoint.description,
               endpoint.parameter_schema_json,
               endpoint.customer_price_usd_micros,
@@ -3965,13 +4117,31 @@ async function loadMarketplaceCatalogOverlay(
     const referenceMatchesLive =
       typeof reference.source.snapshotHash === "string" &&
       identitySetMatches &&
-      catalogRows.every(
-        (row) =>
+      catalogRows.every((row) => {
+        const referenceEndpoint =
+          normalizedMarketplaceReferenceByKey?.get(
+            `${row.http_method.toUpperCase()}:${row.path}`,
+          );
+        const taxonomy = strictStoredCatalogTaxonomy(
+          row,
+          500,
+          "marketplace_overlay_taxonomy_invalid",
+          "实时目录分类元数据无效，API 市场已停止发布。",
+        );
+        return (
+          referenceEndpoint != null &&
+          row.platform === referenceEndpoint.platform &&
+          taxonomy.dataType === referenceEndpoint.dataType &&
+          taxonomy.surface === referenceEndpoint.surface &&
+          taxonomy.operationId === referenceEndpoint.operationId &&
+          JSON.stringify(taxonomy.tags) ===
+            JSON.stringify(referenceEndpoint.tags) &&
           row.catalog_openapi_snapshot_hash ===
             reference.source.snapshotHash &&
           Number(row.catalog_openapi_operation_count) ===
-            reference.source.operationCount,
-      );
+            reference.source.operationCount
+        );
+      });
     return {
       rows,
       catalogReady:
@@ -4676,6 +4846,203 @@ async function handleMarketplaceDetail(
   );
 }
 
+type CatalogListFilters = {
+  q: string | null;
+  platform: string | null;
+  dataType: CatalogDataType | null;
+  tag: string | null;
+  surface: MarketplaceSurface | null;
+  method: "GET" | "POST" | null;
+  status: "all" | "enabled" | "disabled" | "review";
+  safety:
+    | "all"
+    | "safe_data_read"
+    | "ambiguous"
+    | "prohibited";
+  limit: number;
+  offset: number;
+};
+
+function normalizeCatalogListFilters(
+  url: URL,
+  options: {
+    admin: boolean;
+    defaultLimit: number;
+    maxLimit: number;
+    maxOffset: number;
+  },
+): CatalogListFilters {
+  const single = (name: string, maxLength: number): string | null => {
+    if (url.searchParams.getAll(name).length > 1) {
+      throw new PlatformError(
+        400,
+        "invalid_catalog_filter",
+        `目录筛选参数 ${name} 重复。`,
+      );
+    }
+    const value = url.searchParams.get(name)?.trim() ?? "";
+    if (
+      value.length > maxLength ||
+      /[\u0000-\u001F\u007F]/.test(value)
+    ) {
+      throw new PlatformError(
+        400,
+        "invalid_catalog_filter",
+        `目录筛选参数 ${name} 无效。`,
+      );
+    }
+    return value || null;
+  };
+  const q = single("q", 160)?.normalize("NFKC").toLowerCase() ?? null;
+  const platform =
+    single("platform", 64)?.normalize("NFKC").toLowerCase() ?? null;
+  if (
+    platform !== null &&
+    !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(platform)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_filter",
+      "目录平台筛选参数无效。",
+    );
+  }
+  const dataTypeRaw =
+    single("dataType", 80)?.normalize("NFKC").toLowerCase() ?? null;
+  if (dataTypeRaw && !TIKHUB_DATA_TYPES.includes(dataTypeRaw)) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_filter",
+      "目录数据类型筛选参数无效。",
+    );
+  }
+  const tag =
+    single("tag", 160)?.normalize("NFKC").toLowerCase() ?? null;
+  const surfaceRaw =
+    single("surface", 16)?.normalize("NFKC").toLowerCase() ?? null;
+  if (surfaceRaw && !TIKHUB_SURFACES.includes(surfaceRaw)) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_filter",
+      "目录端类型筛选参数无效。",
+    );
+  }
+  const methodRaw = single("method", 8)?.toUpperCase() ?? null;
+  if (methodRaw && methodRaw !== "GET" && methodRaw !== "POST") {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_filter",
+      "目录请求方法筛选参数无效。",
+    );
+  }
+  const statusRaw =
+    single("status", 16)?.normalize("NFKC").toLowerCase() ?? "all";
+  const safetyRaw =
+    single("safety", 32)?.normalize("NFKC").toLowerCase() ?? "all";
+  if (
+    (!options.admin &&
+      (url.searchParams.has("status") ||
+        url.searchParams.has("safety"))) ||
+    !["all", "enabled", "disabled", "review"].includes(statusRaw) ||
+    ![
+      "all",
+      "safe_data_read",
+      "ambiguous",
+      "prohibited",
+    ].includes(safetyRaw)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_filter",
+      "目录状态或安全分类筛选参数无效。",
+    );
+  }
+  const rawLimit = single("limit", 6);
+  const limit =
+    rawLimit == null ? options.defaultLimit : Number(rawLimit);
+  const rawOffset = single("offset", 8);
+  const offset = rawOffset == null ? 0 : Number(rawOffset);
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > options.maxLimit ||
+    !Number.isSafeInteger(offset) ||
+    offset < 0 ||
+    offset > options.maxOffset
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_pagination",
+      "目录分页参数无效。",
+    );
+  }
+  return {
+    q,
+    platform,
+    dataType: dataTypeRaw as CatalogDataType | null,
+    tag,
+    surface: surfaceRaw as MarketplaceSurface | null,
+    method: methodRaw as "GET" | "POST" | null,
+    status: statusRaw as CatalogListFilters["status"],
+    safety: safetyRaw as CatalogListFilters["safety"],
+    limit,
+    offset,
+  };
+}
+
+function appendCatalogTaxonomyFilters(
+  clauses: string[],
+  bindings: unknown[],
+  filters: CatalogListFilters,
+  alias = "endpoint_catalog",
+): void {
+  if (filters.platform) {
+    clauses.push(`${alias}.platform = ?`);
+    bindings.push(filters.platform);
+  }
+  if (filters.dataType) {
+    clauses.push(`${alias}.data_type = ?`);
+    bindings.push(filters.dataType);
+  }
+  if (filters.surface) {
+    clauses.push(`${alias}.surface = ?`);
+    bindings.push(filters.surface);
+  }
+  if (filters.method) {
+    clauses.push(`${alias}.http_method = ?`);
+    bindings.push(filters.method);
+  }
+  if (filters.tag) {
+    clauses.push(
+      `EXISTS (
+         SELECT 1
+         FROM json_each(${alias}.tags_json) AS catalog_tag
+         WHERE lower(catalog_tag.value) = ?
+       )`,
+    );
+    bindings.push(filters.tag);
+  }
+  if (filters.q) {
+    const escaped = filters.q
+      .replaceAll("\\", "\\\\")
+      .replaceAll("%", "\\%")
+      .replaceAll("_", "\\_");
+    clauses.push(
+      `(lower(${alias}.path) LIKE ? ESCAPE '\\' OR
+        lower(${alias}.platform) LIKE ? ESCAPE '\\' OR
+        lower(${alias}.data_type) LIKE ? ESCAPE '\\' OR
+        lower(COALESCE(${alias}.summary, '')) LIKE ? ESCAPE '\\' OR
+        lower(COALESCE(${alias}.operation_id, '')) LIKE ? ESCAPE '\\')`,
+    );
+    bindings.push(
+      `%${escaped}%`,
+      `%${escaped}%`,
+      `%${escaped}%`,
+      `%${escaped}%`,
+      `%${escaped}%`,
+    );
+  }
+}
+
 async function handlePublicCatalog(
   request: Request,
   env: PlatformEnv,
@@ -4683,153 +5050,84 @@ async function handlePublicCatalog(
 ): Promise<Response> {
   const db = requireDb(env);
   const url = new URL(request.url);
-  const rawPlatform = url.searchParams.get("platform")?.trim().toLowerCase();
-  if (
-    rawPlatform &&
-    (!/^[a-z0-9_-]{1,40}$/.test(rawPlatform) ||
-      url.searchParams.getAll("platform").length !== 1)
-  ) {
-    throw new PlatformError(
-      400,
-      "invalid_platform_filter",
-      "平台筛选值无效。",
-    );
-  }
-  const rawLimit = url.searchParams.get("limit");
-  const limit = rawLimit == null ? 200 : Number(rawLimit);
-  if (
-    url.searchParams.getAll("limit").length > 1 ||
-    !Number.isSafeInteger(limit) ||
-    limit < 1 ||
-    limit > 200
-  ) {
-    throw new PlatformError(
-      400,
-      "invalid_limit",
-      "limit 必须是 1–200 的整数。",
-    );
-  }
-  const rawOffset = url.searchParams.get("offset");
-  const offset = rawOffset == null ? 0 : Number(rawOffset);
-  if (
-    url.searchParams.getAll("offset").length > 1 ||
-    !Number.isSafeInteger(offset) ||
-    offset < 0 ||
-    offset > 5_000
-  ) {
-    throw new PlatformError(
-      400,
-      "invalid_offset",
-      "offset 必须是 0–5000 的整数。",
-    );
-  }
-
-  const query = rawPlatform
-    ? db
-        .prepare(
-          `SELECT path, platform, http_method, summary,
-                  customer_price_usd_micros, updated_at
-           FROM endpoint_catalog
-           WHERE enabled = 1 AND read_only = 1 AND price_verified = 1
-             AND safety_classification = 'safe_data_read'
-             AND safety_policy_version =
-                 ${CATALOG_SAFETY_POLICY_VERSION}
-             AND platform = ?
-             AND sync_generation = (
-               SELECT last_success_generation
-               FROM catalog_sync_state
-               WHERE id = 1
-             )
-             AND EXISTS (
-               SELECT 1 FROM catalog_sync_state
-               WHERE id = 1 AND ${CATALOG_COVERAGE_WHERE}
-             )
-           ORDER BY platform ASC, path ASC
-           LIMIT ? OFFSET ?`,
-        )
-        .bind(rawPlatform, limit, offset)
-    : db
-        .prepare(
-          `SELECT path, platform, http_method, summary,
-                  customer_price_usd_micros, updated_at
-           FROM endpoint_catalog
-           WHERE enabled = 1 AND read_only = 1 AND price_verified = 1
-             AND safety_classification = 'safe_data_read'
-             AND safety_policy_version =
-                 ${CATALOG_SAFETY_POLICY_VERSION}
-             AND sync_generation = (
-               SELECT last_success_generation
-               FROM catalog_sync_state
-               WHERE id = 1
-             )
-             AND EXISTS (
-               SELECT 1 FROM catalog_sync_state
-               WHERE id = 1 AND ${CATALOG_COVERAGE_WHERE}
-             )
-           ORDER BY platform ASC, path ASC
-           LIMIT ? OFFSET ?`,
-        )
-        .bind(limit, offset);
-  const countQuery = rawPlatform
-    ? db
-        .prepare(
-          `SELECT COUNT(*) AS count
-           FROM endpoint_catalog
-           WHERE enabled = 1 AND read_only = 1 AND price_verified = 1
-             AND safety_classification = 'safe_data_read'
-             AND safety_policy_version =
-                 ${CATALOG_SAFETY_POLICY_VERSION}
-             AND platform = ?
-             AND sync_generation = (
-               SELECT last_success_generation
-               FROM catalog_sync_state
-               WHERE id = 1
-             )
-             AND EXISTS (
-               SELECT 1 FROM catalog_sync_state
-               WHERE id = 1 AND ${CATALOG_COVERAGE_WHERE}
-             )`,
-        )
-        .bind(rawPlatform)
-    : db.prepare(
-        `SELECT COUNT(*) AS count
-         FROM endpoint_catalog
-         WHERE enabled = 1 AND read_only = 1 AND price_verified = 1
-           AND safety_classification = 'safe_data_read'
-           AND safety_policy_version =
-               ${CATALOG_SAFETY_POLICY_VERSION}
-           AND sync_generation = (
-             SELECT last_success_generation
-             FROM catalog_sync_state
-             WHERE id = 1
-           )
-           AND EXISTS (
-             SELECT 1 FROM catalog_sync_state
-             WHERE id = 1 AND ${CATALOG_COVERAGE_WHERE}
-           )`,
-      );
+  const filters = normalizeCatalogListFilters(url, {
+    admin: false,
+    defaultLimit: 200,
+    maxLimit: 200,
+    maxOffset: 5_000,
+  });
+  await assertStoredCatalogTaxonomyIntegrity(db);
+  const clauses = [
+    "endpoint_catalog.enabled = 1",
+    "endpoint_catalog.read_only = 1",
+    "endpoint_catalog.price_verified = 1",
+    "endpoint_catalog.safety_classification = 'safe_data_read'",
+    `endpoint_catalog.safety_policy_version =
+       ${CATALOG_SAFETY_POLICY_VERSION}`,
+    catalogTaxonomyValidWhere("endpoint_catalog"),
+    `endpoint_catalog.sync_generation = (
+       SELECT last_success_generation
+       FROM catalog_sync_state
+       WHERE id = 1
+     )`,
+    `EXISTS (
+       SELECT 1 FROM catalog_sync_state
+       WHERE id = 1 AND ${CATALOG_COVERAGE_WHERE}
+     )`,
+  ];
+  const bindings: unknown[] = [];
+  appendCatalogTaxonomyFilters(clauses, bindings, filters);
+  const where = clauses.join(" AND ");
+  const query = db
+    .prepare(
+      `SELECT path, platform, http_method, data_type, tags_json, surface,
+              operation_id, summary, customer_price_usd_micros, updated_at
+       FROM endpoint_catalog
+       WHERE ${where}
+       ORDER BY platform ASC, path ASC
+       LIMIT ? OFFSET ?`,
+    )
+    .bind(...bindings, filters.limit, filters.offset);
+  const countQuery = db
+    .prepare(
+      `SELECT COUNT(*) AS count
+       FROM endpoint_catalog
+       WHERE ${where}`,
+    )
+    .bind(...bindings);
   const rows = await query.all<{
     path: string;
     platform: string;
     http_method: string;
+    data_type: CatalogDataType;
+    tags_json: string;
+    surface: MarketplaceSurface;
+    operation_id: string | null;
     summary: string | null;
     customer_price_usd_micros: number;
     updated_at: string;
   }>();
-  const endpoints = (rows.results ?? []).map((row) => ({
-    path: row.path,
-    platform: row.platform,
-    method: row.http_method,
-    summary: row.summary,
-    priceUsdMicros: row.customer_price_usd_micros,
-    updatedAt: row.updated_at,
-  }));
+  const endpoints = (rows.results ?? []).map((row) => {
+    const taxonomy = strictStoredCatalogTaxonomy(row);
+    return {
+      path: row.path,
+      platform: row.platform,
+      dataType: taxonomy.dataType,
+      tags: taxonomy.tags,
+      surface: taxonomy.surface,
+      operationId: taxonomy.operationId,
+      method: row.http_method,
+      summary: row.summary,
+      priceUsdMicros: row.customer_price_usd_micros,
+      updatedAt: row.updated_at,
+    };
+  });
   const countRow = await countQuery.first<{ count: number }>();
   const total = Number(countRow?.count ?? 0);
   const nextOffset =
-    offset + endpoints.length < total &&
-    offset + endpoints.length < 5_000
-      ? offset + endpoints.length
+    filters.offset + endpoints.length < total &&
+    filters.offset + endpoints.length < 5_000
+      ? filters.offset + endpoints.length
       : null;
   const readiness = await operationalReadiness(env);
 
@@ -4839,7 +5137,7 @@ async function handlePublicCatalog(
       endpoints,
       count: endpoints.length,
       total,
-      offset,
+      offset: filters.offset,
       nextOffset,
     },
     200,
@@ -4858,27 +5156,44 @@ async function handleCatalogList(
   requireAdminSecret(request, env, "catalog");
   const db = requireDb(env);
   const url = new URL(request.url);
-  const limit = Number(url.searchParams.get("limit") ?? "200");
-  const offset = Number(url.searchParams.get("offset") ?? "0");
-  if (
-    url.searchParams.getAll("limit").length > 1 ||
-    url.searchParams.getAll("offset").length > 1 ||
-    !Number.isSafeInteger(limit) ||
-    limit < 1 ||
-    limit > 500 ||
-    !Number.isSafeInteger(offset) ||
-    offset < 0 ||
-    offset > 100_000
-  ) {
-    throw new PlatformError(
-      400,
-      "invalid_pagination",
-      "分页参数无效。",
+  const filters = normalizeCatalogListFilters(url, {
+    admin: true,
+    defaultLimit: 200,
+    maxLimit: 500,
+    maxOffset: 100_000,
+  });
+  await assertStoredCatalogTaxonomyIntegrity(db);
+  const clauses = ["1 = 1"];
+  const bindings: unknown[] = [];
+  appendCatalogTaxonomyFilters(clauses, bindings, filters);
+  if (filters.status === "enabled") {
+    clauses.push("endpoint_catalog.enabled = 1");
+  } else if (filters.status === "disabled") {
+    clauses.push("endpoint_catalog.enabled = 0");
+  } else if (filters.status === "review") {
+    clauses.push(
+      `(endpoint_catalog.reviewed_at IS NULL OR
+        endpoint_catalog.sync_generation IS NULL OR
+        endpoint_catalog.sync_generation != (
+          SELECT last_success_generation
+          FROM catalog_sync_state
+          WHERE id = 1
+        ) OR
+        endpoint_catalog.price_verified != 1 OR
+        endpoint_catalog.safety_classification != 'safe_data_read' OR
+        endpoint_catalog.safety_policy_version !=
+          ${CATALOG_SAFETY_POLICY_VERSION})`,
     );
   }
+  if (filters.safety !== "all") {
+    clauses.push("endpoint_catalog.safety_classification = ?");
+    bindings.push(filters.safety);
+  }
+  const where = clauses.join(" AND ");
   const rows = await db
     .prepare(
       `SELECT path, platform, http_method, summary, description,
+              data_type, tags_json, surface, operation_id,
               parameter_schema_json, upstream_price_usd_micros,
               customer_price_usd_micros, price_verified, enabled, read_only,
               safety_classification, safety_reasons_json,
@@ -4890,14 +5205,19 @@ async function handleCatalogList(
                 WHERE id = 1
               ) AS present_in_latest_sync
        FROM endpoint_catalog
+       WHERE ${where}
        ORDER BY platform ASC, path ASC
        LIMIT ? OFFSET ?`,
     )
-    .bind(limit, offset)
+    .bind(...bindings, filters.limit, filters.offset)
     .all<{
       path: string;
       platform: string;
       http_method: string;
+      data_type: CatalogDataType;
+      tags_json: string;
+      surface: MarketplaceSurface;
+      operation_id: string | null;
       summary: string | null;
       description: string | null;
       parameter_schema_json: string | null;
@@ -4918,7 +5238,12 @@ async function handleCatalogList(
     }>();
 
   const totalRow = await db
-    .prepare(`SELECT COUNT(*) AS count FROM endpoint_catalog`)
+    .prepare(
+      `SELECT COUNT(*) AS count
+       FROM endpoint_catalog
+       WHERE ${where}`,
+    )
+    .bind(...bindings)
     .first<{ count: number }>();
   const syncRow = await db
     .prepare(
@@ -4958,37 +5283,44 @@ async function handleCatalogList(
       coverage_verified: number;
     }>();
   const total = Number(totalRow?.count ?? 0);
-  const endpoints = (rows.results ?? []).map((row) => ({
-    path: row.path,
-    platform: row.platform,
-    method: row.http_method,
-    summary: row.summary,
-    description: row.description,
-    parameterSchema: safeStoredJson(row.parameter_schema_json),
-    upstreamPriceUsdMicros: row.upstream_price_usd_micros,
-    customerPriceUsdMicros: row.customer_price_usd_micros,
-    priceVerified: row.price_verified === 1,
-    enabled: row.enabled === 1,
-    readOnly: row.read_only === 1,
-    safetyClassification: row.safety_classification,
-    safetyReasons: safeStoredStringArray(row.safety_reasons_json),
-    safetyPolicyVersion: row.safety_policy_version,
-    revision: row.revision,
-    sourceUpdatedAt: row.source_updated_at,
-    presentInLatestSync: row.present_in_latest_sync === 1,
-    reviewedAt: row.reviewed_at,
-    updatedAt: row.updated_at,
-  }));
+  const endpoints = (rows.results ?? []).map((row) => {
+    const taxonomy = strictStoredCatalogTaxonomy(row);
+    return {
+      path: row.path,
+      platform: row.platform,
+      dataType: taxonomy.dataType,
+      tags: taxonomy.tags,
+      surface: taxonomy.surface,
+      operationId: taxonomy.operationId,
+      method: row.http_method,
+      summary: row.summary,
+      description: row.description,
+      parameterSchema: safeStoredJson(row.parameter_schema_json),
+      upstreamPriceUsdMicros: row.upstream_price_usd_micros,
+      customerPriceUsdMicros: row.customer_price_usd_micros,
+      priceVerified: row.price_verified === 1,
+      enabled: row.enabled === 1,
+      readOnly: row.read_only === 1,
+      safetyClassification: row.safety_classification,
+      safetyReasons: safeStoredStringArray(row.safety_reasons_json),
+      safetyPolicyVersion: row.safety_policy_version,
+      revision: row.revision,
+      sourceUpdatedAt: row.source_updated_at,
+      presentInLatestSync: row.present_in_latest_sync === 1,
+      reviewedAt: row.reviewed_at,
+      updatedAt: row.updated_at,
+    };
+  });
 
   return jsonResponse(
     {
       endpoints,
       count: endpoints.length,
       total,
-      offset,
+      offset: filters.offset,
       nextOffset:
-        offset + endpoints.length < total
-          ? offset + endpoints.length
+        filters.offset + endpoints.length < total
+          ? filters.offset + endpoints.length
           : null,
       sync: syncRow
         ? {
@@ -5039,6 +5371,9 @@ type NormalizedCatalogBatchPreview = {
   expectedCatalogGeneration: string;
   selection: {
     platform: string | null;
+    dataType: CatalogDataType | null;
+    tag: string | null;
+    surface: MarketplaceSurface | null;
     query: string;
     status: "all" | "enabled" | "disabled" | "review";
     safety:
@@ -5057,6 +5392,10 @@ type CatalogBatchSourceRow = {
   path: string;
   platform: string;
   http_method: "GET" | "POST";
+  data_type: CatalogDataType;
+  tags_json: string;
+  surface: MarketplaceSurface;
+  operation_id: string | null;
   summary: string | null;
   upstream_price_usd_micros: number;
   customer_price_usd_micros: number;
@@ -5140,6 +5479,56 @@ function normalizeCatalogBatchPreview(
       "目录平台筛选条件无效。",
     );
   }
+  const dataTypeRaw =
+    body.selection.dataType == null
+      ? null
+      : typeof body.selection.dataType === "string"
+        ? body.selection.dataType.trim().normalize("NFKC").toLowerCase()
+        : "";
+  if (
+    dataTypeRaw !== null &&
+    !TIKHUB_DATA_TYPES.includes(dataTypeRaw)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_data_type",
+      "目录数据类型筛选条件无效。",
+    );
+  }
+  const tag =
+    body.selection.tag == null
+      ? null
+      : typeof body.selection.tag === "string"
+        ? body.selection.tag.trim().normalize("NFKC").toLowerCase()
+        : "";
+  if (
+    tag !== null &&
+    (tag.length < 1 ||
+      tag.length > 160 ||
+      /[?&#=\u0000-\u001F\u007F]/.test(tag))
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_tag",
+      "目录标签筛选条件无效。",
+    );
+  }
+  const surfaceRaw =
+    body.selection.surface == null
+      ? null
+      : typeof body.selection.surface === "string"
+        ? body.selection.surface.trim().normalize("NFKC").toLowerCase()
+        : "";
+  if (
+    surfaceRaw !== null &&
+    !TIKHUB_SURFACES.includes(surfaceRaw)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_surface",
+      "目录端类型筛选条件无效。",
+    );
+  }
   const query =
     typeof body.selection.query === "string"
       ? body.selection.query.replace(/\s+/g, " ").trim().toLowerCase()
@@ -5221,7 +5610,15 @@ function normalizeCatalogBatchPreview(
   return {
     action,
     expectedCatalogGeneration: body.expectedCatalogGeneration,
-    selection: { platform, query, status, safety },
+    selection: {
+      platform,
+      dataType: dataTypeRaw as CatalogDataType | null,
+      tag,
+      surface: surfaceRaw as MarketplaceSurface | null,
+      query,
+      status,
+      safety,
+    },
     pricing,
   };
 }
@@ -5247,6 +5644,7 @@ async function handleCatalogBatchPreview(
   const canonicalRequest = JSON.stringify(sortObjectDeep(body));
   const previewRequestHash = await sha256Hex(canonicalRequest);
   const db = requireDb(env);
+  await assertStoredCatalogTaxonomyIntegrity(db);
   const replay = await catalogBatchPlanByPreviewIdempotency(
     db,
     previewIdempotencyHash,
@@ -5344,6 +5742,24 @@ async function handleCatalogBatchPreview(
     clauses.push("platform = ?");
     bindings.push(body.selection.platform);
   }
+  if (body.selection.dataType !== null) {
+    clauses.push("data_type = ?");
+    bindings.push(body.selection.dataType);
+  }
+  if (body.selection.surface !== null) {
+    clauses.push("surface = ?");
+    bindings.push(body.selection.surface);
+  }
+  if (body.selection.tag !== null) {
+    clauses.push(
+      `EXISTS (
+         SELECT 1
+         FROM json_each(tags_json) AS catalog_tag
+         WHERE lower(catalog_tag.value) = ?
+       )`,
+    );
+    bindings.push(body.selection.tag);
+  }
   if (body.selection.query) {
     const escaped = body.selection.query
       .replaceAll("\\", "\\\\")
@@ -5382,7 +5798,8 @@ async function handleCatalogBatchPreview(
       : MAX_CATALOG_BATCH_TARGETS;
   const rows = await db
     .prepare(
-      `SELECT path, platform, http_method, summary,
+      `SELECT path, platform, http_method, data_type, tags_json, surface,
+              operation_id, summary,
               upstream_price_usd_micros, customer_price_usd_micros,
               price_verified, enabled, read_only, safety_classification,
               safety_policy_version, revision, sync_generation,
@@ -5405,6 +5822,7 @@ async function handleCatalogBatchPreview(
 
   const planned = await Promise.all(
     sourceRows.map(async (row, ordinal) => {
+      const taxonomy = strictStoredCatalogTaxonomy(row);
       let blockerCode: string | null = null;
       if (body.action !== "disable") {
         if (row.sync_generation !== body.expectedCatalogGeneration) {
@@ -5455,6 +5873,10 @@ async function handleCatalogBatchPreview(
           targetReadOnly !== row.read_only);
       const before = {
         path: row.path,
+        dataType: taxonomy.dataType,
+        tags: taxonomy.tags,
+        surface: taxonomy.surface,
+        operationId: taxonomy.operationId,
         revision: row.revision,
         upstreamPriceUsdMicros: row.upstream_price_usd_micros,
         customerPriceUsdMicros: row.customer_price_usd_micros,
@@ -5678,6 +6100,7 @@ async function handleCatalogBatchPreview(
             .prepare(
               `INSERT INTO catalog_batch_plan_items
                (id, plan_id, path, ordinal, platform, http_method, summary,
+                data_type, tags_json, surface, operation_id,
                 expected_revision, original_upstream_price_usd_micros,
                 original_customer_price_usd_micros,
                 original_price_verified, original_enabled,
@@ -5686,7 +6109,7 @@ async function handleCatalogBatchPreview(
                 target_customer_price_usd_micros, target_enabled,
                 target_read_only, will_change, blocker_code, item_digest)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?)`,
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .bind(
               `${planId}:${item.ordinal}`,
@@ -5696,6 +6119,10 @@ async function handleCatalogBatchPreview(
               item.row.platform,
               item.row.http_method,
               item.row.summary,
+              item.row.data_type,
+              item.row.tags_json,
+              item.row.surface,
+              item.row.operation_id,
               item.row.revision,
               item.row.upstream_price_usd_micros,
               item.row.customer_price_usd_micros,
@@ -5735,7 +6162,12 @@ async function handleCatalogBatchPreview(
                JOIN endpoint_catalog e ON e.path = i.path
                WHERE i.plan_id = ?
                  AND e.revision = i.expected_revision
+                 AND e.platform = i.platform
                  AND e.http_method = i.http_method
+                 AND e.data_type = i.data_type
+                 AND e.tags_json = i.tags_json
+                 AND e.surface = i.surface
+                 AND e.operation_id IS i.operation_id
                  AND e.upstream_price_usd_micros =
                      i.original_upstream_price_usd_micros
                  AND e.customer_price_usd_micros =
@@ -5785,6 +6217,8 @@ async function handleCatalogBatchPreview(
           previewAuditId,
           JSON.stringify({
             action: body.action,
+            selection: body.selection,
+            pricing: body.pricing,
             matchedCount,
             selectedCount,
             blockedCount,
@@ -5937,6 +6371,7 @@ async function handleCatalogBatchApply(
     `catalog-apply:${actorFingerprint}:${idempotencyKey}`,
   );
   const db = requireDb(env);
+  await assertStoredCatalogTaxonomyIntegrity(db);
   const existingApplyKey = await db
     .prepare(
       `SELECT id, actor_fingerprint, apply_request_hash, status
@@ -6033,6 +6468,14 @@ async function handleCatalogBatchApply(
     catalogGeneration: plan.catalog_generation,
     appliedAt,
   };
+  const storedSelector = parseCatalogBatchMetadata(
+    plan.selector_json,
+    "selector",
+  );
+  const storedMutation = parseCatalogBatchMetadata(
+    plan.mutation_json,
+    "mutation",
+  );
   const strictSourceClause =
     plan.action === "disable"
       ? "1 = 1"
@@ -6086,7 +6529,12 @@ async function handleCatalogBatchApply(
              JOIN endpoint_catalog e ON e.path = i.path
              WHERE i.plan_id = catalog_batch_plans.id
                AND e.revision = i.expected_revision
+               AND e.platform = i.platform
                AND e.http_method = i.http_method
+               AND e.data_type = i.data_type
+               AND e.tags_json = i.tags_json
+               AND e.surface = i.surface
+               AND e.operation_id IS i.operation_id
                AND e.upstream_price_usd_micros =
                    i.original_upstream_price_usd_micros
                AND e.customer_price_usd_micros =
@@ -6181,6 +6629,12 @@ async function handleCatalogBatchApply(
              WHERE i.plan_id = catalog_batch_plans.id
                AND i.will_change = 1
                AND e.revision = i.expected_revision + 1
+               AND e.platform = i.platform
+               AND e.http_method = i.http_method
+               AND e.data_type = i.data_type
+               AND e.tags_json = i.tags_json
+               AND e.surface = i.surface
+               AND e.operation_id IS i.operation_id
                AND e.customer_price_usd_micros =
                    i.target_customer_price_usd_micros
                AND e.enabled = i.target_enabled
@@ -6209,6 +6663,8 @@ async function handleCatalogBatchApply(
         auditId,
         JSON.stringify({
           action: plan.action,
+          selection: storedSelector,
+          mutation: storedMutation,
           matchedCount: plan.matched_count,
           selectedCount: plan.selected_count,
           targetDigest: plan.target_digest,
@@ -6313,6 +6769,23 @@ async function catalogBatchPlanByPreviewIdempotency(
     .first<CatalogBatchPlanRecord>();
 }
 
+function parseCatalogBatchMetadata(
+  value: string,
+  kind: "selector" | "mutation",
+): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!isPlainRecord(parsed)) throw new Error("invalid metadata");
+    return parsed;
+  } catch {
+    throw new PlatformError(
+      500,
+      "catalog_batch_metadata_invalid",
+      `批量目录${kind === "selector" ? "筛选" : "变更"}元数据损坏。`,
+    );
+  }
+}
+
 async function catalogBatchResponse(
   db: D1Database,
   plan: CatalogBatchPlanRecord,
@@ -6323,7 +6796,8 @@ async function catalogBatchResponse(
 ): Promise<Response> {
   const itemsResult = await db
     .prepare(
-      `SELECT path, ordinal, platform, http_method, summary,
+      `SELECT path, ordinal, platform, http_method, data_type, tags_json,
+              surface, operation_id, summary,
               expected_revision, original_upstream_price_usd_micros,
               original_customer_price_usd_micros, original_price_verified,
               original_enabled, original_read_only,
@@ -6338,31 +6812,38 @@ async function catalogBatchResponse(
     )
     .bind(plan.id, limit, offset)
     .all<CatalogBatchItemRecord>();
-  const items = (itemsResult.results ?? []).map((item) => ({
-    path: item.path,
-    platform: item.platform,
-    method: item.http_method,
-    summary: item.summary,
-    expectedRevision: item.expected_revision,
-    before: {
-      upstreamPriceUsdMicros: item.original_upstream_price_usd_micros,
-      customerPriceUsdMicros: item.original_customer_price_usd_micros,
-      priceVerified: item.original_price_verified === 1,
-      enabled: item.original_enabled === 1,
-      readOnly: item.original_read_only === 1,
-      syncGeneration: item.original_sync_generation,
-      reviewedAt: item.original_reviewed_at,
-      updatedAt: item.original_updated_at,
-    },
-    after: {
-      customerPriceUsdMicros: item.target_customer_price_usd_micros,
-      enabled: item.target_enabled === 1,
-      readOnly: item.target_read_only === 1,
-    },
-    willChange: item.will_change === 1,
-    blockerCode: item.blocker_code,
-    itemDigest: item.item_digest,
-  }));
+  const items = (itemsResult.results ?? []).map((item) => {
+    const taxonomy = strictStoredCatalogTaxonomy(item);
+    return {
+      path: item.path,
+      platform: item.platform,
+      dataType: taxonomy.dataType,
+      tags: taxonomy.tags,
+      surface: taxonomy.surface,
+      operationId: taxonomy.operationId,
+      method: item.http_method,
+      summary: item.summary,
+      expectedRevision: item.expected_revision,
+      before: {
+        upstreamPriceUsdMicros: item.original_upstream_price_usd_micros,
+        customerPriceUsdMicros: item.original_customer_price_usd_micros,
+        priceVerified: item.original_price_verified === 1,
+        enabled: item.original_enabled === 1,
+        readOnly: item.original_read_only === 1,
+        syncGeneration: item.original_sync_generation,
+        reviewedAt: item.original_reviewed_at,
+        updatedAt: item.original_updated_at,
+      },
+      after: {
+        customerPriceUsdMicros: item.target_customer_price_usd_micros,
+        enabled: item.target_enabled === 1,
+        readOnly: item.target_read_only === 1,
+      },
+      willChange: item.will_change === 1,
+      blockerCode: item.blocker_code,
+      itemDigest: item.item_digest,
+    };
+  });
   const nextOffset =
     offset + items.length < plan.matched_count
       ? offset + items.length
@@ -6387,6 +6868,14 @@ async function catalogBatchResponse(
         status: plan.status,
         version: plan.version,
         action: plan.action,
+        selection: parseCatalogBatchMetadata(
+          plan.selector_json,
+          "selector",
+        ),
+        mutation: parseCatalogBatchMetadata(
+          plan.mutation_json,
+          "mutation",
+        ),
         catalogGeneration: plan.catalog_generation,
         counts: {
           matched: plan.matched_count,
@@ -6648,15 +7137,48 @@ async function handleAdminUsers(
                   MAX(created_at) AS last_call_at
            FROM api_calls
            GROUP BY user_id
+         ),
+         identity_providers AS (
+           SELECT DISTINCT user_id, provider
+           FROM auth_identities
+         ),
+         identities AS (
+           SELECT p.user_id, json_group_array(p.provider) AS providers_json,
+                  (
+                    SELECT MAX(a.wallet_address)
+                    FROM auth_identities a
+                    WHERE a.user_id = p.user_id AND a.provider = 'wallet'
+                  ) AS wallet_address
+           FROM identity_providers p
+           GROUP BY p.user_id
+         ),
+         active_keys AS (
+           SELECT user_id, COUNT(*) AS active_key_count
+           FROM api_keys
+           WHERE revoked_at IS NULL
+           GROUP BY user_id
+         ),
+         active_sessions AS (
+           SELECT user_id, COUNT(*) AS active_session_count
+           FROM auth_sessions
+           WHERE datetime(expires_at) > datetime('now')
+           GROUP BY user_id
          )
          SELECT u.id, u.email, u.display_name, u.status, u.created_at,
                 COALESCE(b.balance, 0) AS balance,
                 COALESCE(g.calls_30d, 0) AS calls_30d,
                 COALESCE(g.spend_30d, 0) AS spend_30d,
-                g.last_call_at
+                g.last_call_at,
+                COALESCE(i.providers_json, '["sites"]') AS providers_json,
+                i.wallet_address,
+                COALESCE(k.active_key_count, 0) AS active_key_count,
+                COALESCE(s.active_session_count, 0) AS active_session_count
          FROM users u
          LEFT JOIN balances b ON b.user_id = u.id
          LEFT JOIN usage g ON g.user_id = u.id
+         LEFT JOIN identities i ON i.user_id = u.id
+         LEFT JOIN active_keys k ON k.user_id = u.id
+         LEFT JOIN active_sessions s ON s.user_id = u.id
          ORDER BY u.created_at DESC
          LIMIT ? OFFSET ?`,
       )
@@ -6676,6 +7198,10 @@ async function handleAdminUsers(
     calls_30d: number;
     spend_30d: number;
     last_call_at: string | null;
+    providers_json: string;
+    wallet_address: string | null;
+    active_key_count: number;
+    active_session_count: number;
   }>(usersResult).map((row) => ({
     id: row.id,
     email: row.email,
@@ -6685,6 +7211,10 @@ async function handleAdminUsers(
     calls30d: Number(row.calls_30d),
     spend30dUsdMicros: Number(row.spend_30d),
     lastCallAt: row.last_call_at,
+    providers: safeStoredStringArray(row.providers_json),
+    walletAddress: row.wallet_address,
+    activeKeyCount: Number(row.active_key_count),
+    activeSessionCount: Number(row.active_session_count),
     createdAt: row.created_at,
   }));
 
@@ -6711,11 +7241,16 @@ async function handleAdminUserUpdate(
   const body = await readJsonBody<{
     userId?: unknown;
     status?: unknown;
+    expectedStatus?: unknown;
   }>(request, MAX_DASHBOARD_BODY_BYTES);
   const userId =
     typeof body.userId === "string" ? body.userId.trim() : "";
   const status =
     typeof body.status === "string" ? body.status.trim() : "";
+  const expectedStatus =
+    typeof body.expectedStatus === "string"
+      ? body.expectedStatus.trim()
+      : "";
   if (!/^usr_[A-Za-z0-9_-]{8,128}$/.test(userId)) {
     throw new PlatformError(400, "invalid_user_id", "用户编号无效。");
   }
@@ -6726,6 +7261,16 @@ async function handleAdminUserUpdate(
       "用户状态仅支持 active 或 suspended。",
     );
   }
+  if (
+    (expectedStatus !== "active" && expectedStatus !== "suspended") ||
+    expectedStatus === status
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_expected_user_status",
+      "必须提交与目标状态不同的当前用户状态。",
+    );
+  }
 
   const db = requireDb(env);
   const auditStatement = await prepareAdminAuditStatement(db, request, {
@@ -6734,6 +7279,7 @@ async function handleAdminUserUpdate(
     targetId: userId,
     details: {
       status,
+      expectedStatus,
       credentialsInvalidated: status === "suspended",
     },
     userStatusUpdate: { userId, status },
@@ -6743,9 +7289,10 @@ async function handleAdminUserUpdate(
       .prepare(
         `UPDATE users
          SET status = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?`,
+         WHERE id = ? AND status = ?`,
       )
-      .bind(status, userId),
+      .bind(status, userId, expectedStatus),
+    auditStatement,
     db
       .prepare(
         `UPDATE api_keys
@@ -6759,10 +7306,20 @@ async function handleAdminUserUpdate(
          WHERE user_id = ? AND ? = 'suspended'`,
       )
       .bind(userId, status),
-    auditStatement,
   ]);
   if (Number(results[0]?.meta?.changes ?? 0) !== 1) {
-    throw new PlatformError(404, "user_not_found", "没有找到这个用户。");
+    const exists = await db
+      .prepare(`SELECT 1 AS present FROM users WHERE id = ?`)
+      .bind(userId)
+      .first<{ present: number }>();
+    if (!exists) {
+      throw new PlatformError(404, "user_not_found", "没有找到这个用户。");
+    }
+    throw new PlatformError(
+      409,
+      "user_status_conflict",
+      "用户状态已变化，请刷新后重新操作。",
+    );
   }
   return jsonResponse({ ok: true, userId, status }, 200, requestId);
 }
@@ -8354,13 +8911,14 @@ async function handleCatalogSync(
             .prepare(
               `INSERT INTO catalog_sync_staging
                (id, generation, path, platform, http_method, summary,
+                data_type, tags_json, surface, operation_id,
                 description, parameter_schema_json,
                 upstream_price_usd_micros,
                 suggested_customer_price_usd_micros,
                 price_verified, looks_read_only, safety_classification,
                 safety_reasons_json, safety_policy_version, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       CURRENT_TIMESTAMP)`,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, CURRENT_TIMESTAMP)`,
             )
             .bind(
               `${syncGeneration}:${offset + batchIndex}`,
@@ -8369,6 +8927,10 @@ async function handleCatalogSync(
               entry.platform,
               entry.httpMethod,
               entry.summary,
+              entry.dataType,
+              JSON.stringify(entry.tags),
+              entry.surface,
+              entry.operationId,
               entry.description,
               entry.parameterSchemaJson,
               entry.upstreamPriceUsdMicros,
@@ -8385,17 +8947,65 @@ async function handleCatalogSync(
     }
     const staged = await db
       .prepare(
-        `SELECT COUNT(*) AS count
+        `SELECT COUNT(*) AS count,
+                COALESCE(SUM(
+                  CASE
+                    WHEN data_type IN (
+                      'account', 'analytics_trends', 'comments',
+                      'commerce_marketing', 'content', 'email', 'live',
+                      'media_download', 'profile_creator',
+                      'search_discovery', 'social_graph', 'system',
+                      'taxonomy', 'utility', 'other'
+                    )
+                      AND surface IN ('app', 'web', 'app_web', 'other')
+                      AND json_valid(tags_json)
+                      AND json_type(
+                        CASE WHEN json_valid(tags_json)
+                             THEN tags_json ELSE '[]' END
+                      ) = 'array'
+                      AND json_array_length(
+                        CASE WHEN json_valid(tags_json)
+                             THEN tags_json ELSE '[]' END
+                      ) <= 100
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM json_each(
+                          CASE WHEN json_valid(tags_json)
+                               THEN tags_json ELSE '[]' END
+                        )
+                        WHERE type != 'text' OR length(value) < 1
+                          OR length(value) > 160 OR trim(value) != value
+                      )
+                      AND json_array_length(
+                        CASE WHEN json_valid(tags_json)
+                             THEN tags_json ELSE '[]' END
+                      ) = (
+                        SELECT COUNT(DISTINCT value)
+                        FROM json_each(
+                          CASE WHEN json_valid(tags_json)
+                               THEN tags_json ELSE '[]' END
+                        )
+                      )
+                      AND (
+                        operation_id IS NULL OR
+                        length(operation_id) BETWEEN 1 AND 500
+                      )
+                    THEN 1 ELSE 0
+                  END
+                ), 0) AS metadata_complete
          FROM catalog_sync_staging
          WHERE generation = ?`,
       )
       .bind(syncGeneration)
-      .first<{ count: number }>();
-    if (Number(staged?.count ?? 0) !== entries.length) {
+      .first<{ count: number; metadata_complete: number }>();
+    if (
+      Number(staged?.count ?? 0) !== entries.length ||
+      Number(staged?.metadata_complete ?? 0) !== entries.length
+    ) {
       throw new PlatformError(
         409,
         "catalog_snapshot_incomplete",
-        "目录暂存快照不完整，本次不会发布。",
+        "目录暂存快照或数据类型元数据不完整，本次不会发布。",
       );
     }
 
@@ -8442,13 +9052,15 @@ async function handleCatalogSync(
       db
         .prepare(
           `INSERT INTO endpoint_catalog
-           (path, platform, http_method, summary, description,
-            parameter_schema_json, upstream_price_usd_micros,
+           (path, platform, http_method, data_type, tags_json, surface,
+            operation_id, summary, description, parameter_schema_json,
+            upstream_price_usd_micros,
             customer_price_usd_micros, price_verified, enabled, read_only,
             safety_classification, safety_reasons_json,
             safety_policy_version, revision, source_updated_at,
             sync_generation, created_at, updated_at)
-           SELECT s.path, s.platform, s.http_method, s.summary,
+           SELECT s.path, s.platform, s.http_method, s.data_type,
+                  s.tags_json, s.surface, s.operation_id, s.summary,
                   s.description, s.parameter_schema_json,
                   s.upstream_price_usd_micros,
                   s.suggested_customer_price_usd_micros,
@@ -8471,6 +9083,10 @@ async function handleCatalogSync(
            ON CONFLICT(path) DO UPDATE SET
              platform = excluded.platform,
              http_method = excluded.http_method,
+             data_type = excluded.data_type,
+             tags_json = excluded.tags_json,
+             surface = excluded.surface,
+             operation_id = excluded.operation_id,
              summary = excluded.summary,
              description = excluded.description,
              parameter_schema_json = excluded.parameter_schema_json,
@@ -8486,6 +9102,11 @@ async function handleCatalogSync(
                  OR endpoint_catalog.http_method != excluded.http_method
                  OR endpoint_catalog.upstream_price_usd_micros !=
                     excluded.upstream_price_usd_micros
+                 OR endpoint_catalog.data_type != excluded.data_type
+                 OR endpoint_catalog.tags_json != excluded.tags_json
+                 OR endpoint_catalog.surface != excluded.surface
+                 OR endpoint_catalog.operation_id IS NOT
+                    excluded.operation_id
                  OR endpoint_catalog.safety_classification !=
                     excluded.safety_classification
                  OR endpoint_catalog.safety_policy_version !=
@@ -8495,7 +9116,12 @@ async function handleCatalogSync(
                ELSE endpoint_catalog.enabled
              END,
              read_only = CASE
-               WHEN endpoint_catalog.safety_classification !=
+               WHEN endpoint_catalog.data_type != excluded.data_type
+                 OR endpoint_catalog.tags_json != excluded.tags_json
+                 OR endpoint_catalog.surface != excluded.surface
+                 OR endpoint_catalog.operation_id IS NOT
+                    excluded.operation_id
+                 OR endpoint_catalog.safety_classification !=
                       excluded.safety_classification
                  OR endpoint_catalog.safety_policy_version !=
                       excluded.safety_policy_version
@@ -8508,6 +9134,11 @@ async function handleCatalogSync(
                  OR endpoint_catalog.http_method != excluded.http_method
                  OR endpoint_catalog.upstream_price_usd_micros !=
                     excluded.upstream_price_usd_micros
+                 OR endpoint_catalog.data_type != excluded.data_type
+                 OR endpoint_catalog.tags_json != excluded.tags_json
+                 OR endpoint_catalog.surface != excluded.surface
+                 OR endpoint_catalog.operation_id IS NOT
+                    excluded.operation_id
                  OR endpoint_catalog.safety_classification !=
                     excluded.safety_classification
                  OR endpoint_catalog.safety_policy_version !=
@@ -8531,7 +9162,8 @@ async function handleCatalogSync(
       db
         .prepare(
           `UPDATE endpoint_catalog
-           SET enabled = 0, reviewed_at = NULL, source_updated_at = NULL,
+           SET enabled = 0, read_only = 0, reviewed_at = NULL,
+               source_updated_at = NULL,
                sync_generation = NULL, revision = revision + 1,
                updated_at = CURRENT_TIMESTAMP
            WHERE NOT EXISTS (
@@ -8769,10 +9401,12 @@ async function handleCatalogUpdate(
   }
 
   const db = requireDb(env);
+  await assertStoredCatalogTaxonomyIntegrity(db);
   const existing = await db
     .prepare(
       `SELECT http_method, upstream_price_usd_micros,
               customer_price_usd_micros, price_verified, enabled,
+              data_type, tags_json, surface, operation_id,
               read_only, safety_classification, safety_policy_version,
               revision, sync_generation,
               (
@@ -8790,6 +9424,10 @@ async function handleCatalogUpdate(
       http_method: string;
       price_verified: number;
       enabled: number;
+      data_type: CatalogDataType;
+      tags_json: string;
+      surface: MarketplaceSurface;
+      operation_id: string | null;
       read_only: number;
       safety_classification: CatalogSafetyClassification;
       safety_policy_version: number;
@@ -8804,6 +9442,7 @@ async function handleCatalogUpdate(
       "目录中没有这个端点，请先同步上游目录。",
     );
   }
+  const existingTaxonomy = strictStoredCatalogTaxonomy(existing);
   if (
     body.enabled &&
     (existing.sync_generation == null ||
@@ -8917,6 +9556,7 @@ async function handleCatalogUpdate(
         customerPriceUsdMicros: price,
       },
       safetyClassification: existing.safety_classification,
+      taxonomy: existingTaxonomy,
       upstreamPriceUsdMicros: existing.upstream_price_usd_micros,
       syncGeneration: existing.sync_generation,
     },
@@ -9086,7 +9726,7 @@ async function handleReconciliation(
                AND datetime(updated_at) < datetime('now', '-1 minute')
              )
              OR (
-               status = 'expired'
+               status IN ('expired', 'failed')
                AND datetime(updated_at) < datetime('now', '-6 hours')
                AND datetime(created_at) >= datetime('now', '-7 days')
              )
@@ -9277,7 +9917,6 @@ async function handleReconciliation(
                 'nowpayments:' || p.provider_payment_id || ':reversal'
            WHERE p.provider = 'nowpayments'
              AND p.provider_payment_id IS NOT NULL
-             AND datetime(p.created_at) >= datetime('now', '-180 days')
              AND reversal.id IS NULL
            UNION
            SELECT r.order_id, r.provider_payment_id
@@ -10325,6 +10964,8 @@ function platformReadiness(env: PlatformEnv) {
   const databaseConfigured = Boolean(env.DB);
   const legalReviewConfirmed = env.LEGAL_REVIEW_CONFIRMED === "true";
   const resellerAuthorized = env.RESELLER_AUTHORIZED === "true";
+  const tikhubCryptoPaymentCleared =
+    env.TIKHUB_CRYPTO_PAYMENT_CLEARED === "true";
   const upstreamConfigured = hasConfiguredCredential(env.TIKHUB_API_KEY);
   const configurationValid = hasValidRuntimeConfiguration(env);
   const masterAdminConfigured =
@@ -10356,16 +10997,20 @@ function platformReadiness(env: PlatformEnv) {
     googleAuthenticationConfigured ||
     walletAuthenticationConfigured ||
     trustedSitesIdentityConfigured;
+  const productionAuthenticationConfigured =
+    googleAuthenticationConfigured && walletAuthenticationConfigured;
   const proxyEnabled =
     databaseConfigured &&
     legalReviewConfirmed &&
     resellerAuthorized &&
+    tikhubCryptoPaymentCleared &&
     upstreamConfigured &&
     configurationValid;
   const paymentsEnabled =
     proxyEnabled &&
-    authenticationConfigured &&
+    productionAuthenticationConfigured &&
     env.CRYPTO_PAYMENTS_ENABLED === "true" &&
+    tikhubCryptoPaymentCleared &&
     paymentProviderConfigured;
   const missing: string[] = [];
   if (!databaseConfigured) missing.push("database");
@@ -10377,13 +11022,22 @@ function platformReadiness(env: PlatformEnv) {
   if (env.CRYPTO_PAYMENTS_ENABLED !== "true") {
     missing.push("crypto_payments");
   }
+  if (!tikhubCryptoPaymentCleared) {
+    missing.push("tikhub_crypto_payment_clearance");
+  }
   if (!paymentProviderConfigured) missing.push("payment_provider");
   if (!authenticationConfigured) missing.push("authentication");
+  if (!googleAuthenticationConfigured) {
+    missing.push("google_authentication");
+  }
+  if (!walletAuthenticationConfigured) {
+    missing.push("wallet_authentication");
+  }
   const ready =
     proxyEnabled &&
     paymentsEnabled &&
     adminConfigured &&
-    authenticationConfigured;
+    productionAuthenticationConfigured;
   const mode = ready
     ? "live"
     : proxyEnabled || paymentsEnabled
@@ -10398,6 +11052,7 @@ function platformReadiness(env: PlatformEnv) {
       configurationValid,
       legalReviewConfirmed,
       resellerAuthorized,
+      tikhubCryptoPaymentCleared,
       upstreamConfigured,
       proxyEnabled,
       paymentsEnabled,
@@ -10407,6 +11062,7 @@ function platformReadiness(env: PlatformEnv) {
       reconciliationConfigured,
       paymentAdminConfigured,
       authenticationConfigured,
+      productionAuthenticationConfigured,
       googleAuthenticationConfigured,
       walletAuthenticationConfigured,
       trustedSitesIdentityConfigured,
@@ -10467,6 +11123,7 @@ async function operationalReadiness(env: PlatformEnv) {
   const base = platformReadiness(env);
   let catalogReady = false;
   let schemaReady = false;
+  let taxonomyReady = false;
   let reconciliationRecent = false;
   let upstreamConfigured = base.capabilities.upstreamConfigured;
   if (env.DB) {
@@ -10479,6 +11136,7 @@ async function operationalReadiness(env: PlatformEnv) {
                FROM endpoint_catalog
                WHERE enabled = 1 AND read_only = 1
                  AND price_verified = 1
+                 AND ${catalogTaxonomyValidWhere("endpoint_catalog")}
                  AND safety_classification = 'safe_data_read'
                  AND safety_policy_version = ${CATALOG_SAFETY_POLICY_VERSION}
                  AND sync_generation = (
@@ -10527,6 +11185,10 @@ async function operationalReadiness(env: PlatformEnv) {
              (SELECT safety_classification
               FROM catalog_sync_staging LIMIT 1)
                AS catalog_staging_safety_schema,
+             (SELECT data_type || tags_json || surface ||
+                     COALESCE(operation_id, '')
+              FROM catalog_sync_staging LIMIT 1)
+               AS catalog_staging_taxonomy_schema,
              (SELECT idempotency_hash FROM payment_orders LIMIT 1)
                AS payment_idempotency_schema,
              (SELECT upstream_cost_usd_micros FROM api_calls LIMIT 1)
@@ -10541,11 +11203,19 @@ async function operationalReadiness(env: PlatformEnv) {
                AS catalog_safety_schema,
              (SELECT revision FROM endpoint_catalog LIMIT 1)
                AS catalog_revision_schema,
+             (SELECT data_type || tags_json || surface ||
+                     COALESCE(operation_id, '')
+              FROM endpoint_catalog LIMIT 1)
+               AS catalog_taxonomy_schema,
              (SELECT target_digest FROM catalog_batch_plans LIMIT 1)
                AS catalog_batch_plans_schema,
              (SELECT expected_revision
               FROM catalog_batch_plan_items LIMIT 1)
                AS catalog_batch_items_schema,
+             (SELECT data_type || tags_json || surface ||
+                     COALESCE(operation_id, '')
+              FROM catalog_batch_plan_items LIMIT 1)
+               AS catalog_batch_items_taxonomy_schema,
              (SELECT provider FROM auth_identities LIMIT 1)
                AS auth_identities_schema,
              (SELECT provider FROM auth_sessions LIMIT 1)
@@ -10585,12 +11255,19 @@ async function operationalReadiness(env: PlatformEnv) {
           catalog_credential_state_version: number | null;
         }>();
       schemaReady = row != null;
+      try {
+        await assertStoredCatalogTaxonomyIntegrity(env.DB);
+        taxonomyReady = true;
+      } catch {
+        taxonomyReady = false;
+      }
       reconciliationRecent =
         Number(row?.reconciliation_recent ?? 0) === 1;
       try {
         const resolved = await resolveTikHubCredential(env, env.DB);
         upstreamConfigured = Boolean(resolved);
         catalogReady =
+          taxonomyReady &&
           resolved != null &&
           Number(row?.enabled_count ?? 0) > 0 &&
           Number(row?.coverage_verified ?? 0) === 1 &&
@@ -10605,6 +11282,7 @@ async function operationalReadiness(env: PlatformEnv) {
       }
     } catch {
       schemaReady = false;
+      taxonomyReady = false;
       catalogReady = false;
       reconciliationRecent = false;
       upstreamConfigured = false;
@@ -10615,11 +11293,13 @@ async function operationalReadiness(env: PlatformEnv) {
     base.capabilities.configurationValid &&
     base.capabilities.legalReviewConfirmed &&
     base.capabilities.resellerAuthorized &&
+    base.capabilities.tikhubCryptoPaymentCleared &&
     upstreamConfigured;
   const paymentsEnabled =
     proxyEnabled &&
-    base.capabilities.authenticationConfigured &&
+    base.capabilities.productionAuthenticationConfigured &&
     env.CRYPTO_PAYMENTS_ENABLED === "true" &&
+    base.capabilities.tikhubCryptoPaymentCleared &&
     (env.PAYMENT_PROVIDER ?? "nowpayments") === "nowpayments" &&
     hasConfiguredCredential(env.NOWPAYMENTS_API_KEY) &&
     hasConfiguredCredential(env.NOWPAYMENTS_IPN_SECRET) &&
@@ -10631,7 +11311,7 @@ async function operationalReadiness(env: PlatformEnv) {
     proxyEnabled &&
     paymentsEnabled &&
     base.capabilities.adminConfigured &&
-    base.capabilities.authenticationConfigured &&
+    base.capabilities.productionAuthenticationConfigured &&
     schemaReady &&
     catalogReady &&
     reconciliationRecent;
@@ -10640,6 +11320,7 @@ async function operationalReadiness(env: PlatformEnv) {
   );
   if (!upstreamConfigured) missing.push("upstream_credentials");
   if (!schemaReady) missing.push("database_migrations");
+  if (schemaReady && !taxonomyReady) missing.push("catalog_taxonomy");
   if (!catalogReady) missing.push("enabled_catalog");
   if (!reconciliationRecent) missing.push("scheduled_reconciliation");
   const mode = ready
@@ -10656,6 +11337,7 @@ async function operationalReadiness(env: PlatformEnv) {
       upstreamConfigured,
       proxyEnabled,
       schemaReady,
+      taxonomyReady,
       catalogReady,
       reconciliationRecent,
       paymentsEnabled,
@@ -10739,8 +11421,10 @@ function paymentOrderResponse(
     {
       payment: {
         id: order.id,
+        providerPaymentId: order.provider_payment_id,
         status: order.status,
         amountUsdMicros: order.amount_usd_micros,
+        creditedUsdMicros: order.credited_usd_micros,
         payAddress: order.pay_address,
         payAmount: order.pay_amount,
         payCurrency: order.pay_currency,
@@ -11241,6 +11925,10 @@ type CatalogSyncEntry = {
   path: string;
   platform: string;
   httpMethod: "GET" | "POST";
+  dataType: CatalogDataType;
+  tags: string[];
+  surface: MarketplaceSurface;
+  operationId: string | null;
   summary: string | null;
   description: string | null;
   parameterSchemaJson: string | null;
@@ -11889,6 +12577,175 @@ function resolveOpenApiInputReferences(
   }
 }
 
+function normalizeCatalogOperationTags(value: unknown): string[] {
+  if (value == null) return [];
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new PlatformError(
+      502,
+      "catalog_openapi_taxonomy_invalid",
+      "TikHub OpenAPI 的 operation tags 无效，本次同步已停止。",
+    );
+  }
+  const tags = value.map((item) => {
+    if (
+      typeof item !== "string" ||
+      item.length < 1 ||
+      item.length > 160 ||
+      item.trim() !== item ||
+      /[?&#=\u0000-\u001F\u007F]/.test(item) ||
+      looksSensitiveCatalogExample(item) ||
+      redactSensitiveCatalogText(item) !== item
+    ) {
+      throw new PlatformError(
+        502,
+        "catalog_openapi_taxonomy_invalid",
+        "TikHub OpenAPI 的 operation tag 无效，本次同步已停止。",
+      );
+    }
+    return item;
+  });
+  return [...new Set(tags)].sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  );
+}
+
+function normalizeCatalogOperationId(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value !== "string") {
+    throw new PlatformError(
+      502,
+      "catalog_openapi_taxonomy_invalid",
+      "TikHub OpenAPI 的 operationId 无效，本次同步已停止。",
+    );
+  }
+  const operationId = value.trim();
+  if (
+    operationId.length < 1 ||
+    operationId.length > 500 ||
+    /[\u0000-\u001F\u007F]/.test(operationId)
+  ) {
+    throw new PlatformError(
+      502,
+      "catalog_openapi_taxonomy_invalid",
+      "TikHub OpenAPI 的 operationId 无效，本次同步已停止。",
+    );
+  }
+  return redactSensitiveCatalogText(operationId);
+}
+
+function strictStoredCatalogTaxonomy(
+  value: {
+    data_type: unknown;
+    tags_json: unknown;
+    surface: unknown;
+    operation_id: unknown;
+  },
+  status = 503,
+  code = "catalog_taxonomy_invalid",
+  message = "目录分类元数据无效，已停止发布与调用。",
+): {
+  dataType: CatalogDataType;
+  tags: string[];
+  surface: MarketplaceSurface;
+  operationId: string | null;
+} {
+  try {
+    if (
+      typeof value.data_type !== "string" ||
+      !TIKHUB_DATA_TYPES.includes(value.data_type)
+    ) {
+      throw new Error("invalid data type");
+    }
+    if (
+      typeof value.surface !== "string" ||
+      !TIKHUB_SURFACES.includes(value.surface)
+    ) {
+      throw new Error("invalid surface");
+    }
+    if (typeof value.tags_json !== "string") {
+      throw new Error("invalid tags storage");
+    }
+    const parsedTags = JSON.parse(value.tags_json) as unknown;
+    const tags = normalizeCatalogOperationTags(parsedTags);
+    if (JSON.stringify(parsedTags) !== JSON.stringify(tags)) {
+      throw new Error("tags are not canonical");
+    }
+    const operationId = normalizeCatalogOperationId(value.operation_id);
+    if (operationId !== value.operation_id) {
+      throw new Error("operation id is not canonical");
+    }
+    return {
+      dataType: value.data_type as CatalogDataType,
+      tags,
+      surface: value.surface as MarketplaceSurface,
+      operationId,
+    };
+  } catch {
+    throw new PlatformError(status, code, message);
+  }
+}
+
+async function assertStoredCatalogTaxonomyIntegrity(
+  db: D1Database,
+): Promise<void> {
+  let afterPath = "";
+  let inspected = 0;
+  while (true) {
+    let rows: Array<{
+      path: string;
+      data_type: unknown;
+      tags_json: unknown;
+      surface: unknown;
+      operation_id: unknown;
+    }>;
+    try {
+      const result = await db
+        .prepare(
+          `SELECT path, data_type, tags_json, surface, operation_id
+           FROM endpoint_catalog
+           WHERE path > ?
+           ORDER BY path ASC
+           LIMIT 500`,
+        )
+        .bind(afterPath)
+        .all();
+      rows = resultRows<{
+        path: string;
+        data_type: unknown;
+        tags_json: unknown;
+        surface: unknown;
+        operation_id: unknown;
+      }>(result);
+    } catch {
+      throw new PlatformError(
+        503,
+        "catalog_taxonomy_schema_unavailable",
+        "目录分类迁移尚未完成，已停止发布与调用。",
+      );
+    }
+    for (const row of rows) {
+      if (typeof row.path !== "string" || row.path <= afterPath) {
+        throw new PlatformError(
+          503,
+          "catalog_taxonomy_order_invalid",
+          "目录分类记录顺序无效，已停止发布与调用。",
+        );
+      }
+      strictStoredCatalogTaxonomy(row);
+      afterPath = row.path;
+      inspected += 1;
+    }
+    if (inspected > 100_000) {
+      throw new PlatformError(
+        503,
+        "catalog_taxonomy_limit_exceeded",
+        "历史目录记录超过安全审查上限，已停止发布与调用。",
+      );
+    }
+    if (rows.length < 500) break;
+  }
+}
+
 function extractOpenApiCatalog(
   payload: unknown,
 ): Map<
@@ -11907,8 +12764,20 @@ function extractOpenApiCatalog(
     Omit<CatalogSyncEntry, "upstreamPriceUsdMicros" | "priceVerified">
   >();
   for (const [rawPath, pathItem] of Object.entries(payload.paths)) {
-    if (!isPlainRecord(pathItem)) continue;
-    const documentedMethods = [
+    if (!/^\/(?:api\/)?v1\//.test(rawPath)) continue;
+    if (
+      !isPlainRecord(pathItem) ||
+      Object.hasOwn(pathItem, "$ref") ||
+      (Object.hasOwn(pathItem, "parameters") &&
+        !Array.isArray(pathItem.parameters))
+    ) {
+      throw new PlatformError(
+        502,
+        "catalog_openapi_operation_invalid",
+        "TikHub OpenAPI 的 v1 path item 无效，本次同步已停止。",
+      );
+    }
+    const operationMethods = [
       "get",
       "post",
       "put",
@@ -11917,9 +12786,24 @@ function extractOpenApiCatalog(
       "head",
       "options",
       "trace",
-    ].filter((method) =>
-      isPlainRecord(pathItem[method]),
+    ] as const;
+    const presentMethods = operationMethods.filter((method) =>
+      Object.hasOwn(pathItem, method),
     );
+    if (
+      presentMethods.some(
+        (method) =>
+          !isPlainRecord(pathItem[method]) ||
+          Object.hasOwn(pathItem[method] as Record<string, unknown>, "$ref"),
+      )
+    ) {
+      throw new PlatformError(
+        502,
+        "catalog_openapi_operation_invalid",
+        "TikHub OpenAPI 的 v1 operation 无效，本次同步已停止。",
+      );
+    }
+    const documentedMethods = presentMethods;
     if (
       documentedMethods.some(
         (method) => method !== "get" && method !== "post",
@@ -11948,8 +12832,45 @@ function extractOpenApiCatalog(
       const operation = pathItem[method];
       if (!isPlainRecord(operation)) continue;
       try {
+        if (
+          (Object.hasOwn(operation, "parameters") &&
+            !Array.isArray(operation.parameters)) ||
+          (Object.hasOwn(operation, "requestBody") &&
+            !isPlainRecord(operation.requestBody))
+        ) {
+          throw new PlatformError(
+            502,
+            "catalog_openapi_operation_invalid",
+            "TikHub OpenAPI 的 v1 operation 输入元数据无效，本次同步已停止。",
+          );
+        }
         const path = normalizeCatalogPath(rawPath);
         const httpMethod = method.toUpperCase() as "GET" | "POST";
+        const tags = normalizeCatalogOperationTags(operation.tags);
+        const operationId = normalizeCatalogOperationId(
+          operation.operationId,
+        );
+        const surface = tikhubSurfaceForPath(
+          rawPath,
+          tags,
+        ) as MarketplaceSurface;
+        const platform = path.split("/")[2] || "other";
+        const dataType = tikhubDataTypeFor({
+          platform,
+          sourcePath: rawPath,
+          tags,
+          operationId,
+        }) as CatalogDataType;
+        if (
+          !TIKHUB_SURFACES.includes(surface) ||
+          !TIKHUB_DATA_TYPES.includes(dataType)
+        ) {
+          throw new PlatformError(
+            502,
+            "catalog_openapi_taxonomy_invalid",
+            "TikHub OpenAPI 的数据分类无效，本次同步已停止。",
+          );
+        }
         const pathParameters = Array.isArray(pathItem.parameters)
           ? pathItem.parameters
           : [];
@@ -11988,8 +12909,12 @@ function extractOpenApiCatalog(
               };
         const entry = {
           path,
-          platform: path.split("/")[2] || "other",
+          platform,
           httpMethod,
+          dataType,
+          tags,
+          surface,
+          operationId,
           summary:
             typeof operation.summary === "string"
               ? compactCatalogText(
@@ -12011,11 +12936,25 @@ function extractOpenApiCatalog(
           safetyPolicyVersion: CATALOG_SAFETY_POLICY_VERSION,
         };
         if (selected == null || httpMethod === "GET") selected = entry;
-      } catch {
-        // Ignore malformed non-v1 documentation paths.
+      } catch (error) {
+        if (error instanceof PlatformError && error.status === 502) {
+          throw error;
+        }
+        throw new PlatformError(
+          502,
+          "catalog_openapi_taxonomy_invalid",
+          "TikHub OpenAPI 的 v1 operation 元数据无效，本次同步已停止。",
+        );
       }
     }
     if (selected) {
+      if (byPath.has(selected.path)) {
+        throw new PlatformError(
+          502,
+          "catalog_openapi_path_collision",
+          "TikHub OpenAPI 出现归一化后重复的 v1 路径，本次同步已停止。",
+        );
+      }
       byPath.set(selected.path, selected);
     }
   }
@@ -12698,9 +13637,10 @@ async function prepareAdminAuditStatement(
       .prepare(
         `INSERT INTO admin_audit_logs
          (id, actor_fingerprint, action, target_type, target_id,
-          details_json, created_at)
+         details_json, created_at)
          SELECT ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
-         WHERE EXISTS (
+         WHERE changes() = 1
+           AND EXISTS (
            SELECT 1 FROM users
            WHERE id = ? AND status = ?
          )`,

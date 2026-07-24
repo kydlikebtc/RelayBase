@@ -135,6 +135,14 @@ function callbackErrorMessage(code: string | null) {
     oauth_state_invalid: "登录请求已过期或无法验证，请重新开始。",
     oauth_callback_failed: "Google 登录回调失败，请稍后重试。",
     session_unavailable: "登录会话暂时不可用，请稍后重试。",
+    identity_link_required:
+      "这个邮箱已属于另一 RelayBase 账户。为保护余额和 API Key，请联系支持完成身份核验。",
+    identity_email_conflict:
+      "Google 返回的邮箱已属于另一账户，请联系支持完成身份核验。",
+    identity_link_conflict:
+      "这个登录身份已关联到不可用账户，请联系支持。",
+    account_suspended:
+      "该 RelayBase 账户已暂停，请联系支持确认账户状态。",
   };
   if (!code) return "";
   return messages[code] ?? "登录未完成，请重新选择一种登录方式。";

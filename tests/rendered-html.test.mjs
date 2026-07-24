@@ -175,6 +175,7 @@ const migrationFiles = [
   "drizzle/0010_solid_wasp.sql",
   "drizzle/0011_eminent_molten_man.sql",
   "drizzle/0012_mute_wasp.sql",
+  "drizzle/0013_overrated_thunderball.sql",
 ];
 
 async function migrate(db, names = migrationFiles) {
@@ -193,13 +194,22 @@ function seedCompleteMarketplaceIdentitySet(
   generation = TEST_CATALOG_GENERATION,
 ) {
   const insert = db.raw.prepare(
-    `INSERT OR IGNORE INTO endpoint_catalog
+    `INSERT INTO endpoint_catalog
      (path, platform, http_method,
+      data_type, tags_json, surface, operation_id,
       upstream_price_usd_micros, customer_price_usd_micros,
       price_verified, enabled, read_only, safety_classification,
       safety_reasons_json, safety_policy_version, sync_generation)
-     VALUES (?, ?, ?, 0, 0, 0, 0, 0, 'ambiguous',
-             '["test_fixture_unreviewed"]', 1, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 'ambiguous',
+             '["test_fixture_unreviewed"]', 1, ?)
+     ON CONFLICT(path) DO UPDATE SET
+       platform = excluded.platform,
+       http_method = excluded.http_method,
+       data_type = excluded.data_type,
+       tags_json = excluded.tags_json,
+       surface = excluded.surface,
+       operation_id = excluded.operation_id,
+       sync_generation = excluded.sync_generation`,
   );
   db.raw.exec("BEGIN IMMEDIATE");
   try {
@@ -208,6 +218,10 @@ function seedCompleteMarketplaceIdentitySet(
         operation.path,
         operation.platform,
         operation.method,
+        operation.dataType,
+        JSON.stringify(operation.tags),
+        operation.surface,
+        operation.operationId,
         generation,
       );
     }
@@ -225,6 +239,10 @@ function enableCatalogEndpoint(
   upstreamApiKey = "upstream-key",
 ) {
   const generation = TEST_CATALOG_GENERATION;
+  const referenceOperation =
+    marketplaceReferenceFixture.operations.find(
+      (operation) => operation.path === path,
+    ) ?? null;
   const credentialFingerprint = createHash("sha256")
     .update(upstreamApiKey)
     .digest("hex")
@@ -280,10 +298,19 @@ function enableCatalogEndpoint(
            safety_classification = 'safe_data_read',
            safety_reasons_json = '["test_fixture"]',
            safety_policy_version = 1,
+           data_type = ?, tags_json = ?, surface = ?, operation_id = ?,
            sync_generation = ?, reviewed_at = CURRENT_TIMESTAMP
        WHERE path = ?`,
     )
-    .run(customerPriceUsdMicros, generation, path);
+    .run(
+      customerPriceUsdMicros,
+      referenceOperation?.dataType ?? "other",
+      JSON.stringify(referenceOperation?.tags ?? []),
+      referenceOperation?.surface ?? "other",
+      referenceOperation?.operationId ?? null,
+      generation,
+      path,
+    );
   db.raw
     .prepare(
       `INSERT INTO operation_heartbeats
@@ -391,6 +418,10 @@ test("sanitizes invalid Example Object metadata and rejects multi-method paths",
   );
   assert.match(serialized, /YOUR_CREDENTIAL/);
   assert.doesNotMatch(serialized, /runtime-invalid-/);
+  assert.deepEqual(catalog.operations[0].tags, ["Demo-API"]);
+  assert.equal(catalog.operations[0].operationId, "fetch_example");
+  assert.equal(catalog.operations[0].surface, "web");
+  assert.equal(catalog.operations[0].dataType, "system");
 
   assert.throws(
     () =>
@@ -411,6 +442,70 @@ test("sanitizes invalid Example Object metadata and rejects multi-method paths",
   );
 });
 
+test("strictly normalizes reference taxonomy metadata and rejects unsafe source values", () => {
+  const generate = (operation) => {
+    const openApi = {
+      openapi: "3.1.0",
+      info: { title: "Synthetic TikHub API", version: "taxonomy-test" },
+      paths: {
+        "/api/v1/custom/other/fetch": {
+          get: operation,
+        },
+      },
+    };
+    return buildTikHubReferenceCatalog(
+      openApi,
+      "a".repeat(64),
+      Buffer.byteLength(JSON.stringify(openApi)),
+    ).operations[0];
+  };
+
+  const omitted = generate({});
+  assert.deepEqual(omitted.tags, []);
+  assert.equal(omitted.operationId, null);
+
+  const explicitNull = generate({
+    tags: null,
+    operationId: null,
+  });
+  assert.deepEqual(explicitNull.tags, []);
+  assert.equal(explicitNull.operationId, null);
+
+  const normalized = generate({
+    tags: ["Zulu-API", "Alpha-API", "Zulu-API"],
+    operationId:
+      "  video Bearer abcdefghijklmnop  ",
+  });
+  assert.deepEqual(normalized.tags, ["Alpha-API", "Zulu-API"]);
+  assert.equal(normalized.operationId, "video Bearer [REDACTED]");
+  assert.equal(normalized.dataType, "content");
+
+  for (const tags of [
+    "not-an-array",
+    [" leading-space"],
+    ["unsafe?tag"],
+    ["sk-abcdefghijklmnop"],
+    Array.from({ length: 101 }, (_, index) => `tag-${index}`),
+  ]) {
+    assert.throws(
+      () => generate({ tags }),
+      /invalid or sensitive tags metadata/,
+    );
+  }
+
+  for (const operationId of [
+    42,
+    "   ",
+    "fetch\nvideo",
+    "x".repeat(501),
+  ]) {
+    assert.throws(
+      () => generate({ operationId }),
+      /operationId/,
+    );
+  }
+});
+
 test("renders the finished product routes without starter metadata", async () => {
   for (const [path, expected] of [
     ["/", "把分散的接口"],
@@ -424,6 +519,15 @@ test("renders the finished product routes without starter metadata", async () =>
     });
     assert.equal(response.status, 200, path);
     assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
+    assert.equal(response.headers.get("x-frame-options"), "DENY");
+    assert.equal(
+      response.headers.get("content-security-policy"),
+      "base-uri 'self'; frame-ancestors 'none'; object-src 'none'",
+    );
+    assert.equal(
+      response.headers.get("referrer-policy"),
+      "strict-origin-when-cross-origin",
+    );
     const html = await response.text();
     assert.match(html, /RelayBase/);
     assert.match(html, new RegExp(expected));
@@ -594,6 +698,7 @@ test("only marks marketplace endpoints available when the live proxy is callable
     TIKHUB_API_KEY: "upstream-key",
     RESELLER_AUTHORIZED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
+    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
     RECONCILIATION_SECRET:
       "marketplace-reconcile-secret-32-characters",
   });
@@ -686,6 +791,60 @@ test("only marks marketplace endpoints available when the live proxy is callable
     /"X-RelayBase-Max-Cost-Usd-Micros": "2000"/,
   );
 
+  const resetProfileTaxonomy = () =>
+    db.raw
+      .prepare(
+        `UPDATE endpoint_catalog
+         SET data_type = 'profile_creator',
+             tags_json = '["TikTok-Web-API"]',
+             surface = 'web',
+             operation_id =
+               'fetch_user_profile_api_v1_tiktok_web_fetch_user_profile_get'
+         WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+      )
+      .run();
+  for (const [field, sql] of [
+    [
+      "dataType",
+      `UPDATE endpoint_catalog SET data_type = 'content'
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    ],
+    [
+      "tags",
+      `UPDATE endpoint_catalog SET tags_json = '["TikTok-Web-V2-API"]'
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    ],
+    [
+      "surface",
+      `UPDATE endpoint_catalog SET surface = 'app'
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    ],
+    [
+      "operationId",
+      `UPDATE endpoint_catalog SET operation_id = 'fetch_other_profile'
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    ],
+  ]) {
+    resetProfileTaxonomy();
+    db.raw.prepare(sql).run();
+    const mismatchedTaxonomyDetail = await fetchWorker(
+      "/api/marketplace/detail" +
+        "?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_profile" +
+        "&method=GET",
+      {},
+      { ...matchingEnv },
+    );
+    assert.equal(mismatchedTaxonomyDetail.status, 200, field);
+    const mismatchedTaxonomy = await mismatchedTaxonomyDetail.json();
+    assert.equal(
+      mismatchedTaxonomy.endpoint.availability,
+      "pending",
+      field,
+    );
+    assert.equal(mismatchedTaxonomy.endpoint.priceUsdMicros, null, field);
+  }
+  resetProfileTaxonomy();
+
   const sandboxDetail = await fetchWorker(
     "/api/marketplace/detail" +
       "?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_profile" +
@@ -725,6 +884,125 @@ test("reports sandbox health and blocks live operations by default", async () =>
   assert.equal((await payment.json()).error.code, "payments_in_sandbox");
 });
 
+test("requires exact TikHub crypto-payment clearance before proxy or checkout", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const env = baseEnv({
+    DB: db,
+    LEGAL_REVIEW_CONFIRMED: "true",
+    RESELLER_AUTHORIZED: "true",
+    TIKHUB_API_KEY: "upstream-key",
+    CRYPTO_PAYMENTS_ENABLED: "true",
+    TIKHUB_CRYPTO_PAYMENT_CLEARED: "TRUE",
+    PAYMENT_PROVIDER: "nowpayments",
+    NOWPAYMENTS_API_KEY: "provider-key",
+    NOWPAYMENTS_IPN_SECRET: "ipn-secret",
+    CATALOG_SYNC_SECRET: "catalog-secret-32-characters-minimum",
+    RECONCILIATION_SECRET:
+      "reconciliation-secret-32-characters-minimum",
+    PAYMENT_ADMIN_SECRET:
+      "payment-admin-secret-32-characters-minimum",
+  });
+  const health = await fetchWorker("/api/health", {}, env);
+  assert.equal(health.status, 200);
+  const healthData = await health.json();
+  assert.equal(
+    healthData.capabilities.tikhubCryptoPaymentCleared,
+    false,
+  );
+  assert.equal(healthData.capabilities.proxyEnabled, false);
+  assert.equal(healthData.capabilities.paymentsEnabled, false);
+  assert.ok(
+    healthData.missing.includes("tikhub_crypto_payment_clearance"),
+  );
+  const readiness = await fetchWorker("/api/readiness", {}, env);
+  assert.equal(readiness.status, 503);
+  const readinessData = await readiness.json();
+  assert.equal(readinessData.ok, false);
+  assert.notEqual(readinessData.mode, "live");
+  assert.equal(
+    readinessData.capabilities.tikhubCryptoPaymentCleared,
+    false,
+  );
+
+  const nativeFetch = globalThis.fetch;
+  let externalCalls = 0;
+  globalThis.fetch = async () => {
+    externalCalls += 1;
+    throw new Error("uncleared deployment must not call an upstream");
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const proxy = await fetchWorker(
+    "/v1/tiktok/web/fetch_user_profile?uniqueId=uncleared",
+    {
+      headers: {
+        authorization: "Bearer rb_live_not-used",
+        "idempotency-key": "uncleared-proxy-request",
+      },
+    },
+    env,
+  );
+  assert.equal(proxy.status, 503);
+  assert.equal(
+    (await proxy.json()).error.code,
+    "tikhub_crypto_payment_not_cleared",
+  );
+
+  const payment = await fetchWorker(
+    "/api/payments",
+    {
+      method: "POST",
+      headers: signedInHeaders({
+        "idempotency-key": "uncleared-payment-request",
+      }),
+      body: JSON.stringify({
+        amountUsd: 10,
+        payCurrency: "usdttrc20",
+      }),
+    },
+    env,
+  );
+  assert.equal(payment.status, 503);
+  assert.equal(
+    (await payment.json()).error.code,
+    "tikhub_crypto_payment_not_cleared",
+  );
+  assert.equal(externalCalls, 0);
+  assert.equal(
+    db.raw.prepare("SELECT COUNT(*) AS count FROM payment_orders").get()
+      .count,
+    0,
+  );
+  assert.equal(
+    db.raw.prepare("SELECT COUNT(*) AS count FROM balance_ledger").get()
+      .count,
+    0,
+  );
+
+  const clearedHealth = await fetchWorker(
+    "/api/health",
+    {},
+    {
+      ...env,
+      TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
+    },
+  );
+  const clearedHealthData = await clearedHealth.json();
+  assert.equal(
+    clearedHealthData.capabilities.tikhubCryptoPaymentCleared,
+    true,
+  );
+  assert.ok(
+    !clearedHealthData.missing.includes(
+      "tikhub_crypto_payment_clearance",
+    ),
+  );
+});
+
 test("fails readiness and payment creation when database migrations are stale", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
@@ -742,6 +1020,7 @@ test("fails readiness and payment creation when database migrations are stale", 
     RESELLER_AUTHORIZED: "true",
     TIKHUB_API_KEY: "upstream-key",
     CRYPTO_PAYMENTS_ENABLED: "true",
+    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
     PAYMENT_PROVIDER: "nowpayments",
     NOWPAYMENTS_API_KEY: "provider-key",
     NOWPAYMENTS_IPN_SECRET: "ipn-secret",
@@ -837,7 +1116,7 @@ test("upgrades populated payment events through the auth and review migrations",
     )
     .run();
 
-  await migrate(db, migrationFiles.slice(7));
+  await migrate(db, migrationFiles.slice(7, 13));
   const event = db.raw
     .prepare(
       `SELECT attempt_count, last_attempt_at, next_attempt_at,
@@ -912,7 +1191,7 @@ test("adds catalog coverage evidence without changing the previous live generati
     )
     .run(credentialFingerprint);
 
-  await migrate(db, migrationFiles.slice(11));
+  await migrate(db, migrationFiles.slice(11, 13));
   const state = db.raw
     .prepare(
       `SELECT last_success_generation, credential_fingerprint,
@@ -975,13 +1254,16 @@ test("adds catalog coverage evidence without changing the previous live generati
     TIKHUB_API_KEY: upstreamKey,
     RESELLER_AUTHORIZED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
+    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
     RECONCILIATION_SECRET: "coverage-reconcile-secret-32-minimum",
   });
   const health = await fetchWorker("/api/health", {}, env);
   assert.equal(health.status, 200);
   const healthData = await health.json();
-  assert.equal(healthData.capabilities.schemaReady, true);
+  assert.equal(healthData.capabilities.schemaReady, false);
+  assert.equal(healthData.capabilities.taxonomyReady, false);
   assert.equal(healthData.capabilities.catalogReady, false);
+  assert.ok(healthData.missing.includes("database_migrations"));
   assert.ok(healthData.missing.includes("enabled_catalog"));
 
   const proxy = await fetchWorker(
@@ -991,6 +1273,400 @@ test("adds catalog coverage evidence without changing the previous live generati
   );
   assert.equal(proxy.status, 503);
   assert.equal((await proxy.json()).error.code, "service_not_ready");
+});
+
+test("upgrades the populated catalog to persisted taxonomy and requires a fresh review", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db, migrationFiles.slice(0, 13));
+
+  db.raw
+    .prepare(
+      `UPDATE endpoint_catalog
+       SET enabled = 1, read_only = 1, price_verified = 1,
+           safety_classification = 'safe_data_read',
+           safety_reasons_json = '["pre_taxonomy_review"]',
+           revision = 7, sync_generation = 'sync-before-taxonomy',
+           reviewed_at = '2026-07-24 08:00:00'
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO endpoint_catalog
+       (path, platform, http_method,
+        upstream_price_usd_micros, customer_price_usd_micros,
+        price_verified, enabled, read_only, safety_classification,
+        safety_reasons_json, safety_policy_version, revision,
+        sync_generation, reviewed_at)
+       VALUES ('/v1/youtube/web/fetch_video_detail', 'youtube', 'GET',
+               1000, 2000, 1, 1, 1, 'safe_data_read',
+               '["pre_taxonomy_review"]', 1, 3,
+               'sync-before-taxonomy', '2026-07-24 08:00:00')`,
+    )
+    .run();
+  const stagingInsert = db.raw.prepare(
+    `INSERT INTO catalog_sync_staging
+     (id, generation, path, platform, http_method,
+      upstream_price_usd_micros, suggested_customer_price_usd_micros,
+      price_verified, looks_read_only)
+     VALUES (?, 'sync-incomplete-taxonomy',
+             '/v1/tiktok/web/fetch_user_profile', 'tiktok', 'GET',
+             1000, 2000, 1, 1)`,
+  );
+  stagingInsert.run("staging-taxonomy-1");
+  stagingInsert.run("staging-taxonomy-2");
+  db.raw
+    .prepare(
+      `INSERT INTO catalog_sync_locks (id, generation)
+       VALUES (1, 'sync-incomplete-taxonomy')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO catalog_sync_state
+       (id, last_success_generation, synced_at)
+       VALUES (1, 'sync-before-taxonomy', '2026-07-24 08:00:00')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO catalog_batch_plans
+       (id, actor_fingerprint, preview_idempotency_hash,
+        preview_request_hash, policy_version, action, status, version,
+        filter_status, filter_safety, selector_json, mutation_json,
+        catalog_generation, openapi_snapshot_hash, price_snapshot_hash,
+        matched_count, selected_count, excluded_stale_count,
+        excluded_unverified_count, excluded_unsafe_count,
+        no_change_count, price_increase_count, price_decrease_count,
+        price_unchanged_count, blocked_count,
+        upstream_total_usd_micros, before_customer_total_usd_micros,
+        after_customer_total_usd_micros, target_digest, before_digest,
+        after_digest, confirmation_text, expires_at)
+       VALUES ('plan-before-taxonomy', 'actor', 'preview-idempotency',
+               'preview-request', 1, 'reprice', 'ready', 0,
+               'enabled', 'safe_data_read', '{}', '{}',
+               'sync-before-taxonomy', 'openapi-hash', 'price-hash',
+               1, 1, 0, 0, 0, 0, 0, 0, 1, 0,
+               1000, 2000, 2000, 'target-digest', 'before-digest',
+               'after-digest', 'CONFIRM', '2099-01-01 00:00:00')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO catalog_batch_plan_items
+       (id, plan_id, path, ordinal, platform, http_method,
+        expected_revision, original_upstream_price_usd_micros,
+        original_customer_price_usd_micros, original_price_verified,
+        original_enabled, original_read_only, original_sync_generation,
+        original_updated_at, target_customer_price_usd_micros,
+        target_enabled, target_read_only, will_change, item_digest)
+       VALUES ('item-before-taxonomy', 'plan-before-taxonomy',
+               '/v1/tiktok/web/fetch_user_profile', 0, 'tiktok', 'GET',
+               7, 1000, 2000, 1, 1, 1, 'sync-before-taxonomy',
+               '2026-07-24 08:00:00', 2000, 1, 1, 0, 'item-digest')`,
+    )
+    .run();
+
+  await migrate(db, migrationFiles.slice(13));
+
+  const columnsFor = (table) =>
+    new Set(
+      db.raw
+        .prepare(`SELECT name FROM pragma_table_info('${table}')`)
+        .all()
+        .map((column) => column.name),
+    );
+  for (const table of [
+    "endpoint_catalog",
+    "catalog_sync_staging",
+    "catalog_batch_plan_items",
+  ]) {
+    const columns = columnsFor(table);
+    for (const column of [
+      "data_type",
+      "tags_json",
+      "surface",
+      "operation_id",
+    ]) {
+      assert.ok(columns.has(column), `${table}.${column}`);
+    }
+  }
+
+  const endpoints = db.raw
+    .prepare(
+      `SELECT path, enabled, read_only, reviewed_at, sync_generation,
+              revision, data_type, tags_json, surface, operation_id
+       FROM endpoint_catalog
+       WHERE path IN (
+         '/v1/tiktok/web/fetch_user_profile',
+         '/v1/youtube/web/fetch_video_detail'
+       )
+       ORDER BY path`,
+    )
+    .all()
+    .map((row) => ({ ...row }));
+  assert.deepEqual(endpoints, [
+    {
+      path: "/v1/tiktok/web/fetch_user_profile",
+      enabled: 0,
+      read_only: 0,
+      reviewed_at: null,
+      sync_generation: null,
+      revision: 8,
+      data_type: "other",
+      tags_json: "[]",
+      surface: "other",
+      operation_id: null,
+    },
+    {
+      path: "/v1/youtube/web/fetch_video_detail",
+      enabled: 0,
+      read_only: 0,
+      reviewed_at: null,
+      sync_generation: null,
+      revision: 4,
+      data_type: "other",
+      tags_json: "[]",
+      surface: "other",
+      operation_id: null,
+    },
+  ]);
+  assert.equal(
+    db.raw.prepare("SELECT COUNT(*) AS count FROM catalog_sync_staging")
+      .get().count,
+    0,
+  );
+  assert.equal(
+    db.raw.prepare("SELECT COUNT(*) AS count FROM catalog_sync_locks")
+      .get().count,
+    0,
+  );
+  assert.equal(
+    db.raw.prepare("SELECT COUNT(*) AS count FROM catalog_sync_state")
+      .get().count,
+    0,
+  );
+  assert.deepEqual(
+    {
+      ...db.raw
+        .prepare(
+          `SELECT data_type, tags_json, surface, operation_id,
+                  expected_revision
+           FROM catalog_batch_plan_items
+           WHERE id = 'item-before-taxonomy'`,
+        )
+        .get(),
+    },
+    {
+      data_type: "other",
+      tags_json: "[]",
+      surface: "other",
+      operation_id: null,
+      expected_revision: 7,
+    },
+  );
+  assert.equal(
+    db.raw.prepare("PRAGMA foreign_key_check").all().length,
+    0,
+  );
+});
+
+test("fails closed when the catalog is still on the pre-taxonomy schema", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db, migrationFiles.slice(0, 13));
+
+  const nativeFetch = globalThis.fetch;
+  let upstreamCalls = 0;
+  globalThis.fetch = async () => {
+    upstreamCalls += 1;
+    throw new Error("pre-taxonomy schema must not reach an upstream");
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+  const env = baseEnv({
+    DB: db,
+    LEGAL_REVIEW_CONFIRMED: "true",
+    RESELLER_AUTHORIZED: "true",
+    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
+    TIKHUB_API_KEY: "upstream-key",
+    RECONCILIATION_SECRET:
+      "pre-taxonomy-reconcile-secret-32-minimum",
+  });
+
+  const readiness = await fetchWorker("/api/readiness", {}, env);
+  assert.equal(readiness.status, 503);
+  const readinessData = await readiness.json();
+  assert.equal(readinessData.capabilities.schemaReady, false);
+  assert.ok(readinessData.missing.includes("database_migrations"));
+
+  const proxy = await fetchWorker(
+    "/v1/tiktok/web/fetch_user_profile?uniqueId=pre-taxonomy",
+    {
+      headers: {
+        authorization: "Bearer rb_live_pre_taxonomy",
+        "idempotency-key": "pre-taxonomy-proxy-request",
+      },
+    },
+    env,
+  );
+  assert.equal(proxy.status, 503);
+  assert.equal((await proxy.json()).error.code, "service_not_ready");
+  assert.equal(upstreamCalls, 0);
+});
+
+test("never reports live readiness for non-canonical stored taxonomy", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  enableCatalogEndpoint(db);
+  db.raw
+    .prepare(
+      `UPDATE endpoint_catalog
+       SET tags_json = '["bad?tag"]'
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    )
+    .run();
+  const env = baseEnv({
+    DB: db,
+    TIKHUB_API_KEY: "upstream-key",
+    RESELLER_AUTHORIZED: "true",
+    LEGAL_REVIEW_CONFIRMED: "true",
+    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
+    RECONCILIATION_SECRET:
+      "taxonomy-corruption-reconcile-secret-32-minimum",
+  });
+  const nativeFetch = globalThis.fetch;
+  let upstreamCalls = 0;
+  globalThis.fetch = async () => {
+    upstreamCalls += 1;
+    throw new Error("corrupt taxonomy must not reach upstream");
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const health = await fetchWorker("/api/health", {}, env);
+  assert.equal(health.status, 200);
+  const healthData = await health.json();
+  assert.equal(healthData.ready, false);
+  assert.notEqual(healthData.mode, "live");
+  assert.equal(healthData.capabilities.schemaReady, true);
+  assert.equal(healthData.capabilities.taxonomyReady, false);
+  assert.equal(healthData.capabilities.catalogReady, false);
+  assert.ok(healthData.missing.includes("catalog_taxonomy"));
+
+  const catalog = await fetchWorker("/api/catalog", {}, env);
+  assert.equal(catalog.status, 503);
+  assert.equal((await catalog.json()).error.code, "catalog_taxonomy_invalid");
+
+  const proxy = await fetchWorker(
+    "/v1/tiktok/web/fetch_user_profile?uniqueId=corrupt-taxonomy",
+    {
+      headers: {
+        authorization: "Bearer rb_live_corrupt_taxonomy",
+        "idempotency-key": "corrupt-taxonomy-proxy-request",
+      },
+    },
+    env,
+  );
+  assert.equal(proxy.status, 503);
+  assert.equal((await proxy.json()).error.code, "service_not_ready");
+  assert.equal(upstreamCalls, 0);
+});
+
+test("keeps financial ledger and payment evidence append-only after migration", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  db.raw
+    .prepare(
+      `INSERT INTO users (id, email, display_name)
+       VALUES ('usr-financial-retention', 'retention@example.com',
+               'Financial Retention')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO payment_orders
+       (id, user_id, provider, amount_usd_micros, pay_currency, status)
+       VALUES ('pay_financial_retention', 'usr-financial-retention',
+               'nowpayments', 10000000, 'usdttrc20', 'waiting')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO balance_ledger
+       (id, user_id, entry_type, delta_usd_micros, reference_id)
+       VALUES ('led-financial-retention', 'usr-financial-retention',
+               'payment_credit', 10000000,
+               'nowpayments:financial-retention:credit')`,
+    )
+    .run();
+
+  assert.throws(
+    () =>
+      db.raw
+        .prepare(
+          `UPDATE balance_ledger
+           SET delta_usd_micros = 1
+           WHERE id = 'led-financial-retention'`,
+        )
+        .run(),
+    /balance_ledger is append-only/,
+  );
+  assert.throws(
+    () =>
+      db.raw
+        .prepare(
+          `DELETE FROM balance_ledger
+           WHERE id = 'led-financial-retention'`,
+        )
+        .run(),
+    /balance_ledger is append-only/,
+  );
+  assert.throws(
+    () =>
+      db.raw
+        .prepare(
+          `DELETE FROM payment_orders
+           WHERE id = 'pay_financial_retention'`,
+        )
+        .run(),
+    /payment_orders are retained for audit/,
+  );
+  assert.throws(
+    () =>
+      db.raw
+        .prepare(
+          `DELETE FROM users
+           WHERE id = 'usr-financial-retention'`,
+        )
+        .run(),
+    /(balance_ledger is append-only|payment_orders are retained for audit)/,
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM balance_ledger
+         WHERE user_id = 'usr-financial-retention'`,
+      )
+      .get().count,
+    1,
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM payment_orders
+         WHERE user_id = 'usr-financial-retention'`,
+      )
+      .get().count,
+    1,
+  );
 });
 
 test("fails closed before upstream access when catalog coverage evidence is inconsistent", async (t) => {
@@ -1004,6 +1680,7 @@ test("fails closed before upstream access when catalog coverage evidence is inco
     TIKHUB_API_KEY: "upstream-key",
     RESELLER_AUTHORIZED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
+    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
     CATALOG_SYNC_SECRET: catalogSecret,
     RECONCILIATION_SECRET: "catalog-evidence-reconcile-secret-32-minimum",
   });
@@ -1418,6 +2095,7 @@ test("validates browser and admin JSON without coercion", async (t) => {
   const env = baseEnv({
     DB: db,
     CRYPTO_PAYMENTS_ENABLED: "true",
+    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
     RESELLER_AUTHORIZED: "true",
     TIKHUB_API_KEY: "upstream-test-key",
@@ -1609,6 +2287,298 @@ test("uses one-time wallet signatures and ignores untrusted identity headers", a
     env,
   );
   assert.equal(signedOutMe.status, 401);
+});
+
+test("rolls back first-login users when identity linking fails and retries cleanly", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const env = baseEnv({
+    DB: db,
+    TRUST_SITES_IDENTITY_HEADERS: "false",
+    WALLET_LOGIN_ENABLED: "true",
+  });
+  const account = privateKeyToAccount(
+    "0x59c6995e998f97a5a0044976f7d6d55f53f6d2f695e356f13e36f9d53e87b6b8",
+  );
+  const verifyFreshChallenge = async () => {
+    const challengeResponse = await fetchWorker(
+      "/api/auth/wallet/challenge",
+      {
+        method: "POST",
+        headers: {
+          origin: "http://localhost",
+          "content-type": "application/json",
+          "cf-connecting-ip": "203.0.113.30",
+        },
+        body: JSON.stringify({
+          address: account.address,
+          chainId: "0x1",
+          returnTo: "/console",
+        }),
+      },
+      env,
+    );
+    assert.equal(challengeResponse.status, 200);
+    const challenge = await challengeResponse.json();
+    const signature = await account.signMessage({
+      message: challenge.message,
+    });
+    return fetchWorker(
+      "/api/auth/wallet/verify",
+      {
+        method: "POST",
+        headers: {
+          origin: "http://localhost",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          challengeId: challenge.challengeId,
+          address: account.address,
+          signature,
+        }),
+      },
+      env,
+    );
+  };
+
+  db.raw.exec(
+    `CREATE TRIGGER fail_first_identity_link
+     BEFORE INSERT ON auth_identities
+     BEGIN
+       SELECT RAISE(ABORT, 'forced identity link failure');
+     END`,
+  );
+  const failed = await verifyFreshChallenge();
+  assert.equal(failed.status, 500);
+  assert.equal(
+    db.raw.prepare("SELECT COUNT(*) AS count FROM users").get().count,
+    0,
+  );
+  assert.equal(
+    db.raw
+      .prepare("SELECT COUNT(*) AS count FROM auth_identities")
+      .get().count,
+    0,
+  );
+
+  db.raw.exec("DROP TRIGGER fail_first_identity_link");
+  const retried = await verifyFreshChallenge();
+  assert.equal(retried.status, 200);
+  assert.ok(responseCookie(retried, "rb_session"));
+  assert.equal(
+    db.raw.prepare("SELECT COUNT(*) AS count FROM users").get().count,
+    1,
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM auth_identities
+         WHERE provider = 'wallet' AND subject = ?`,
+      )
+      .get(account.address.toLowerCase()).count,
+    1,
+  );
+});
+
+test("rejects sessions and API keys whose writes lose a suspension race", async (t) => {
+  const db = new PausableBatchD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const adminSecret = "suspension-race-admin-secret-32-minimum";
+  const userId = "usr_suspension_race_0001";
+  const account = privateKeyToAccount(
+    "0x5de4111afa1c4b3daadb435b6b1e7cc0bb6c227bc5feefc7a45722801a0b2f3a",
+  );
+  const walletAddress = account.address.toLowerCase();
+  db.raw
+    .prepare(
+      `INSERT INTO users (id, email, display_name)
+       VALUES (?, ?, 'Suspension Race')`,
+    )
+    .run(
+      userId,
+      `${walletAddress.slice(2)}@wallet.relaybase.invalid`,
+    );
+  db.raw
+    .prepare(
+      `INSERT INTO auth_identities
+       (id, user_id, provider, subject, wallet_address)
+       VALUES ('aid_suspension_race_0001', ?, 'wallet', ?, ?)`,
+    )
+    .run(userId, walletAddress, walletAddress);
+  const env = baseEnv({
+    DB: db,
+    ADMIN_MASTER_SECRET: adminSecret,
+    TRUST_SITES_IDENTITY_HEADERS: "false",
+    WALLET_LOGIN_ENABLED: "true",
+  });
+  const usersBeforeRace = await fetchWorker(
+    "/api/admin/users",
+    {
+      headers: {
+        authorization: `Bearer ${adminSecret}`,
+      },
+    },
+    env,
+  );
+  assert.equal(usersBeforeRace.status, 200);
+  const userBeforeRace = (await usersBeforeRace.json()).users[0];
+  assert.deepEqual(userBeforeRace.providers, ["wallet"]);
+  assert.equal(userBeforeRace.walletAddress, walletAddress);
+  assert.equal(userBeforeRace.activeKeyCount, 0);
+  assert.equal(userBeforeRace.activeSessionCount, 0);
+  const updateStatus = (status) => {
+    const expectedStatus = db.raw
+      .prepare("SELECT status FROM users WHERE id = ?")
+      .get(userId).status;
+    return fetchWorker(
+      "/api/admin/users",
+      {
+        method: "PATCH",
+        headers: {
+          authorization: `Bearer ${adminSecret}`,
+          origin: "http://localhost",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ userId, status, expectedStatus }),
+      },
+      env,
+    );
+  };
+
+  const challengeResponse = await fetchWorker(
+    "/api/auth/wallet/challenge",
+    {
+      method: "POST",
+      headers: {
+        origin: "http://localhost",
+        "content-type": "application/json",
+        "cf-connecting-ip": "203.0.113.31",
+      },
+      body: JSON.stringify({
+        address: account.address,
+        chainId: "0x1",
+        returnTo: "/console",
+      }),
+    },
+    env,
+  );
+  assert.equal(challengeResponse.status, 200);
+  const challenge = await challengeResponse.json();
+  const signature = await account.signMessage({
+    message: challenge.message,
+  });
+  const sessionGate = db.pauseNextBatch((statements) =>
+    statements.some((statement) =>
+      statement.sql.includes("INSERT INTO auth_sessions"),
+    ),
+  );
+  const verifyPromise = fetchWorker(
+    "/api/auth/wallet/verify",
+    {
+      method: "POST",
+      headers: {
+        origin: "http://localhost",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        challengeId: challenge.challengeId,
+        address: account.address,
+        signature,
+      }),
+    },
+    env,
+  );
+  await sessionGate.paused;
+  const suspendedDuringLogin = await updateStatus("suspended");
+  assert.equal(suspendedDuringLogin.status, 200);
+  sessionGate.release();
+  const rejectedLogin = await verifyPromise;
+  assert.equal(rejectedLogin.status, 403);
+  assert.equal(
+    (await rejectedLogin.json()).error.code,
+    "account_suspended",
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        "SELECT COUNT(*) AS count FROM auth_sessions WHERE user_id = ?",
+      )
+      .get(userId).count,
+    0,
+  );
+
+  const resumedForKey = await updateStatus("active");
+  assert.equal(resumedForKey.status, 200);
+  const token = "session_suspension_race_token_000000000001";
+  db.raw
+    .prepare(
+      `INSERT INTO auth_sessions
+       (token_hash, user_id, provider, expires_at)
+       VALUES (?, ?, 'wallet', datetime('now', '+1 day'))`,
+    )
+    .run(createHash("sha256").update(token).digest("hex"), userId);
+  const keyGate = db.pauseNextBatch((statements) =>
+    statements.some((statement) =>
+      statement.sql.includes("INSERT INTO api_keys"),
+    ),
+  );
+  const keyPromise = fetchWorker(
+    "/api/keys",
+    {
+      method: "POST",
+      headers: {
+        origin: "http://localhost",
+        "content-type": "application/json",
+        cookie: `rb_session=${token}`,
+      },
+      body: JSON.stringify({ label: "racing key" }),
+    },
+    env,
+  );
+  await keyGate.paused;
+  const suspendedDuringKey = await updateStatus("suspended");
+  assert.equal(suspendedDuringKey.status, 200);
+  keyGate.release();
+  const rejectedKey = await keyPromise;
+  assert.equal(rejectedKey.status, 403);
+  assert.equal(
+    (await rejectedKey.json()).error.code,
+    "account_suspended",
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM api_keys
+         WHERE user_id = ? AND revoked_at IS NULL`,
+      )
+      .get(userId).count,
+    0,
+  );
+
+  const resumedAfterRaces = await updateStatus("active");
+  assert.equal(resumedAfterRaces.status, 200);
+  assert.equal(
+    db.raw
+      .prepare(
+        "SELECT COUNT(*) AS count FROM auth_sessions WHERE user_id = ?",
+      )
+      .get(userId).count,
+    0,
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM api_keys
+         WHERE user_id = ? AND revoked_at IS NULL`,
+      )
+      .get(userId).count,
+    0,
+  );
 });
 
 test("verifies Google PKCE state, nonce and server-side identity before session creation", async (t) => {
@@ -1887,11 +2857,15 @@ test("atomically invalidates every session and API key when suspending a user", 
     TRUST_SITES_IDENTITY_HEADERS: "false",
     RESELLER_AUTHORIZED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
+    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
     TIKHUB_API_KEY: "upstream-secret",
     RECONCILIATION_SECRET: "user-suspend-reconcile-secret-32-minimum",
   });
-  const updateStatus = (status) =>
-    fetchWorker(
+  const updateStatus = (status) => {
+    const expectedStatus = db.raw
+      .prepare("SELECT status FROM users WHERE id = ?")
+      .get(userId).status;
+    return fetchWorker(
       "/api/admin/users",
       {
         method: "PATCH",
@@ -1900,10 +2874,11 @@ test("atomically invalidates every session and API key when suspending a user", 
           origin: "http://localhost",
           "content-type": "application/json",
         },
-        body: JSON.stringify({ userId, status }),
+        body: JSON.stringify({ userId, status, expectedStatus }),
       },
       env,
     );
+  };
 
   const activeSession = await fetchWorker(
     "/api/auth/me",
@@ -1999,6 +2974,7 @@ test("atomically invalidates every session and API key when suspending a user", 
     .get(userId);
   assert.deepEqual(JSON.parse(suspendAudit.details_json), {
     status: "suspended",
+    expectedStatus: "active",
     credentialsInvalidated: true,
   });
 
@@ -2040,6 +3016,28 @@ test("atomically invalidates every session and API key when suspending a user", 
       )
       .get(userId).count,
     0,
+  );
+  const staleResume = await fetchWorker(
+    "/api/admin/users",
+    {
+      method: "PATCH",
+      headers: {
+        authorization: `Bearer ${adminSecret}`,
+        origin: "http://localhost",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        userId,
+        status: "active",
+        expectedStatus: "suspended",
+      }),
+    },
+    env,
+  );
+  assert.equal(staleResume.status, 409);
+  assert.equal(
+    (await staleResume.json()).error.code,
+    "user_status_conflict",
   );
   assert.equal(
     db.raw
@@ -2093,6 +3091,7 @@ test("creates hashed customer keys and proxies with idempotent billing", async (
     DB: db,
     RESELLER_AUTHORIZED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
+    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
     TIKHUB_API_KEY: "upstream-secret",
     TIKHUB_BASE_URL: "https://api.tikhub.io/api/v1",
     API_RATE_LIMIT_RPM: "4",
@@ -4171,10 +5170,13 @@ test("polls and reverses a refunded parent while its child review is still open"
     .prepare(
       `INSERT INTO payment_orders
        (id, user_id, provider, provider_payment_id, amount_usd_micros,
-        pay_currency, pay_amount, status, credited_usd_micros)
+        pay_currency, pay_amount, status, credited_usd_micros,
+        created_at, updated_at)
        VALUES ('pay-open-child-refund', 'usr-open-child-refund',
                'nowpayments', 'np-open-child-parent', 10000000,
-               'usdttrc20', '10', 'manual_review', 10000000)`,
+               'usdttrc20', '10', 'manual_review', 10000000,
+               datetime('now', '-181 days'),
+               datetime('now', '-181 days'))`,
     )
     .run();
   db.raw
@@ -4525,6 +5527,7 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
     TIKHUB_API_KEY: "upstream-key",
     CATALOG_SYNC_SECRET: catalogSecret,
   });
+  let youtubeTags = ["YouTube-Web-API"];
   const nativeFetch = globalThis.fetch;
   let upstreamReads = 0;
   globalThis.fetch = async (input) => {
@@ -4539,6 +5542,8 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
           "/api/v1/youtube/web/fetch_video": {
             get: {
               summary: "Fetch a YouTube video",
+              tags: youtubeTags,
+              operationId: "fetch_youtube_video",
               parameters: [],
             },
           },
@@ -4711,6 +5716,25 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
     publicData.endpoints[0].path,
     "/v1/youtube/web/fetch_video",
   );
+  assert.deepEqual(publicData.endpoints[0].tags, ["YouTube-Web-API"]);
+
+  youtubeTags = ["YouTube-Web-V2-API"];
+  const taxonomyChanged = await sync();
+  assert.equal(taxonomyChanged.status, 200);
+  const taxonomyChangedEndpoint = db.raw
+    .prepare(
+      `SELECT enabled, read_only, reviewed_at, revision, tags_json
+       FROM endpoint_catalog
+       WHERE path = '/v1/youtube/web/fetch_video'`,
+    )
+    .get();
+  assert.deepEqual({ ...taxonomyChangedEndpoint }, {
+    enabled: 0,
+    read_only: 0,
+    reviewed_at: null,
+    revision: currentRevision + 2,
+    tags_json: '["YouTube-Web-V2-API"]',
+  });
 });
 
 test("syncs the real TikHub price shape, verifies zero cost and deduplicates identical rows", async (t) => {
@@ -4724,36 +5748,41 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
     TIKHUB_API_KEY: "upstream-key",
     CATALOG_SYNC_SECRET: catalogSecret,
   });
+  const syntheticOpenApi = {
+    openapi: "3.1.0",
+    info: { title: "TikHub API", version: "V5.3.2" },
+    paths: {
+      "/api/v1/ios_shortcut/shortcut": {
+        get: {
+          summary: "iOS shortcut metadata",
+          tags: ["iOS-Shortcut"],
+          operationId: "fetch_ios_shortcut",
+          parameters: [],
+        },
+      },
+      "/api/v1/youtube/web/fetch_video": {
+        get: {
+          summary: "Fetch a YouTube video",
+          tags: ["YouTube-Web-API"],
+          operationId: "fetch_youtube_video",
+          parameters: [],
+        },
+      },
+      "/api/v1/reddit/web/fetch_new": {
+        get: {
+          summary: "OpenAPI-only endpoint",
+          parameters: [],
+        },
+      },
+    },
+  };
   const nativeFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const url = new URL(
       typeof input === "string" || input instanceof URL ? input : input.url,
     );
     if (url.pathname === "/openapi.json") {
-      return Response.json({
-        openapi: "3.1.0",
-        info: { title: "TikHub API", version: "V5.3.2" },
-        paths: {
-          "/api/v1/ios_shortcut/shortcut": {
-            get: {
-              summary: "iOS shortcut metadata",
-              parameters: [],
-            },
-          },
-          "/api/v1/youtube/web/fetch_video": {
-            get: {
-              summary: "Fetch a YouTube video",
-              parameters: [],
-            },
-          },
-          "/api/v1/reddit/web/fetch_new": {
-            get: {
-              summary: "OpenAPI-only endpoint",
-              parameters: [],
-            },
-          },
-        },
-      });
+      return Response.json(syntheticOpenApi);
     }
     assert.equal(
       url.href,
@@ -4826,7 +5855,8 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
     .prepare(
       `SELECT path, upstream_price_usd_micros, price_verified,
               enabled, read_only, safety_classification,
-              safety_policy_version, revision
+              safety_policy_version, revision, data_type, tags_json,
+              surface, operation_id
        FROM endpoint_catalog
        WHERE path IN (
          '/v1/ios_shortcut/shortcut',
@@ -4843,9 +5873,13 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
       price_verified: 1,
       enabled: 0,
       read_only: 0,
-      safety_classification: "ambiguous",
+      safety_classification: "safe_data_read",
       safety_policy_version: 1,
       revision: 0,
+      data_type: "system",
+      tags_json: '["iOS-Shortcut"]',
+      surface: "app",
+      operation_id: "fetch_ios_shortcut",
     },
     {
       path: "/v1/youtube/web/fetch_video",
@@ -4856,8 +5890,39 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
       safety_classification: "safe_data_read",
       safety_policy_version: 1,
       revision: 0,
+      data_type: "content",
+      tags_json: '["YouTube-Web-API"]',
+      surface: "web",
+      operation_id: "fetch_youtube_video",
     },
   ]);
+  const generatedTaxonomy = new Map(
+    buildTikHubReferenceCatalog(
+      syntheticOpenApi,
+      "f".repeat(64),
+      Buffer.byteLength(JSON.stringify(syntheticOpenApi)),
+    ).operations.map((operation) => [
+      operation.path,
+      {
+        data_type: operation.dataType,
+        tags_json: JSON.stringify(operation.tags),
+        surface: operation.surface,
+        operation_id: operation.operationId,
+      },
+    ]),
+  );
+  for (const row of rows) {
+    assert.deepEqual(
+      {
+        data_type: row.data_type,
+        tags_json: row.tags_json,
+        surface: row.surface,
+        operation_id: row.operation_id,
+      },
+      generatedTaxonomy.get(row.path),
+      row.path,
+    );
+  }
 
   const syncState = db.raw
     .prepare(
@@ -4899,7 +5964,8 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
   assert.match(syncState.price_snapshot_hash, /^[a-f0-9]{64}$/);
 
   const adminCatalog = await fetchWorker(
-    "/api/admin/catalog?limit=1&offset=0",
+    "/api/admin/catalog?dataType=content&tag=youtube-web-api" +
+      "&surface=web&limit=10&offset=0",
     {
       headers: { authorization: `Bearer ${catalogSecret}` },
     },
@@ -4907,6 +5973,23 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
   );
   assert.equal(adminCatalog.status, 200);
   const adminCatalogData = await adminCatalog.json();
+  assert.equal(adminCatalogData.count, 1);
+  assert.deepEqual(
+    {
+      path: adminCatalogData.endpoints[0].path,
+      dataType: adminCatalogData.endpoints[0].dataType,
+      tags: adminCatalogData.endpoints[0].tags,
+      surface: adminCatalogData.endpoints[0].surface,
+      operationId: adminCatalogData.endpoints[0].operationId,
+    },
+    {
+      path: "/v1/youtube/web/fetch_video",
+      dataType: "content",
+      tags: ["YouTube-Web-API"],
+      surface: "web",
+      operationId: "fetch_youtube_video",
+    },
+  );
   assert.equal(adminCatalogData.sync.coverage.openApiOperations, 3);
   assert.equal(adminCatalogData.sync.coverage.rawPriceRows, 4);
   assert.equal(adminCatalogData.sync.coverage.normalizedPrices, 3);
@@ -4918,6 +6001,47 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
   assert.equal(adminCatalogData.sync.coverage.positivePrices, 1);
   assert.equal(adminCatalogData.sync.coverage.zeroPrices, 1);
   assert.equal(adminCatalogData.sync.coverage.awaitingPrice, 1);
+
+  const partialTag = await fetchWorker(
+    "/api/admin/catalog?tag=YouTube-Web&limit=10",
+    {
+      headers: { authorization: `Bearer ${catalogSecret}` },
+    },
+    env,
+  );
+  assert.equal(partialTag.status, 200);
+  assert.equal((await partialTag.json()).count, 0);
+
+  const duplicateFilter = await fetchWorker(
+    "/api/admin/catalog?dataType=content&dataType=other",
+    {
+      headers: { authorization: `Bearer ${catalogSecret}` },
+    },
+    env,
+  );
+  assert.equal(duplicateFilter.status, 400);
+  assert.equal(
+    (await duplicateFilter.json()).error.code,
+    "invalid_catalog_filter",
+  );
+  for (const query of [
+    "dataType=not_a_real_type",
+    "surface=desktop",
+  ]) {
+    const invalidFilter = await fetchWorker(
+      `/api/admin/catalog?${query}`,
+      {
+        headers: { authorization: `Bearer ${catalogSecret}` },
+      },
+      env,
+    );
+    assert.equal(invalidFilter.status, 400, query);
+    assert.equal(
+      (await invalidFilter.json()).error.code,
+      "invalid_catalog_filter",
+      query,
+    );
+  }
 });
 
 test("classifies TikHub data reads without trusting mutation or credential inputs", async (t) => {
@@ -5144,6 +6268,7 @@ test("classifies TikHub data reads without trusting mutation or credential input
     ...env,
     RESELLER_AUTHORIZED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
+    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
     RECONCILIATION_SECRET: "safety-reconcile-secret-32-minimum",
   };
   assert.match(generation, /^sync_/);
@@ -5821,7 +6946,7 @@ test("rejects non-decimal and sub-micro TikHub costs instead of rounding them", 
   }
 });
 
-test("rejects OpenAPI methods that the path-keyed proxy cannot represent safely", async (t) => {
+test("rejects ambiguous, malformed or sensitive OpenAPI operations", async (t) => {
   const cases = [
     {
       operations: {
@@ -5835,6 +6960,38 @@ test("rejects OpenAPI methods that the path-keyed proxy cannot represent safely"
         put: { requestBody: {} },
       },
       code: "catalog_openapi_method_unsupported",
+    },
+    {
+      operations: {
+        get: null,
+      },
+      code: "catalog_openapi_operation_invalid",
+    },
+    {
+      operations: {
+        $ref: "#/components/pathItems/unsafe",
+      },
+      code: "catalog_openapi_operation_invalid",
+    },
+    {
+      operations: {
+        get: {
+          parameters: [],
+          tags: ["Bearer abcdefghijklmnop"],
+        },
+      },
+      code: "catalog_openapi_taxonomy_invalid",
+    },
+    {
+      paths: {
+        "/api/v1/youtube/web/fetch_video": {
+          get: { parameters: [] },
+        },
+        "/v1/youtube/web/fetch_video": {
+          get: { parameters: [] },
+        },
+      },
+      code: "catalog_openapi_path_collision",
     },
   ];
   for (const [index, item] of cases.entries()) {
@@ -5857,9 +7014,11 @@ test("rejects OpenAPI methods that the path-keyed proxy cannot represent safely"
       if (url.pathname === "/openapi.json") {
         return Response.json({
           openapi: "3.1.0",
-          paths: {
-            "/api/v1/youtube/web/fetch_video": item.operations,
-          },
+          paths:
+            item.paths ??
+            {
+              "/api/v1/youtube/web/fetch_video": item.operations,
+            },
         });
       }
       return Response.json({
@@ -6156,9 +7315,13 @@ test("publishes reviewed catalog prices and creates idempotent recoverable payme
     RESELLER_AUTHORIZED: "true",
     TIKHUB_API_KEY: "upstream-key",
     CRYPTO_PAYMENTS_ENABLED: "true",
+    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
     PAYMENT_PROVIDER: "nowpayments",
     NOWPAYMENTS_API_KEY: "provider-key",
     NOWPAYMENTS_IPN_SECRET: "ipn-secret",
+    GOOGLE_CLIENT_ID: "google-client.apps.exampleusercontent.com",
+    GOOGLE_CLIENT_SECRET: "google-client-secret",
+    WALLET_LOGIN_ENABLED: "true",
     CATALOG_SYNC_SECRET: "operator-secret-32-characters-minimum",
     RECONCILIATION_SECRET: "reconcile-secret-32-characters-minimum",
     PAYMENT_ADMIN_SECRET: "payment-admin-secret-32-characters-minimum",
@@ -6168,7 +7331,12 @@ test("publishes reviewed catalog prices and creates idempotent recoverable payme
   assert.equal(health.status, 200);
   assert.equal((await health.json()).mode, "live");
 
-  const catalog = await fetchWorker("/api/catalog?platform=tiktok", {}, env);
+  const catalog = await fetchWorker(
+    "/api/catalog?platform=tiktok&dataType=profile_creator" +
+      "&tag=TikTok-Web-API&surface=web",
+    {},
+    env,
+  );
   assert.equal(catalog.status, 200);
   const catalogData = await catalog.json();
   assert.equal(catalogData.count, 1);
@@ -6177,9 +7345,22 @@ test("publishes reviewed catalog prices and creates idempotent recoverable payme
     platform: "tiktok",
     method: "GET",
     summary: null,
+    dataType: "profile_creator",
+    tags: ["TikTok-Web-API"],
+    surface: "web",
+    operationId:
+      "fetch_user_profile_api_v1_tiktok_web_fetch_user_profile_get",
     priceUsdMicros: 2500,
     updatedAt: catalogData.endpoints[0].updatedAt,
   });
+
+  const excludedCatalog = await fetchWorker(
+    "/api/catalog?dataType=content&tag=TikTok-Web-API&surface=web",
+    {},
+    env,
+  );
+  assert.equal(excludedCatalog.status, 200);
+  assert.equal((await excludedCatalog.json()).count, 0);
 
   const nativeFetch = globalThis.fetch;
   let providerCreates = 0;
@@ -6246,6 +7427,10 @@ test("publishes reviewed catalog prices and creates idempotent recoverable payme
   const dashboardData = await dashboard.json();
   assert.equal(dashboardData.payments[0].payAddress, createdPayment.payAddress);
   assert.match(dashboardData.payments[0].invoiceUrl, /^https:\/\/nowpayments\.io\//);
+  assert.equal(dashboardData.payments[0].creditedUsdMicros, 0);
+  assert.equal(dashboardData.payments[0].reversedUsdMicros, 0);
+  assert.equal(dashboardData.payments[0].reviewReason, null);
+  assert.equal(dashboardData.payments[0].reviewStatus, null);
 });
 
 test("freezes, atomically applies and replays catalog batch plans", async (t) => {
@@ -6276,6 +7461,9 @@ test("freezes, atomically applies and replays catalog batch plans", async (t) =>
     expectedCatalogGeneration: "sync_test_complete_0001",
     selection: {
       platform: "tiktok",
+      dataType: "profile_creator",
+      tag: "TikTok-Web-API",
+      surface: "web",
       query: "fetch_user_profile",
       status: "disabled",
       safety: "safe_data_read",
@@ -6344,6 +7532,15 @@ test("freezes, atomically applies and replays catalog batch plans", async (t) =>
   assert.equal(previewData.replayed, false);
   assert.equal(previewData.batch.status, "ready");
   assert.equal(previewData.batch.version, 1);
+  assert.deepEqual(previewData.batch.selection, {
+    platform: "tiktok",
+    dataType: "profile_creator",
+    tag: "tiktok-web-api",
+    surface: "web",
+    query: "fetch_user_profile",
+    status: "disabled",
+    safety: "safe_data_read",
+  });
   assert.deepEqual(previewData.batch.counts, {
     matched: 1,
     selected: 1,
@@ -6357,6 +7554,13 @@ test("freezes, atomically applies and replays catalog batch plans", async (t) =>
     priceUnchanged: 0,
   });
   assert.equal(previewData.items[0].expectedRevision, 7);
+  assert.equal(previewData.items[0].dataType, "profile_creator");
+  assert.deepEqual(previewData.items[0].tags, ["TikTok-Web-API"]);
+  assert.equal(previewData.items[0].surface, "web");
+  assert.equal(
+    previewData.items[0].operationId,
+    "fetch_user_profile_api_v1_tiktok_web_fetch_user_profile_get",
+  );
   assert.equal(previewData.items[0].before.enabled, false);
   assert.equal(previewData.items[0].after.enabled, true);
   assert.match(previewData.batch.targetDigest, /^[0-9a-f]{64}$/);
@@ -6455,6 +7659,196 @@ test("freezes, atomically applies and replays catalog batch plans", async (t) =>
       )
       .get().revision,
     8,
+  );
+});
+
+test("selects catalog batches by taxonomy and rejects taxonomy CAS drift atomically", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  enableCatalogEndpoint(db);
+  db.raw
+    .prepare(
+      `UPDATE endpoint_catalog
+       SET enabled = 0, read_only = 0, reviewed_at = NULL, revision = 7
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO endpoint_catalog
+       (path, platform, http_method, data_type, tags_json, surface,
+        operation_id, summary, upstream_price_usd_micros,
+        customer_price_usd_micros, price_verified, enabled, read_only,
+        safety_classification, safety_reasons_json, safety_policy_version,
+        revision, sync_generation)
+       VALUES ('/v1/tiktok/web/fetch_user_posts', 'tiktok', 'GET',
+               'profile_creator', '["TikTok-Web-API"]', 'web',
+               'fetch_user_posts', 'Fetch user posts', 1000, 2000,
+               1, 0, 0, 'safe_data_read', '["test_fixture"]', 1, 4,
+               'sync_test_complete_0001')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `UPDATE catalog_sync_state
+       SET openapi_operation_count = 2, raw_price_row_count = 2,
+           normalized_price_count = 2, openapi_price_mapped_count = 2,
+           price_only_count = 0, openapi_only_count = 0,
+           scope_excluded_count = 0, matched_price_count = 2,
+           positive_price_count = 2, zero_price_count = 0,
+           awaiting_price_count = 0
+       WHERE id = 1`,
+    )
+    .run();
+
+  const catalogSecret =
+    "catalog-batch-taxonomy-secret-32-characters-minimum";
+  const env = baseEnv({
+    DB: db,
+    CATALOG_SYNC_SECRET: catalogSecret,
+  });
+  const preview = await fetchWorker(
+    "/api/admin/catalog/batches/preview",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${catalogSecret}`,
+        "content-type": "application/json",
+        "idempotency-key": "catalog-taxonomy-preview-0001",
+      },
+      body: JSON.stringify({
+        action: "publish",
+        expectedCatalogGeneration: "sync_test_complete_0001",
+        selection: {
+          platform: "tiktok",
+          dataType: "profile_creator",
+          tag: "tiktok-web-api",
+          surface: "web",
+          query: "",
+          status: "disabled",
+          safety: "safe_data_read",
+        },
+        pricing: {
+          markupBps: 1000,
+          minimumCustomerPriceUsdMicros: 1,
+        },
+      }),
+    },
+    env,
+  );
+  assert.equal(preview.status, 200, await preview.clone().text());
+  const plan = await preview.json();
+  assert.equal(plan.batch.status, "ready");
+  assert.equal(plan.batch.counts.matched, 2);
+  assert.equal(plan.batch.counts.selected, 2);
+  assert.deepEqual(plan.batch.selection, {
+    platform: "tiktok",
+    dataType: "profile_creator",
+    tag: "tiktok-web-api",
+    surface: "web",
+    query: "",
+    status: "disabled",
+    safety: "safe_data_read",
+  });
+  assert.deepEqual(
+    plan.items.map((item) => ({
+      path: item.path,
+      dataType: item.dataType,
+      tags: item.tags,
+      surface: item.surface,
+      operationId: item.operationId,
+    })),
+    [
+      {
+        path: "/v1/tiktok/web/fetch_user_posts",
+        dataType: "profile_creator",
+        tags: ["TikTok-Web-API"],
+        surface: "web",
+        operationId: "fetch_user_posts",
+      },
+      {
+        path: "/v1/tiktok/web/fetch_user_profile",
+        dataType: "profile_creator",
+        tags: ["TikTok-Web-API"],
+        surface: "web",
+        operationId:
+          "fetch_user_profile_api_v1_tiktok_web_fetch_user_profile_get",
+      },
+    ],
+  );
+
+  db.raw
+    .prepare(
+      `UPDATE endpoint_catalog
+       SET tags_json = '["TikTok-Web-V2-API"]'
+       WHERE path = '/v1/tiktok/web/fetch_user_posts'`,
+    )
+    .run();
+  const apply = await fetchWorker(
+    `/api/admin/catalog/batches/${plan.batch.id}/apply`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${catalogSecret}`,
+        "content-type": "application/json",
+        "idempotency-key": "catalog-taxonomy-apply-0001",
+      },
+      body: JSON.stringify({
+        expectedVersion: plan.batch.version,
+        previewDigest: plan.batch.targetDigest,
+        confirmation: plan.batch.confirmationText,
+      }),
+    },
+    env,
+  );
+  assert.equal(apply.status, 409);
+  assert.equal(
+    (await apply.json()).error.code,
+    "catalog_batch_apply_conflict",
+  );
+  assert.deepEqual(
+    db.raw
+      .prepare(
+        `SELECT path, customer_price_usd_micros, enabled, read_only,
+                revision, tags_json
+         FROM endpoint_catalog
+         WHERE path IN (
+           '/v1/tiktok/web/fetch_user_posts',
+           '/v1/tiktok/web/fetch_user_profile'
+         )
+         ORDER BY path`,
+      )
+      .all()
+      .map((row) => ({ ...row })),
+    [
+      {
+        path: "/v1/tiktok/web/fetch_user_posts",
+        customer_price_usd_micros: 2000,
+        enabled: 0,
+        read_only: 0,
+        revision: 4,
+        tags_json: '["TikTok-Web-V2-API"]',
+      },
+      {
+        path: "/v1/tiktok/web/fetch_user_profile",
+        customer_price_usd_micros: 2000,
+        enabled: 0,
+        read_only: 0,
+        revision: 7,
+        tags_json: '["TikTok-Web-API"]',
+      },
+    ],
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM admin_audit_logs
+         WHERE action = 'catalog.batch_applied' AND target_id = ?`,
+      )
+      .get(plan.batch.id).count,
+    0,
   );
 });
 
@@ -6740,6 +8134,7 @@ test("does not refresh reconciliation health when every due provider read fails"
     RESELLER_AUTHORIZED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
     CRYPTO_PAYMENTS_ENABLED: "true",
+    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
     PAYMENT_PROVIDER: "nowpayments",
     NOWPAYMENTS_API_KEY: "provider-key",
     NOWPAYMENTS_IPN_SECRET: "provider-down-ipn-secret",
@@ -6807,6 +8202,112 @@ test("does not refresh reconciliation health when every due provider read fails"
   assert.equal(readinessData.capabilities.reconciliationRecent, false);
   assert.ok(
     readinessData.missing.includes("scheduled_reconciliation"),
+  );
+});
+
+test("runs reconciliation from the worker scheduled handler", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const env = baseEnv({
+    DB: db,
+    RECONCILIATION_SECRET:
+      "scheduled-reconcile-secret-32-minimum",
+  });
+
+  await worker.scheduled({}, env, context());
+  const heartbeat = db.raw
+    .prepare(
+      `SELECT details_json
+       FROM operation_heartbeats
+       WHERE name = 'reconciliation'`,
+    )
+    .get();
+  assert.ok(heartbeat);
+  assert.match(heartbeat.details_json, /"status":"healthy"/);
+});
+
+test("rechecks recent failed zero-credit orders and captures late funds", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  db.raw
+    .prepare(
+      `INSERT INTO users (id, email, display_name)
+       VALUES ('usr-late-failed', 'late-failed@example.com',
+               'Late Failed Payment')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO payment_orders
+       (id, user_id, provider, provider_payment_id, amount_usd_micros,
+        pay_currency, pay_amount, pay_address, status,
+        credited_usd_micros, created_at, updated_at)
+       VALUES ('pay_late_failed', 'usr-late-failed', 'nowpayments',
+               'np-late-failed', 10000000, 'usdttrc20', '10',
+               'TLateFailedAddress123456789', 'failed', 0,
+               datetime('now', '-3 days'), datetime('now', '-7 hours'))`,
+    )
+    .run();
+  const env = baseEnv({
+    DB: db,
+    NOWPAYMENTS_API_KEY: "provider-key",
+    RECONCILIATION_SECRET:
+      "late-failed-reconcile-secret-32-minimum",
+  });
+  const nativeFetch = globalThis.fetch;
+  let providerReads = 0;
+  globalThis.fetch = async () => {
+    providerReads += 1;
+    return Response.json({
+      payment_id: "np-late-failed",
+      payment_status: "finished",
+      order_id: "pay_late_failed",
+      price_amount: 10,
+      price_currency: "usd",
+      pay_amount: "10",
+      actually_paid: "10",
+      pay_currency: "usdttrc20",
+      pay_address: "TLateFailedAddress123456789",
+    });
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const reconciliation = await fetchWorker(
+    "/api/admin/reconcile",
+    {
+      method: "POST",
+      headers: {
+        authorization:
+          "Bearer late-failed-reconcile-secret-32-minimum",
+      },
+    },
+    env,
+  );
+  assert.equal(reconciliation.status, 200);
+  assert.equal((await reconciliation.json()).payments.polled, 1);
+  assert.equal(providerReads, 1);
+  const order = db.raw
+    .prepare(
+      `SELECT status, credited_usd_micros
+       FROM payment_orders
+       WHERE id = 'pay_late_failed'`,
+    )
+    .get();
+  assert.equal(order.status, "finished");
+  assert.equal(order.credited_usd_micros, 10000000);
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COALESCE(SUM(delta_usd_micros), 0) AS balance
+         FROM balance_ledger
+         WHERE user_id = 'usr-late-failed'`,
+      )
+      .get().balance,
+    10000000,
   );
 });
 

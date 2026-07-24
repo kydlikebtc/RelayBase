@@ -1101,16 +1101,19 @@
 }
 
 .admin-catalog-batch-selector {
-  grid-template-columns:
-    minmax(220px, 1.5fr) minmax(130px, 0.7fr) minmax(130px, 0.7fr)
-    minmax(150px, 0.85fr) auto;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
   margin-bottom: 12px;
   padding: 0;
   border: 0;
   background: transparent;
 }
 
+.admin-catalog-batch-selector label:first-child {
+  grid-column: span 2;
+}
+
 .admin-catalog-batch-selector p {
+  align-self: end;
   margin-bottom: 12px;
 }
 
@@ -1794,6 +1797,32 @@
   background: #ffe5dd;
 }
 
+.admin-endpoint-taxonomy {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 9px 18px;
+  border-bottom: 1px solid var(--line);
+  background: #f2f0e9;
+}
+
+.admin-endpoint-taxonomy span {
+  overflow: hidden;
+  max-width: 100%;
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-endpoint-taxonomy strong,
+.admin-endpoint-taxonomy code {
+  color: var(--blue-dark);
+  font-size: inherit;
+}
+
 .admin-endpoint-safety-reasons {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -2210,6 +2239,23 @@
 
 .admin-payment-records-head {
   margin: 0 0 16px;
+}
+
+.admin-payment-recovery {
+  grid-template-columns:
+    minmax(210px, 0.9fr) minmax(240px, 1fr) minmax(260px, 1.2fr)
+    auto;
+}
+
+.admin-payment-recovery p {
+  margin: 0 0 7px;
+  line-height: 1.55;
+  white-space: normal;
+}
+
+.admin-payment-recovery > .button {
+  min-height: 42px;
+  white-space: nowrap;
 }
 
 .admin-payment-card {

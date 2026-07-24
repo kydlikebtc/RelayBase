@@ -348,6 +348,10 @@ export const endpointCatalog = sqliteTable(
     path: text("path").primaryKey(),
     platform: text("platform").notNull(),
     httpMethod: text("http_method").notNull().default("GET"),
+    dataType: text("data_type").notNull().default("other"),
+    tagsJson: text("tags_json").notNull().default("[]"),
+    surface: text("surface").notNull().default("other"),
+    operationId: text("operation_id"),
     summary: text("summary"),
     description: text("description"),
     parameterSchemaJson: text("parameter_schema_json"),
@@ -380,6 +384,14 @@ export const endpointCatalog = sqliteTable(
     index("endpoint_catalog_enabled_read_only_idx").on(
       table.enabled,
       table.readOnly,
+    ),
+    index("endpoint_catalog_data_type_enabled_idx").on(
+      table.dataType,
+      table.enabled,
+    ),
+    index("endpoint_catalog_surface_enabled_idx").on(
+      table.surface,
+      table.enabled,
     ),
   ],
 );
@@ -506,6 +518,10 @@ export const catalogBatchPlanItems = sqliteTable(
     ordinal: integer("ordinal").notNull(),
     platform: text("platform").notNull(),
     httpMethod: text("http_method").notNull(),
+    dataType: text("data_type").notNull().default("other"),
+    tagsJson: text("tags_json").notNull().default("[]"),
+    surface: text("surface").notNull().default("other"),
+    operationId: text("operation_id"),
     summary: text("summary"),
     expectedRevision: integer("expected_revision").notNull(),
     originalUpstreamPriceUsdMicros: integer(
@@ -564,6 +580,10 @@ export const catalogSyncStaging = sqliteTable(
     path: text("path").notNull(),
     platform: text("platform").notNull(),
     httpMethod: text("http_method").notNull(),
+    dataType: text("data_type").notNull().default("other"),
+    tagsJson: text("tags_json").notNull().default("[]"),
+    surface: text("surface").notNull().default("other"),
+    operationId: text("operation_id"),
     summary: text("summary"),
     description: text("description"),
     parameterSchemaJson: text("parameter_schema_json"),
@@ -588,6 +608,10 @@ export const catalogSyncStaging = sqliteTable(
   },
   (table) => [
     index("catalog_sync_staging_generation_idx").on(table.generation),
+    uniqueIndex("catalog_sync_staging_generation_path_unique").on(
+      table.generation,
+      table.path,
+    ),
   ],
 );
 

@@ -39,6 +39,11 @@ OpenAPI 的完整镜像：
 参考产物只表示 TikHub 文档中声明过的能力。它不证明当前 TikHub Key 拥有 scope，
 不证明上游价格、稳定性或转售权，也不表示该端点已经在 RelayBase 上架。
 
+实时目录同步使用与该参考产物相同的确定性规则生成 `dataType` 和 `surface`，并从
+当前 OpenAPI operation 持久化官方 tags 与 `operationId`。参考市场只有在快照哈希、
+操作数、完整 `(method, path)` 身份集合和逐端点分类元数据都一致时，才会叠加实时
+价格或 `available` 状态；分类缺失、损坏或不同代时保持 `pending`。
+
 ## 授权与发布门禁
 
 仓库目前没有可验证的 TikHub 文档/元数据再分发许可文本。公开以下任一内容之前，
@@ -51,9 +56,13 @@ OpenAPI 的完整镜像：
 5. 由于 RelayBase 计划接受稳定币付款，TikHub 书面确认其“虚拟货币及相关行业”
    业务限制不禁止把加密资产仅作为 API 服务的付款方式。
 
-在证据归档前，`0.3.0-preview.5` 只能作为私有验收候选：Sites 保持 owner-only，
+在证据归档前，`0.3.0-preview.6` 只能作为私有验收候选：Sites 保持 owner-only，
 真实代理、真实收款和公开访问保持关闭。即使代码和目录已部署，也不得把该候选描述为
 公开商业上线。
+
+运行时使用独立的 `TIKHUB_CRYPTO_PAYMENT_CLEARED=true` 作为归档确认。该值缺失、
+拼写错误或不是精确的 `true` 时，readiness 会报告
+`tikhub_crypto_payment_clearance`，真实代理与新充值都会 fail closed。
 
 TikHub 名称和相关标识归其各自权利人所有。RelayBase 是独立封装项目，不代表 TikHub
 背书、合作或保证。

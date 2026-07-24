@@ -21,6 +21,10 @@ type PaymentRecord = {
   payAddress: string | null;
   invoiceUrl: string | null;
   status: string;
+  creditedUsdMicros: number;
+  reversedUsdMicros: number;
+  reviewReason: string | null;
+  reviewStatus: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -48,10 +52,17 @@ type DashboardData = {
     configurationValid: boolean;
     legalReviewConfirmed: boolean;
     resellerAuthorized: boolean;
+    tikhubCryptoPaymentCleared: boolean;
     proxyEnabled: boolean;
     paymentsEnabled: boolean;
     adminConfigured: boolean;
+    authenticationConfigured: boolean;
+    productionAuthenticationConfigured: boolean;
+    googleAuthenticationConfigured: boolean;
+    walletAuthenticationConfigured: boolean;
+    trustedSitesIdentityConfigured: boolean;
     schemaReady: boolean;
+    taxonomyReady: boolean;
     catalogReady: boolean;
   };
   stats: {
@@ -211,6 +222,10 @@ function isPaymentRecord(value: unknown): value is PaymentRecord {
     isNullableString(value.payAddress) &&
     isNullableString(value.invoiceUrl) &&
     typeof value.status === "string" &&
+    isNonNegativeInteger(value.creditedUsdMicros) &&
+    isNonNegativeInteger(value.reversedUsdMicros) &&
+    isNullableString(value.reviewReason) &&
+    isNullableString(value.reviewStatus) &&
     typeof value.createdAt === "string" &&
     typeof value.updatedAt === "string"
   );
@@ -247,10 +262,17 @@ function isDashboardData(value: unknown): value is DashboardData {
     typeof capabilities.configurationValid === "boolean" &&
     typeof capabilities.legalReviewConfirmed === "boolean" &&
     typeof capabilities.resellerAuthorized === "boolean" &&
+    typeof capabilities.tikhubCryptoPaymentCleared === "boolean" &&
     typeof capabilities.proxyEnabled === "boolean" &&
     typeof capabilities.paymentsEnabled === "boolean" &&
     typeof capabilities.adminConfigured === "boolean" &&
+    typeof capabilities.authenticationConfigured === "boolean" &&
+    typeof capabilities.productionAuthenticationConfigured === "boolean" &&
+    typeof capabilities.googleAuthenticationConfigured === "boolean" &&
+    typeof capabilities.walletAuthenticationConfigured === "boolean" &&
+    typeof capabilities.trustedSitesIdentityConfigured === "boolean" &&
     typeof capabilities.schemaReady === "boolean" &&
+    typeof capabilities.taxonomyReady === "boolean" &&
     typeof capabilities.catalogReady === "boolean" &&
     isNonNegativeInteger(stats.calls30d) &&
     isNonNegativeInteger(stats.spend30dUsdMicros) &&
@@ -322,6 +344,29 @@ function paymentStatus(status: string) {
 function paymentStatusClass(status: string) {
   const normalized = status.toLowerCase().replace(/[^a-z_]/g, "");
   return normalized || "unknown";
+}
+
+function paymentReviewReason(reason: string | null) {
+  if (!reason) return null;
+  const labels: Record<string, string> = {
+    orphan_payment: "未绑定订单",
+    order_mismatch: "订单绑定不一致",
+    amount_mismatch: "付款金额不一致",
+    currency_mismatch: "付款币种不一致",
+    partial_payment: "付款金额不足",
+    paid_after_expiration: "过期后付款",
+    terminal_status_conflict: "终态冲突",
+    refund_requires_review: "退款待复核",
+    provider_payload_mismatch: "服务商数据不一致",
+    repeated_deposit: "疑似重复付款",
+    terminal_with_funds: "终态订单仍有到账",
+    underpaid_finished: "到账金额不足",
+    provider_data_mismatch: "服务商数据不一致",
+    partially_paid: "部分付款",
+    overpaid_finished: "到账金额超出订单",
+    funds_after_manual_rejection: "拒绝结案后检测到资金",
+  };
+  return labels[reason] ?? "支付信息待复核";
 }
 
 function currencyLabel(currency: string) {
@@ -634,6 +679,8 @@ export function ConsoleClient({
   const recentCalls = dashboard?.calls.slice(0, 8) ?? [];
   const recentPayments = dashboard?.payments.slice(0, 6) ?? [];
   const paymentsEnabled = dashboard?.capabilities.paymentsEnabled ?? false;
+  const tikhubCryptoPaymentCleared =
+    dashboard?.capabilities.tikhubCryptoPaymentCleared ?? false;
 
   return (
     <div className="console-shell">
@@ -933,7 +980,9 @@ export function ConsoleClient({
           </form>
           <p className="topup-warning">
             {user && !loading && !paymentsEnabled
-              ? "当前为安全沙盒，真实充值将在数据代理、商户与合规条件全部就绪后开放。"
+              ? !tikhubCryptoPaymentCleared
+                ? "真实充值保持关闭：尚未归档 TikHub 对稳定币仅作为 API 付款方式的书面澄清。"
+                : "当前为安全沙盒，真实充值将在数据代理、商户与合规条件全部就绪后开放。"
               : "只向充值单指定的网络和地址转账。链上确认前，余额不会改变。"}
           </p>
         </aside>
@@ -1091,7 +1140,17 @@ export function ConsoleClient({
                 />
                 <div>
                   <b>{formatUsd(payment.amountUsdMicros)}</b>
-                  <span>{currencyLabel(payment.payCurrency)}</span>
+                  <span>
+                    已入账 {formatUsd(payment.creditedUsdMicros)}
+                    {payment.reversedUsdMicros > 0
+                      ? ` · 已冲销 ${formatUsd(payment.reversedUsdMicros)}`
+                      : ""}
+                    {" · "}
+                    {currencyLabel(payment.payCurrency)}
+                    {paymentReviewReason(payment.reviewReason)
+                      ? ` · ${paymentReviewReason(payment.reviewReason)}`
+                      : ""}
+                  </span>
                 </div>
                 <code>{payment.id}</code>
                 <span>{formatDate(payment.createdAt, true)}</span>
