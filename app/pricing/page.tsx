@@ -166,13 +166,13 @@ export default async function PricingPage() {
                 <li>USDT · ERC20</li>
                 <li>USDC · Base</li>
               </ul>
-              <Link
+              <a
                 className={`button ${index === 2 ? "button-lime" : "button-dark"}`}
                 href="/console"
               >
                 {c.topupButton} {amount}
                 <span aria-hidden="true">→</span>
-              </Link>
+              </a>
             </article>
           ))}
         </div>
@@ -234,7 +234,7 @@ export default async function PricingPage() {
         <p>{c.ctaKicker}</p>
         <h2>{c.ctaTitle}</h2>
         <div>
-          <Link className="button button-lime button-large" href="/console">{c.ctaPrimary}</Link>
+          <a className="button button-lime button-large" href="/console">{c.ctaPrimary}</a>
           <Link className="button button-ghost-light button-large" href="/docs">{c.ctaSecondary}</Link>
         </div>
       </section>

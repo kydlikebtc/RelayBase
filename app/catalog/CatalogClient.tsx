@@ -1273,10 +1273,10 @@ function DetailPanel({
             )}
           </section>
 
-          <Link className="marketplace-detail-cta" href="/console">
+          <a className="marketplace-detail-cta" href="/console">
             {c.createKey}
             <span aria-hidden="true">→</span>
-          </Link>
+          </a>
         </div>
       ) : null}
     </aside>

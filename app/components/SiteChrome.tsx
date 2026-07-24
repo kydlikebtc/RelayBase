@@ -105,10 +105,10 @@ export function SiteHeader({ locale }: { locale: Locale }) {
             >
               {content.switchLabel}
             </button>
-            <Link className="button button-blue button-small" href="/console">
+            <a className="button button-blue button-small" href="/console">
               {content.openConsole}
               <span aria-hidden="true">→</span>
-            </Link>
+            </a>
           </div>
 
           <details className="mobile-menu">
@@ -136,9 +136,9 @@ export function SiteHeader({ locale }: { locale: Locale }) {
               >
                 {content.switchLabel}
               </button>
-              <Link className="button button-blue" href="/console">
+              <a className="button button-blue" href="/console">
                 {content.openConsole}
-              </Link>
+              </a>
             </div>
           </details>
         </div>
@@ -165,7 +165,7 @@ export function SiteHeader({ locale }: { locale: Locale }) {
         >
           {content.mobileLabels[3]}
         </Link>
-        <Link
+        <a
           aria-current={
             pathname.startsWith("/console") || pathname.startsWith("/login")
               ? "page"
@@ -174,7 +174,7 @@ export function SiteHeader({ locale }: { locale: Locale }) {
           href="/console"
         >
           {content.mobileLabels[4]}
-        </Link>
+        </a>
       </nav>
     </>
   );
@@ -197,7 +197,7 @@ export function SiteFooter({ locale }: { locale: Locale }) {
         <span className="footer-separator">·</span>
         <Link href="/docs">{content.navigation[3].label}</Link>
         <span className="footer-separator">·</span>
-        <Link href="/console">{content.console}</Link>
+        <a href="/console">{content.console}</a>
         <span className="site-footer-meta">
           © 2026 · v{packageJson.version} · {content.disclaimer}
         </span>

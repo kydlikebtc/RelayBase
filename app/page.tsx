@@ -209,9 +209,9 @@ export default async function Home() {
               {isZh ? "进入数据市场" : "Explore the data market"}
               <span aria-hidden="true">→</span>
             </Link>
-            <Link className="button button-ghost button-large" href="/console">
+            <a className="button button-ghost button-large" href="/console">
               {isZh ? "开始使用数据" : "Start using data"}
-            </Link>
+            </a>
           </div>
           <div className="hero-proof" aria-label={isZh ? "产品特性" : "Product characteristics"}>
             <span>
@@ -390,10 +390,17 @@ export default async function Home() {
               </header>
               <h3>{capability.title[locale]}</h3>
               <p>{capability.body[locale]}</p>
-              <Link href={capability.href}>
-                {capability.link[locale]}
-                <span aria-hidden="true">→</span>
-              </Link>
+              {capability.href === "/console" ? (
+                <a href={capability.href}>
+                  {capability.link[locale]}
+                  <span aria-hidden="true">→</span>
+                </a>
+              ) : (
+                <Link href={capability.href}>
+                  {capability.link[locale]}
+                  <span aria-hidden="true">→</span>
+                </Link>
+              )}
             </article>
           ))}
         </div>
