@@ -8,16 +8,16 @@ import "./styles/docs-pricing.css";
 
 export async function generateMetadata(): Promise<Metadata> {
   const origin = await getRequestOrigin();
-  const socialImage = `${origin}/og.png`;
+  const socialImage = `${origin}/og-v2.png`;
 
   return {
     metadataBase: new URL(origin),
     title: {
-      default: "RelayBase API｜一条稳定的数据接口",
+      default: "RelayBase API｜一个 API，接入多平台公开数据",
       template: "%s｜RelayBase API",
     },
     description:
-      "统一调用分散的平台数据接口，使用稳定币充值，只为上游成功请求扣费。",
+      "多平台 API 市场、统一 Bearer Key、安全只读代理、请求级计费与可审计调用记录。",
     applicationName: "RelayBase API",
     keywords: ["数据 API", "开发者 API", "稳定币支付", "多平台数据 API"],
     icons: {
@@ -28,22 +28,22 @@ export async function generateMetadata(): Promise<Metadata> {
       type: "website",
       locale: "zh_CN",
       siteName: "RelayBase API",
-      title: "RelayBase API｜一条稳定的数据接口",
+      title: "RelayBase API｜一个 API，接入多平台公开数据",
       description:
-        "一个 Key 接入多平台数据，稳定币充值，只为上游成功请求扣费。",
+        "从发现服务到统一鉴权、只读调用和请求级计费，一套完成。",
       images: [
         {
           url: socialImage,
           width: 1200,
           height: 630,
-          alt: "RelayBase API：把分散的数据接口，收进一条稳定 API",
+          alt: "RelayBase API：一个 API，接入多平台公开数据",
         },
       ],
     },
     twitter: {
       card: "summary_large_image",
-      title: "RelayBase API",
-      description: "把分散的数据接口，收进一条稳定 API。",
+      title: "RelayBase API｜一个 API，接入多平台公开数据",
+      description: "多平台 API 市场、统一鉴权、只读代理和请求级计费。",
       images: [socialImage],
     },
   };

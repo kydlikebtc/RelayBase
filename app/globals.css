@@ -156,6 +156,7 @@ strong,
   display: grid;
   width: 32px;
   height: 32px;
+  flex: 0 0 32px;
   place-items: center;
   border-radius: 9px;
   color: white;
@@ -235,8 +236,22 @@ strong,
 .status-dot {
   width: 7px;
   height: 7px;
+  flex: 0 0 7px;
   border-radius: 50%;
   background: var(--green);
+}
+
+.platform-brand-icon {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--platform-brand-color, var(--ink-2));
+}
+
+.platform-brand-icon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .platform-status-checking .status-dot {
@@ -281,6 +296,10 @@ strong,
     color 160ms ease,
     background-color 160ms ease,
     transform 160ms ease;
+}
+
+.button > span[aria-hidden="true"] {
+  flex: 0 0 auto;
 }
 
 .button:hover:not(:disabled) {

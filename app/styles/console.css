@@ -463,6 +463,7 @@
   display: grid;
   width: 34px;
   height: 34px;
+  flex: 0 0 34px;
   place-items: center;
   border: 1px solid var(--ink);
   border-radius: 50%;
@@ -477,19 +478,30 @@
 
 .key-main > div {
   display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 5px 8px;
 }
 
 .key-main b {
+  min-width: 0;
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .key-active {
+  display: inline-flex;
+  min-height: 18px;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: 999px;
   color: var(--green);
   font-family: var(--mono);
   font-size: 7px;
   font-weight: 900;
+  line-height: 1;
 }
 
 .key-main code {
@@ -1378,7 +1390,6 @@
 
 .key-active {
   border: 0;
-  border-radius: 999px;
   color: white;
   background: var(--green);
 }

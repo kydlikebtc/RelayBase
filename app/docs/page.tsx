@@ -166,22 +166,31 @@ export default async function DocsPage() {
             </div>
             <ul className="docs-checklist">
               <li>
-                <span>✓</span>
-                请求与响应均使用 UTF-8；响应格式为 JSON。
+                <span className="docs-checkmark">✓</span>
+                <span className="docs-checklist-copy">
+                  请求与响应均使用 UTF-8；响应格式为 JSON。
+                </span>
               </li>
               <li>
-                <span>✓</span>
-                查询参数使用 URL 编码，布尔值使用 <code>true</code> /{" "}
-                <code>false</code>。
+                <span className="docs-checkmark">✓</span>
+                <span className="docs-checklist-copy">
+                  查询参数使用 URL 编码，布尔值使用 <code>true</code> /{" "}
+                  <code>false</code>。
+                </span>
               </li>
               <li>
-                <span>✓</span>
-                每个响应都应保留 HTTP 状态码；错误体遵循统一结构。
+                <span className="docs-checkmark">✓</span>
+                <span className="docs-checklist-copy">
+                  每个响应都应保留 HTTP 状态码；错误体遵循统一结构。
+                </span>
               </li>
               <li>
-                <span>✓</span>
-                仅开放通过只读、安全和价格审核的 <code>GET</code> /{" "}
-                <code>POST</code> 数据查询端点；不代理写入、发布、互动或删除操作。
+                <span className="docs-checkmark">✓</span>
+                <span className="docs-checklist-copy">
+                  仅开放通过只读、安全和价格审核的 <code>GET</code> /{" "}
+                  <code>POST</code>{" "}
+                  数据查询端点；不代理写入、发布、互动或删除操作。
+                </span>
               </li>
             </ul>
           </section>

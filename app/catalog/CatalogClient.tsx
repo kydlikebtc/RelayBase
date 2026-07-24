@@ -8,6 +8,7 @@ import {
   type FormEvent,
   type RefObject,
 } from "react";
+import { PlatformIcon } from "../components/PlatformIcon";
 
 const PAGE_SIZE = 20;
 const MAX_FACET_OPTIONS = 500;
@@ -609,43 +610,6 @@ function facetLabel<T extends string>(
   value: T | string,
 ): string {
   return options.find((option) => option.value === value)?.label ?? value;
-}
-
-const platformCodes: Record<string, string> = {
-  bilibili: "BL",
-  demo: "DE",
-  douyin: "DY",
-  health: "OK",
-  hybrid: "HY",
-  instagram: "IG",
-  ios_shortcut: "IOS",
-  kuaishou: "KS",
-  lemon8: "L8",
-  linkedin: "IN",
-  pipixia: "PP",
-  reddit: "RD",
-  telegram: "TG",
-  temp_mail: "EM",
-  threads: "TH",
-  tiktok: "TK",
-  toutiao: "TT",
-  twitter: "X",
-  wechat_channels: "SPH",
-  wechat_mp: "WX",
-  wechat_search: "WS",
-  weibo: "WB",
-  xiaohongshu: "RED",
-  xigua: "XG",
-  youtube: "YT",
-  zhihu: "ZH",
-};
-
-function platformCode(value: string, label: string): string {
-  const fallback = label
-    .replace(/[^a-zA-Z0-9]/g, "")
-    .slice(0, 2)
-    .toUpperCase();
-  return platformCodes[value] ?? (fallback || "API");
 }
 
 function endpointDisplayName(path: string): string {
@@ -1309,9 +1273,10 @@ export default function CatalogClient() {
       >
         <header className="marketplace-card-brand">
           <div className="marketplace-card-platform">
-            <span aria-hidden="true">
-              {platformCode(endpoint.platform, platformLabel)}
-            </span>
+            <PlatformIcon
+              platform={endpoint.platform}
+              className="marketplace-card-platform-icon"
+            />
             <div>
               <strong>{platformLabel}</strong>
               <small>{dataTypeLabel}</small>
@@ -1621,7 +1586,10 @@ export default function CatalogClient() {
                 onClick={() => updateFilter("platform", "")}
                 aria-pressed={filters.platform === ""}
               >
-                <span className="marketplace-platform-code">ALL</span>
+                <PlatformIcon
+                  platform="all"
+                  className="marketplace-platform-code"
+                />
                 <span>
                   <strong>全部平台</strong>
                   <small>完整市场目录</small>
@@ -1638,9 +1606,10 @@ export default function CatalogClient() {
                   aria-pressed={filters.platform === option.value}
                   key={option.value}
                 >
-                  <span className="marketplace-platform-code">
-                    {platformCode(option.value, option.label)}
-                  </span>
+                  <PlatformIcon
+                    platform={option.value}
+                    className="marketplace-platform-code"
+                  />
                   <span>
                     <strong>{option.label}</strong>
                     <small>API 服务</small>
@@ -1653,14 +1622,10 @@ export default function CatalogClient() {
 
           <div className="marketplace-platform-content">
             <header className="marketplace-platform-summary">
-              <span className="marketplace-platform-hero-code">
-                {activePlatform
-                  ? platformCode(
-                      activePlatform.value,
-                      activePlatform.label,
-                    )
-                  : "ALL"}
-              </span>
+              <PlatformIcon
+                platform={activePlatform?.value ?? "all"}
+                className="marketplace-platform-hero-code"
+              />
               <div>
                 <small>SELECTED PLATFORM</small>
                 <h3>{activePlatform?.label ?? "全部平台"}</h3>

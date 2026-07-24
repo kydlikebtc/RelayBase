@@ -1,40 +1,144 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { PlatformIcon } from "./components/PlatformIcon";
 import { getRequestOrigin } from "./request-origin";
 
 export const metadata: Metadata = {
-  title: "稳定的数据 API",
+  title: "一个 API，接入多平台公开数据",
   description:
-    "一个 Bearer Key 统一调用 TikTok 等平台数据，稳定币充值，只为上游成功请求扣费。",
+    "RelayBase 提供多平台 API 市场、统一 Bearer Key、安全只读代理、请求级计费与可审计调用记录。",
 };
 
 const platforms = [
-  { name: "TikTok", code: "TK", detail: "用户 · 视频 · 搜索" },
-  { name: "Douyin", code: "DY", detail: "作品 · 评论 · 热榜" },
-  { name: "Instagram", code: "IG", detail: "主页 · 帖子 · Reels" },
-  { name: "YouTube", code: "YT", detail: "频道 · 视频 · 字幕" },
-  { name: "X / Twitter", code: "X", detail: "用户 · 推文 · 趋势" },
-  { name: "Reddit", code: "RD", detail: "社区 · 帖子 · 评论" },
+  {
+    name: "TikTok",
+    value: "tiktok",
+    detail: "用户 · 视频 · 搜索",
+    group: "短视频",
+  },
+  {
+    name: "Douyin",
+    value: "douyin",
+    detail: "作品 · 评论 · 热榜",
+    group: "短视频",
+  },
+  {
+    name: "Xiaohongshu",
+    value: "xiaohongshu",
+    detail: "笔记 · 作者 · 评论",
+    group: "内容社区",
+  },
+  {
+    name: "Instagram",
+    value: "instagram",
+    detail: "主页 · 帖子 · Reels",
+    group: "社交媒体",
+  },
+  {
+    name: "YouTube",
+    value: "youtube",
+    detail: "频道 · 视频 · 字幕",
+    group: "视频内容",
+  },
+  {
+    name: "X / Twitter",
+    value: "twitter",
+    detail: "用户 · 推文 · 趋势",
+    group: "社交媒体",
+  },
+  {
+    name: "Reddit",
+    value: "reddit",
+    detail: "社区 · 帖子 · 评论",
+    group: "内容社区",
+  },
+  {
+    name: "Bilibili",
+    value: "bilibili",
+    detail: "视频 · 创作者 · 评论",
+    group: "视频内容",
+  },
+  {
+    name: "Weibo",
+    value: "weibo",
+    detail: "用户 · 帖子 · 热点",
+    group: "社交媒体",
+  },
+  {
+    name: "Kuaishou",
+    value: "kuaishou",
+    detail: "创作者 · 视频 · 直播",
+    group: "短视频",
+  },
+  {
+    name: "WeChat",
+    value: "wechat_mp",
+    detail: "公众号 · 文章 · 搜索",
+    group: "内容生态",
+  },
+  {
+    name: "Threads",
+    value: "threads",
+    detail: "主页 · 帖子 · 回复",
+    group: "社交媒体",
+  },
+] as const;
+
+const coreCapabilities = [
+  {
+    code: "DISCOVER",
+    title: "按平台发现可用 API",
+    body: "市场直接读取当前部署的运行时目录，按平台、数据类型、方法与可用状态筛选；目录没有同步的能力不会被虚构展示。",
+    href: "/catalog",
+    link: "打开 API 市场",
+  },
+  {
+    code: "AUTH",
+    title: "一个 Bearer Key 统一鉴权",
+    body: "同一把 RelayBase Key 调用已开放的多平台服务。密钥只在创建时完整显示，可在控制台独立撤销和轮换。",
+    href: "/console",
+    link: "管理 API Key",
+  },
+  {
+    code: "PROXY",
+    title: "只读代理与统一响应",
+    body: "仅代理通过安全审核和价格审核的查询端点，统一返回 RelayBase JSON；写入、发布、互动和删除类操作不会开放。",
+    href: "/docs",
+    link: "查看调用规范",
+  },
+  {
+    code: "LEDGER",
+    title: "请求级计费与审计",
+    body: "状态码、延迟、平台、价格和最终扣费逐条记录。只有上游 HTTP 200 请求最终扣费，非 200 自动退款。",
+    href: "/pricing",
+    link: "了解计费规则",
+  },
 ] as const;
 
 const workflow = [
   {
     number: "01",
-    title: "生成一个 Key",
-    body: "登录控制台后创建 API Key。密钥只展示一次，前缀可随时识别和撤销。",
+    title: "在市场选择平台与接口",
+    body: "先查看运行时完整目录，确认平台、数据类型、方法、可用状态与每次请求价格。",
     accent: "blue",
   },
   {
     number: "02",
-    title: "请求统一入口",
-    body: "公开端点统一返回 RelayBase JSON 包装；只需要保持 Bearer 鉴权并切换 /v1 后的平台与能力路径。",
+    title: "创建并保存 API Key",
+    body: "控制台生成 rb_live_ 密钥；完整值只展示一次，后续可按业务用途独立撤销。",
     accent: "lime",
   },
   {
     number: "03",
-    title: "按成功调用结算",
-    body: "只有上游 HTTP 200 请求最终扣费；非 200 自动退款。成本、延迟和状态都有记录。",
+    title: "调用审核后的 /v1 路径",
+    body: "使用 Bearer 鉴权和幂等键发起只读请求，成功结果统一进入 RelayBase JSON 包装。",
     accent: "dark",
+  },
+  {
+    number: "04",
+    title: "在账本核对结果与费用",
+    body: "请求状态、耗时、价格和扣费可追踪；上游非 200 请求自动退款，不形成最终费用。",
+    accent: "brown",
   },
 ] as const;
 
@@ -53,34 +157,35 @@ export default async function Home() {
         <div className="hero-copy">
           <div className="eyebrow">
             <span className="eyebrow-pulse" aria-hidden="true" />
-            统一数据出口 · 稳定币结算
+            MULTI-PLATFORM DATA API · RELAYBASE
           </div>
           <h1>
-            把分散的接口，
-            <span>收进一条稳定 API</span>
+            一个 API，
+            <span>接入多平台公开数据</span>
           </h1>
           <p className="hero-lede">
-            面向产品、研究和自动化工作流的数据调用层。一个 Bearer
-            Key，统一鉴权、统一计费、统一错误体。
+            RelayBase 是面向产品、研究与自动化工作流的数据访问层。
+            它把已审核的只读接口放进统一市场，用一个 Bearer Key
+            调用，并按成功请求记录费用和状态。
           </p>
           <div className="hero-actions">
-            <Link className="button button-blue button-large" href="/console">
-              开始接入
+            <Link className="button button-blue button-large" href="/catalog">
+              浏览 API 市场
               <span aria-hidden="true">→</span>
             </Link>
-            <Link className="button button-ghost button-large" href="/docs">
-              阅读 API 文档
+            <Link className="button button-ghost button-large" href="/console">
+              获取 API Key
             </Link>
           </div>
           <div className="hero-proof" aria-label="产品特性">
             <span>
-              <b>01</b> 无订阅
+              <b>01</b> 运行时 API 目录
             </span>
             <span>
-              <b>02</b> 成功请求扣费
+              <b>02</b> 多平台统一鉴权
             </span>
             <span>
-              <b>03</b> USDT / USDC
+              <b>03</b> 请求级计费账本
             </span>
           </div>
         </div>
@@ -156,50 +261,51 @@ export default async function Home() {
               ↳
             </span>
             <p>
-              <b>公开端点统一返回 RelayBase JSON。</b>
+              <b>一条调用链包含鉴权、路由、响应和计费。</b>
               <br />
-              外部服务控制字段不会暴露给客户。
+              上游控制字段不会暴露给客户。
             </p>
           </div>
         </div>
       </section>
 
       <section className="trust-strip" aria-label="接入特点">
-        <span>JSON FIRST</span>
+        <span>RUNTIME CATALOG</span>
         <i />
-        <span>BEARER AUTH</span>
+        <span>ONE BEARER KEY</span>
         <i />
-        <span>USDC / USDT</span>
+        <span>READ-ONLY PROXY</span>
         <i />
-        <span>REQUEST-LEVEL BILLING</span>
+        <span>REQUEST LEDGER</span>
       </section>
 
       <section className="section section-grid" id="platforms">
         <div className="section-heading">
           <p className="section-kicker">PLATFORM / 01</p>
           <h2>
-            需要的数据很多，
+            多个平台的数据，
             <br />
-            接入方式只有一种
+            用同一种方式接入
           </h2>
         </div>
         <div className="section-intro">
           <p>
-            下列是上游可编排的数据范围；只有完成只读、安全和价格审核后才会进入
-            RelayBase 公开目录，以目录实时状态为准。
+            覆盖短视频、社交媒体、视频内容与内容社区。平台只是一级入口，
+            具体服务、方法、价格和可用状态以当前运行时 API 市场为准。
           </p>
           <Link className="text-link" href="/catalog">
-            浏览当前接口 <span aria-hidden="true">↗</span>
+            按平台浏览当前服务 <span aria-hidden="true">↗</span>
           </Link>
         </div>
         <div className="platform-grid">
-          {platforms.map((platform, index) => (
+          {platforms.map((platform) => (
             <article className="platform-card" key={platform.name}>
               <div className="platform-card-top">
-                <span className="platform-code">{platform.code}</span>
-                <span className="platform-index">
-                  {String(index + 1).padStart(2, "0")}
-                </span>
+                <PlatformIcon
+                  platform={platform.value}
+                  className="platform-logo"
+                />
+                <span className="platform-index">{platform.group}</span>
               </div>
               <h3>{platform.name}</h3>
               <p>{platform.detail}</p>
@@ -210,20 +316,49 @@ export default async function Home() {
           ))}
           <article className="platform-card platform-card-more">
             <div className="platform-card-top">
-              <span className="platform-code">++</span>
-              <span className="platform-index">NEXT</span>
+              <PlatformIcon platform="all" className="platform-logo" />
+              <span className="platform-index">完整目录</span>
             </div>
-            <h3>持续扩展</h3>
-            <p>更多公开数据能力正在整理接入</p>
-            <Link href="/catalog">查看全部路径</Link>
+            <h3>更多平台</h3>
+            <p>在市场查看全部平台与当前运行时服务</p>
+            <Link href="/catalog">打开市场</Link>
           </article>
+        </div>
+      </section>
+
+      <section className="section capability-section">
+        <div className="capability-heading">
+          <div>
+            <p className="section-kicker">PRODUCT / 02</p>
+            <h2>不是接口清单，而是一条完整的数据调用链。</h2>
+          </div>
+          <p>
+            从发现服务到生成密钥、调用代理、查看账本，RelayBase
+            把多平台数据接入所需的关键能力放进同一套产品界面。
+          </p>
+        </div>
+        <div className="capability-grid">
+          {coreCapabilities.map((capability, index) => (
+            <article className="capability-card" key={capability.code}>
+              <header>
+                <span>{String(index + 1).padStart(2, "0")}</span>
+                <code>{capability.code}</code>
+              </header>
+              <h3>{capability.title}</h3>
+              <p>{capability.body}</p>
+              <Link href={capability.href}>
+                {capability.link}
+                <span aria-hidden="true">→</span>
+              </Link>
+            </article>
+          ))}
         </div>
       </section>
 
       <section className="section workflow-section">
         <div className="workflow-header">
-          <p className="section-kicker section-kicker-light">WORKFLOW / 02</p>
-          <h2>从充值到第一条数据，三步。</h2>
+          <p className="section-kicker">WORKFLOW / 03</p>
+          <h2>从发现接口到核对费用，四步闭环。</h2>
         </div>
         <div className="workflow-grid">
           {workflow.map((step) => (
@@ -248,7 +383,7 @@ export default async function Home() {
 
       <section className="section billing-section section-grid">
         <div className="section-heading">
-          <p className="section-kicker">BILLING / 03</p>
+          <p className="section-kicker">BILLING / 04</p>
           <h2>
             每一分钱，
             <br />
@@ -297,7 +432,7 @@ export default async function Home() {
 
       <section className="section security-section">
         <div className="security-copy">
-          <p className="section-kicker section-kicker-light">SECURITY / 04</p>
+          <p className="section-kicker">SECURITY / 05</p>
           <h2>密钥归你，账目可查，边界说清。</h2>
           <p>
             RelayBase 是独立的数据接口封装层，不代表任何上游平台。

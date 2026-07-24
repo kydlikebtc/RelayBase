@@ -2703,21 +2703,19 @@
 
 .marketplace-platform-code,
 .marketplace-platform-hero-code,
-.marketplace-card-platform > span {
+.marketplace-card-platform-icon {
   display: grid;
   place-items: center;
-  color: var(--accent-strong);
-  background: color-mix(in srgb, var(--accent) 11%, var(--surface));
-  font-family: var(--mono);
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  border: 1px solid var(--border);
+  color: var(--platform-brand-color, var(--ink-2));
+  background: var(--surface);
 }
 
 .marketplace-platform-code {
   width: 32px;
   height: 32px;
+  padding: 7px;
   border-radius: 9px;
-  font-size: 9px;
 }
 
 .marketplace-platform-directory nav button > span:nth-child(2) {
@@ -2773,8 +2771,8 @@
 .marketplace-platform-hero-code {
   width: 54px;
   height: 54px;
+  padding: 13px;
   border-radius: 14px;
-  font-size: 12px;
 }
 
 .marketplace-platform-summary h3 {
@@ -2891,12 +2889,12 @@
   gap: 9px;
 }
 
-.marketplace-card-platform > span {
+.marketplace-card-platform-icon {
   width: 36px;
   height: 36px;
   flex: 0 0 auto;
+  padding: 8px;
   border-radius: 10px;
-  font-size: 9px;
 }
 
 .marketplace-card-platform > div {
