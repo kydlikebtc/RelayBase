@@ -380,9 +380,9 @@ function responseCookie(response, name) {
 
 test("renders the finished product routes without starter metadata", async () => {
   for (const [path, expected] of [
-    ["/", "接入多平台公开数据"],
+    ["/", "多平台数据市场"],
     ["/docs", "API 文档"],
-    ["/catalog", "API 市场"],
+    ["/catalog", "数据市场"],
     ["/pricing", "只为真实请求付费"],
     ["/console", "控制台"],
   ]) {

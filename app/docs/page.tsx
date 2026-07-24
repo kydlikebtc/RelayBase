@@ -5,7 +5,7 @@ import { getRequestOrigin } from "../request-origin";
 export const metadata: Metadata = {
   title: "API 文档",
   description:
-    "RelayBase API 市场、鉴权、请求示例、错误码、计费与支付确认语义。",
+    "RelayBase 数据市场的开放目录、访问鉴权、请求示例、错误码、计费与支付确认语义。",
 };
 
 function codeExamples(origin: string) {
@@ -64,7 +64,7 @@ const errorExample = `{
 
 const errors = [
   ["400", "invalid_idempotency_key", "幂等键缺失或格式无效"],
-  ["400", "invalid_marketplace_filter", "API 市场筛选值无效或重复"],
+  ["400", "invalid_marketplace_filter", "数据市场筛选值无效或重复"],
   ["400", "invalid_pagination", "分页 limit 或 offset 超出允许范围"],
   ["400", "invalid_marketplace_endpoint", "详情 path 缺失，或可选 method 无效"],
   ["400", "invalid_max_cost", "最高成本请求头不是允许范围内的微美元整数"],
@@ -121,8 +121,8 @@ export default async function DocsPage() {
           <p className="section-kicker">DOCS / API v1</p>
           <h1>把第一条请求跑起来。</h1>
           <p>
-            RelayBase 使用标准 HTTP、Bearer Key 与 JSON。所有公开数据能力都从
-            <code>/v1</code> 开始。
+            RelayBase 数据市场使用标准 HTTP、Bearer Key 与 JSON 交付数据产品。
+            所有可调用能力都从 <code>/v1</code> 开始。
           </p>
         </div>
         <div className="docs-version">
@@ -137,7 +137,7 @@ export default async function DocsPage() {
           <nav aria-label="文档目录">
             <span>开始</span>
             <a href="#overview">基本约定</a>
-            <a href="#catalog">API 市场与开放目录</a>
+            <a href="#catalog">数据市场与开放目录</a>
             <a href="#auth">鉴权</a>
             <a href="#examples">请求示例</a>
             <span>行为</span>
@@ -199,8 +199,8 @@ export default async function DocsPage() {
             <div className="docs-section-label">02 / CATALOG</div>
             <h2>区分能力发现与真实可调用。</h2>
             <p>
-              <Link href="/catalog">API 市场页面</Link>
-              只读取当前部署在管理后台完成同步的运行时完整市场目录。目录同时包含
+              <Link href="/catalog">数据市场页面</Link>
+              只读取当前部署在管理后台完成同步的运行时完整供给目录。目录同时包含
               已匹配接口文档的完整定义条目，以及只存在于价格目录的 price-only
               文档待同步条目；尚未同步时返回空结果。仓库不内置第三方 OpenAPI
               快照、原始说明、来源哈希或官方标签清单。

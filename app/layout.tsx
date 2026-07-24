@@ -8,18 +8,18 @@ import "./styles/docs-pricing.css";
 
 export async function generateMetadata(): Promise<Metadata> {
   const origin = await getRequestOrigin();
-  const socialImage = `${origin}/og-v2.png`;
+  const socialImage = `${origin}/og-v3.png`;
 
   return {
     metadataBase: new URL(origin),
     title: {
-      default: "RelayBase API｜一个 API，接入多平台公开数据",
-      template: "%s｜RelayBase API",
+      default: "RelayBase 数据市场｜发现并使用多平台数据产品",
+      template: "%s｜RelayBase 数据市场",
     },
     description:
-      "多平台 API 市场、统一 Bearer Key、安全只读代理、请求级计费与可审计调用记录。",
-    applicationName: "RelayBase API",
-    keywords: ["数据 API", "开发者 API", "稳定币支付", "多平台数据 API"],
+      "面向 AI、产品与研究团队的多平台数据市场。发现、比较并调用经过审核的数据产品。",
+    applicationName: "RelayBase 数据市场",
+    keywords: ["数据市场", "数据产品", "数据 API", "AI 数据", "多平台数据"],
     icons: {
       icon: [{ url: "/favicon.svg", type: "image/svg+xml" }],
       shortcut: "/favicon.svg",
@@ -27,23 +27,23 @@ export async function generateMetadata(): Promise<Metadata> {
     openGraph: {
       type: "website",
       locale: "zh_CN",
-      siteName: "RelayBase API",
-      title: "RelayBase API｜一个 API，接入多平台公开数据",
+      siteName: "RelayBase 数据市场",
+      title: "RelayBase 数据市场｜发现并使用多平台数据产品",
       description:
-        "从发现服务到统一鉴权、只读调用和请求级计费，一套完成。",
+        "把分散的平台数据能力，变成可发现、可比较、可计价、可调用的数据产品。",
       images: [
         {
           url: socialImage,
           width: 1200,
           height: 630,
-          alt: "RelayBase API：一个 API，接入多平台公开数据",
+          alt: "RelayBase：面向 AI 与应用的多平台数据市场",
         },
       ],
     },
     twitter: {
       card: "summary_large_image",
-      title: "RelayBase API｜一个 API，接入多平台公开数据",
-      description: "多平台 API 市场、统一鉴权、只读代理和请求级计费。",
+      title: "RelayBase 数据市场｜发现并使用多平台数据产品",
+      description: "面向 AI、产品与研究团队的多平台数据市场。",
       images: [socialImage],
     },
   };

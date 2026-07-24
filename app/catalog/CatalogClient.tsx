@@ -647,7 +647,7 @@ function LoadingCards() {
       className="marketplace-loading"
       role="status"
       aria-live="polite"
-      aria-label="正在加载 API 服务"
+      aria-label="正在加载数据产品"
     >
       {Array.from({ length: 6 }, (_, index) => (
         <span key={index} aria-hidden="true" />
@@ -730,7 +730,7 @@ function DetailPanel({
   const title =
     endpoint.summary?.trim() ||
     endpoint.path.split("/").filter(Boolean).at(-1) ||
-    "API 服务详情";
+    "数据产品详情";
 
   return (
     <aside
@@ -820,7 +820,7 @@ function DetailPanel({
               <dd>{endpoint.dataType}</dd>
             </div>
             <div>
-              <dt>服务 ID</dt>
+              <dt>产品 ID</dt>
               <dd>
                 <code>{endpoint.id}</code>
               </dd>
@@ -862,11 +862,11 @@ function DetailPanel({
           </div>
 
           <section aria-labelledby="marketplace-description-title">
-            <h3 id="marketplace-description-title">服务说明</h3>
+            <h3 id="marketplace-description-title">产品说明</h3>
             <p className="marketplace-description">
               {state.data.endpoint.description ||
                 endpoint.summary ||
-                "该服务暂未提供补充说明，请以参数结构和响应示例为准。"}
+                "该数据产品暂未提供补充说明，请以参数结构和响应示例为准。"}
             </p>
           </section>
 
@@ -890,8 +890,8 @@ function DetailPanel({
                 endpoint.documentationStatus === "pending"
                   ? "请求体规范待补齐。"
                   : endpoint.method === "GET"
-                  ? "GET 服务不需要请求体。"
-                  : "此服务没有声明请求体结构。"
+                  ? "GET 数据产品不需要请求体。"
+                  : "此数据产品没有声明请求体结构。"
               }
             />
           </section>
@@ -979,7 +979,7 @@ function DetailPanel({
           </section>
 
           <Link className="marketplace-detail-cta" href="/console">
-            获取 RelayBase API Key
+            获取数据市场访问 Key
             <span aria-hidden="true">→</span>
           </Link>
         </div>
@@ -1073,8 +1073,8 @@ export default function CatalogClient() {
           status: "error",
           message:
             timedOut
-              ? "API 市场读取超时，请稍后重试。你的账户、API Key 与余额不会受到影响。"
-              : "API 市场暂时无法读取。你的账户、API Key 与余额不会受到影响。",
+              ? "数据市场读取超时，请稍后重试。你的账户、访问 Key 与余额不会受到影响。"
+              : "数据市场暂时无法读取。你的账户、访问 Key 与余额不会受到影响。",
         });
       } finally {
         window.clearTimeout(timeoutId);
@@ -1155,8 +1155,8 @@ export default function CatalogClient() {
           status: "error",
           endpoint,
           message: timedOut
-            ? "接口详情读取超时，请稍后重试。"
-            : "无法验证该服务的详情数据，请稍后重试。",
+            ? "产品详情读取超时，请稍后重试。"
+            : "无法验证该数据产品的详情，请稍后重试。",
         });
       } finally {
         window.clearTimeout(timeoutId);
@@ -1308,7 +1308,7 @@ export default function CatalogClient() {
           <h3>{endpointDisplayName(endpoint.path)}</h3>
           <p>
             {endpoint.summary ||
-              `${platformLabel} ${dataTypeLabel} 数据服务`}
+              `${platformLabel} ${dataTypeLabel} 数据产品`}
           </p>
           <code title={endpoint.path}>{endpoint.path}</code>
         </div>
@@ -1337,7 +1337,7 @@ export default function CatalogClient() {
           aria-expanded={selected}
           aria-controls="marketplace-detail-panel"
         >
-          查看接口详情
+          查看产品详情
           <span aria-hidden="true">→</span>
         </button>
       </article>
@@ -1351,30 +1351,30 @@ export default function CatalogClient() {
         aria-labelledby="marketplace-title"
       >
         <div className="marketplace-masthead-copy">
-          <p className="section-kicker">RELAYBASE / API MARKETPLACE</p>
+          <p className="section-kicker">RELAYBASE / DATA MARKETPLACE</p>
           <h1 id="marketplace-title">
-            完整发现
-            <span>审核开放的数据 API。</span>
+            发现、比较并调用
+            <span>多平台数据产品。</span>
           </h1>
           <p>
-            搜索当前部署已同步的 RelayBase 服务，按平台、能力分类、归一化类型和
-            调用表面精确筛选。只有完成安全审核与核价的服务才会进入代理并按成功
-            请求计费。
+            RelayBase 把分散在各平台的公开数据能力组织成统一商品目录。你可以按
+            来源、数据类型、调用方式、价格与可用状态筛选，找到适合产品、Agent
+            与研究流程的数据供给。
           </p>
           <div className="marketplace-masthead-actions">
             <Link className="button button-blue button-large" href="/console">
-              获取 API Key
+              开始使用数据
               <span aria-hidden="true">→</span>
             </Link>
             <Link className="button button-ghost button-large" href="/docs">
-              阅读调用文档
+              了解接入规范
             </Link>
           </div>
         </div>
 
-        <aside className="marketplace-source-card" aria-label="API 市场目录状态">
-          <span>RUNTIME CATALOG</span>
-          <strong>RelayBase Curated Catalog</strong>
+        <aside className="marketplace-source-card" aria-label="数据市场目录状态">
+          <span>MARKET DATA CATALOG</span>
+          <strong>RelayBase Curated Data Market</strong>
           <dl>
             <div>
               <dt>目录版本</dt>
@@ -1392,13 +1392,13 @@ export default function CatalogClient() {
         </aside>
       </section>
 
-      <section className="marketplace-stat-strip" aria-label="API 市场统计">
+      <section className="marketplace-stat-strip" aria-label="数据市场统计">
         <article>
-          <span>API 服务</span>
+          <span>数据产品</span>
           <strong>
             {formatMarketplaceTotal(marketplace?.catalog.serviceCount)}
           </strong>
-          <small>当前运行时目录</small>
+          <small>当前市场供给</small>
         </article>
         <article>
           <span>数据平台</span>
@@ -1406,14 +1406,14 @@ export default function CatalogClient() {
           <small>统一接入</small>
         </article>
         <article>
-          <span>能力分类</span>
+          <span>数据分类</span>
           <strong>{marketplace?.stats.categories ?? "—"}</strong>
-          <small>完整同步标签</small>
+          <small>标准化商品标签</small>
         </article>
         <article>
-          <span>当前可用</span>
+          <span>可用产品</span>
           <strong>{marketplace?.stats.available ?? "—"}</strong>
-          <small>已核价服务</small>
+          <small>已审核并核价</small>
         </article>
       </section>
 
@@ -1427,7 +1427,7 @@ export default function CatalogClient() {
             role="search"
             onSubmit={submitSearch}
           >
-            <label htmlFor="marketplace-query">搜索 API 服务</label>
+            <label htmlFor="marketplace-query">搜索数据产品</label>
             <div>
               <span aria-hidden="true">⌕</span>
               <input
@@ -1435,7 +1435,7 @@ export default function CatalogClient() {
                 type="search"
                 value={searchInput}
                 onChange={(event) => setSearchInput(event.target.value)}
-                placeholder="搜索平台、能力分类、服务名称或 /v1/ 路径"
+                placeholder="搜索平台、数据分类、产品名称或 /v1/ 路径"
                 maxLength={160}
                 autoComplete="off"
               />
@@ -1445,14 +1445,14 @@ export default function CatalogClient() {
 
           <div className="marketplace-filters">
             <label>
-              <span>能力分类</span>
+              <span>数据分类</span>
               <select
                 value={filters.category}
                 onChange={(event) =>
                   updateFilter("category", event.target.value)
                 }
               >
-                <option value="">全部能力分类</option>
+                <option value="">全部数据分类</option>
                 {facets?.categories.map((option) => (
                   <option value={option.value} key={option.value}>
                     {option.label} · {option.count}
@@ -1534,10 +1534,11 @@ export default function CatalogClient() {
             <div>
               <p className="section-kicker">DISCOVER / PLATFORMS</p>
               <h2 id="marketplace-results-title">
-                按平台浏览 API 服务
+                按平台浏览数据产品
               </h2>
               <p className="marketplace-results-intro">
-                平台是一级入口；进入平台后，再按数据类型和调用能力快速筛选。
+                平台是数据供给的一级入口；进入平台后，再按数据类型、调用能力和
+                价格快速筛选。
               </p>
             </div>
           </div>
@@ -1557,7 +1558,7 @@ export default function CatalogClient() {
           <div className="marketplace-error" role="alert">
             <span aria-hidden="true">!</span>
             <div>
-              <strong>API 市场连接失败</strong>
+              <strong>数据市场连接失败</strong>
               <p>{state.message}</p>
             </div>
             <button
@@ -1572,7 +1573,7 @@ export default function CatalogClient() {
         <div className="marketplace-platform-browser">
           <aside
             className="marketplace-platform-directory"
-            aria-label="API 平台目录"
+            aria-label="数据平台目录"
           >
             <header>
               <span>PLATFORMS</span>
@@ -1592,7 +1593,7 @@ export default function CatalogClient() {
                 />
                 <span>
                   <strong>全部平台</strong>
-                  <small>完整市场目录</small>
+                  <small>完整数据市场</small>
                 </span>
                 <b>{platformCatalogTotal.toLocaleString()}</b>
               </button>
@@ -1612,7 +1613,7 @@ export default function CatalogClient() {
                   />
                   <span>
                     <strong>{option.label}</strong>
-                    <small>API 服务</small>
+                    <small>数据产品</small>
                   </span>
                   <b>{option.count.toLocaleString()}</b>
                 </button>
@@ -1631,13 +1632,13 @@ export default function CatalogClient() {
                 <h3>{activePlatform?.label ?? "全部平台"}</h3>
                 <p>
                   {activePlatform
-                    ? `浏览 ${activePlatform.label} 的全部数据接口与调用能力。`
-                    : "从平台开始发现服务，并在平台内继续筛选数据能力。"}
+                    ? `浏览 ${activePlatform.label} 的全部数据产品、调用能力与价格。`
+                    : "从平台开始发现数据供给，并在平台内继续筛选产品能力。"}
                 </p>
               </div>
               <strong>
                 {marketplace
-                  ? `${marketplace.total.toLocaleString()} 项服务`
+                  ? `${marketplace.total.toLocaleString()} 项产品`
                   : "统计中"}
               </strong>
             </header>
@@ -1714,17 +1715,17 @@ export default function CatalogClient() {
                       </p>
                       <h3>
                         {filtersActive
-                          ? "这个平台下暂时没有符合条件的 API。"
-                          : "API 市场正在准备服务目录。"}
+                          ? "这个平台下暂时没有符合条件的数据产品。"
+                          : "数据市场正在准备供给目录。"}
                       </h3>
                       <p>
                         {filtersActive
                           ? "试试切换平台、减少数据类型或其他筛选条件。"
-                          : "完成运行时目录同步和安全核验后，服务会在这里出现。"}
+                          : "完成目录同步、安全核验和价格复核后，数据产品会在这里出现。"}
                       </p>
                       {filtersActive ? (
                         <button type="button" onClick={clearFilters}>
-                          查看全部 API
+                          查看全部数据产品
                         </button>
                       ) : (
                         <Link href="/docs">先阅读调用文档</Link>
@@ -1736,7 +1737,7 @@ export default function CatalogClient() {
                 {marketplace && marketplace.total > 0 ? (
                   <nav
                     className="marketplace-pagination"
-                    aria-label="API 服务分页"
+                    aria-label="数据产品分页"
                   >
                     <button
                       type="button"
@@ -1799,9 +1800,9 @@ export default function CatalogClient() {
         <div>
           <span aria-hidden="true">R/</span>
           <div>
-            <strong>一个 Key，调用已审核开放的数据服务。</strong>
+            <strong>一个访问 Key，消费已审核开放的数据产品。</strong>
             <p>
-              只有状态为“可调用”的服务会进入真实代理；待开放与受限服务仅用于能力发现。
+              只有状态为“可调用”的数据产品会进入真实代理；待开放与受限产品仅用于供给发现。
             </p>
           </div>
         </div>

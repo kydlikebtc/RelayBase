@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "控制台",
-  description: "管理 RelayBase API 密钥、余额、稳定币充值与请求记录。",
+  description: "管理 RelayBase 数据市场访问 Key、余额、稳定币充值与数据消费记录。",
 };
 
 export default async function ConsolePage() {

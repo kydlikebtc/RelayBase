@@ -4,9 +4,9 @@ import { PlatformIcon } from "./components/PlatformIcon";
 import { getRequestOrigin } from "./request-origin";
 
 export const metadata: Metadata = {
-  title: "一个 API，接入多平台公开数据",
+  title: "面向 AI 与应用的多平台数据市场",
   description:
-    "RelayBase 提供多平台 API 市场、统一 Bearer Key、安全只读代理、请求级计费与可审计调用记录。",
+    "RelayBase 将分散的公开数据能力标准化为可发现、可比较、可计价、可调用的数据产品。",
 };
 
 const platforms = [
@@ -87,57 +87,57 @@ const platforms = [
 const coreCapabilities = [
   {
     code: "DISCOVER",
-    title: "按平台发现可用 API",
-    body: "市场直接读取当前部署的运行时目录，按平台、数据类型、方法与可用状态筛选；目录没有同步的能力不会被虚构展示。",
+    title: "发现可信数据供给",
+    body: "从平台、数据类型、能力与可用状态出发，快速找到适合业务的数据产品；未同步、未审核的供给不会进入可用目录。",
     href: "/catalog",
-    link: "打开 API 市场",
+    link: "进入数据市场",
   },
   {
-    code: "AUTH",
-    title: "一个 Bearer Key 统一鉴权",
-    body: "同一把 RelayBase Key 调用已开放的多平台服务。密钥只在创建时完整显示，可在控制台独立撤销和轮换。",
-    href: "/console",
-    link: "管理 API Key",
-  },
-  {
-    code: "PROXY",
-    title: "只读代理与统一响应",
-    body: "仅代理通过安全审核和价格审核的查询端点，统一返回 RelayBase JSON；写入、发布、互动和删除类操作不会开放。",
+    code: "STANDARDIZE",
+    title: "将接口组织成数据产品",
+    body: "平台来源、数据类型、调用方式、可用状态和价格被放进同一套商品结构，供给可以被搜索、比较和持续治理。",
     href: "/docs",
-    link: "查看调用规范",
+    link: "查看产品规范",
   },
   {
-    code: "LEDGER",
-    title: "请求级计费与审计",
-    body: "状态码、延迟、平台、价格和最终扣费逐条记录。只有上游 HTTP 200 请求最终扣费，非 200 自动退款。",
+    code: "CONSUME",
+    title: "用统一协议消费数据",
+    body: "一个 Bearer Key 即可调用已开放的多平台数据产品，响应统一为 RelayBase JSON，让产品、Agent 与自动化流程复用同一接入方式。",
+    href: "/console",
+    link: "开始使用数据",
+  },
+  {
+    code: "SETTLE",
+    title: "按真实用量透明结算",
+    body: "每次消费的状态、延迟、数据来源、价格和最终扣费逐条记录；只有成功请求形成费用，失败请求自动退款。",
     href: "/pricing",
-    link: "了解计费规则",
+    link: "了解市场结算",
   },
 ] as const;
 
 const workflow = [
   {
     number: "01",
-    title: "在市场选择平台与接口",
-    body: "先查看运行时完整目录，确认平台、数据类型、方法、可用状态与每次请求价格。",
+    title: "发现需要的数据产品",
+    body: "从平台和数据类型进入市场，筛选当前真实存在且通过审核的数据供给。",
     accent: "blue",
   },
   {
     number: "02",
-    title: "创建并保存 API Key",
-    body: "控制台生成 rb_live_ 密钥；完整值只展示一次，后续可按业务用途独立撤销。",
+    title: "比较能力、状态与价格",
+    body: "在产品详情中确认数据范围、请求参数、可用状态、限流策略和每次消费价格。",
     accent: "lime",
   },
   {
     number: "03",
-    title: "调用审核后的 /v1 路径",
-    body: "使用 Bearer 鉴权和幂等键发起只读请求，成功结果统一进入 RelayBase JSON 包装。",
+    title: "通过统一协议投入生产",
+    body: "创建 RelayBase Key，以同一套鉴权、路径和响应规范调用不同平台的数据产品。",
     accent: "dark",
   },
   {
     number: "04",
-    title: "在账本核对结果与费用",
-    body: "请求状态、耗时、价格和扣费可追踪；上游非 200 请求自动退款，不形成最终费用。",
+    title: "按真实消费完成结算",
+    body: "每次请求的状态、耗时、价格与扣费进入账本；失败请求自动退款，不形成最终费用。",
     accent: "brown",
   },
 ] as const;
@@ -157,35 +157,35 @@ export default async function Home() {
         <div className="hero-copy">
           <div className="eyebrow">
             <span className="eyebrow-pulse" aria-hidden="true" />
-            MULTI-PLATFORM DATA API · RELAYBASE
+            MULTI-PLATFORM DATA MARKETPLACE · RELAYBASE
           </div>
           <h1>
-            一个 API，
-            <span>接入多平台公开数据</span>
+            面向 AI 与应用的
+            <span>多平台数据市场</span>
           </h1>
           <p className="hero-lede">
-            RelayBase 是面向产品、研究与自动化工作流的数据访问层。
-            它把已审核的只读接口放进统一市场，用一个 Bearer Key
-            调用，并按成功请求记录费用和状态。
+            RelayBase 将分散在不同平台的公开数据能力，标准化为可搜索、可比较、
+            可计价、可调用的数据产品。团队从发现供给到规模化使用，都在同一个
+            市场完成。
           </p>
           <div className="hero-actions">
             <Link className="button button-blue button-large" href="/catalog">
-              浏览 API 市场
+              进入数据市场
               <span aria-hidden="true">→</span>
             </Link>
             <Link className="button button-ghost button-large" href="/console">
-              获取 API Key
+              开始使用数据
             </Link>
           </div>
           <div className="hero-proof" aria-label="产品特性">
             <span>
-              <b>01</b> 运行时 API 目录
+              <b>01</b> 多源数据供给
             </span>
             <span>
-              <b>02</b> 多平台统一鉴权
+              <b>02</b> 标准化数据产品
             </span>
             <span>
-              <b>03</b> 请求级计费账本
+              <b>03</b> 透明计价与审计
             </span>
           </div>
         </div>
@@ -261,40 +261,41 @@ export default async function Home() {
               ↳
             </span>
             <p>
-              <b>一条调用链包含鉴权、路由、响应和计费。</b>
+              <b>每一项可调用能力，都是可发现、可计价、可审计的数据产品。</b>
               <br />
-              上游控制字段不会暴露给客户。
+              API 是交付方式，数据才是市场的核心。
             </p>
           </div>
         </div>
       </section>
 
-      <section className="trust-strip" aria-label="接入特点">
-        <span>RUNTIME CATALOG</span>
+      <section className="trust-strip" aria-label="数据市场特点">
+        <span>CURATED DATA SUPPLY</span>
         <i />
-        <span>ONE BEARER KEY</span>
+        <span>STANDARDIZED PRODUCTS</span>
         <i />
-        <span>READ-ONLY PROXY</span>
+        <span>UNIFIED CONSUMPTION</span>
         <i />
-        <span>REQUEST LEDGER</span>
+        <span>TRANSPARENT SETTLEMENT</span>
       </section>
 
       <section className="section section-grid" id="platforms">
         <div className="section-heading">
-          <p className="section-kicker">PLATFORM / 01</p>
+          <p className="section-kicker">SUPPLY / 01</p>
           <h2>
-            多个平台的数据，
+            一个市场，
             <br />
-            用同一种方式接入
+            连接分散的数据供给
           </h2>
         </div>
         <div className="section-intro">
           <p>
-            覆盖短视频、社交媒体、视频内容与内容社区。平台只是一级入口，
-            具体服务、方法、价格和可用状态以当前运行时 API 市场为准。
+            RelayBase 按平台聚合短视频、社交媒体、视频内容与内容社区的数据能力，
+            再将它们整理为结构一致的数据产品。市场中的能力、价格和状态均来自当前
+            运行时供给目录。
           </p>
           <Link className="text-link" href="/catalog">
-            按平台浏览当前服务 <span aria-hidden="true">↗</span>
+            查看数据供给版图 <span aria-hidden="true">↗</span>
           </Link>
         </div>
         <div className="platform-grid">
@@ -320,8 +321,8 @@ export default async function Home() {
               <span className="platform-index">完整目录</span>
             </div>
             <h3>更多平台</h3>
-            <p>在市场查看全部平台与当前运行时服务</p>
-            <Link href="/catalog">打开市场</Link>
+            <p>在数据市场查看全部平台与当前可用产品</p>
+            <Link href="/catalog">进入市场</Link>
           </article>
         </div>
       </section>
@@ -329,12 +330,12 @@ export default async function Home() {
       <section className="section capability-section">
         <div className="capability-heading">
           <div>
-            <p className="section-kicker">PRODUCT / 02</p>
-            <h2>不是接口清单，而是一条完整的数据调用链。</h2>
+            <p className="section-kicker">MARKET / 02</p>
+            <h2>不止汇总接口，而是组织一整个数据市场。</h2>
           </div>
           <p>
-            从发现服务到生成密钥、调用代理、查看账本，RelayBase
-            把多平台数据接入所需的关键能力放进同一套产品界面。
+            RelayBase 把分散的接口供给转化为可理解、可比较、可消费的数据产品，
+            并用统一的接入和结算基础设施，让数据真正进入生产流程。
           </p>
         </div>
         <div className="capability-grid">
@@ -357,8 +358,8 @@ export default async function Home() {
 
       <section className="section workflow-section">
         <div className="workflow-header">
-          <p className="section-kicker">WORKFLOW / 03</p>
-          <h2>从发现接口到核对费用，四步闭环。</h2>
+          <p className="section-kicker">TRANSACTION / 03</p>
+          <h2>从发现数据到投入生产，四步完成。</h2>
         </div>
         <div className="workflow-grid">
           {workflow.map((step) => (
@@ -383,15 +384,15 @@ export default async function Home() {
 
       <section className="section billing-section section-grid">
         <div className="section-heading">
-          <p className="section-kicker">BILLING / 04</p>
+          <p className="section-kicker">SETTLEMENT / 04</p>
           <h2>
-            每一分钱，
+            数据消费，
             <br />
-            都能对上请求
+            按真实请求结算
           </h2>
           <p className="heading-note">
-            不预设套餐，不锁定月费。余额用于真实请求，并在控制台保留逐条消费记录。
-            只有上游 HTTP 200 的成功请求最终扣费，非 200 自动退款。
+            不预设套餐，不锁定月费。价格直接附着在数据产品上，余额只用于真实消费，
+            每笔费用都能回到具体请求。只有成功请求最终扣费，失败请求自动退款。
           </p>
           <Link className="button button-dark" href="/pricing">
             查看充值与计费
@@ -432,33 +433,33 @@ export default async function Home() {
 
       <section className="section security-section">
         <div className="security-copy">
-          <p className="section-kicker">SECURITY / 05</p>
-          <h2>密钥归你，账目可查，边界说清。</h2>
+          <p className="section-kicker">GOVERNANCE / 05</p>
+          <h2>市场有边界，数据使用才有信任。</h2>
           <p>
-            RelayBase 是独立的数据接口封装层，不代表任何上游平台。
-            我们把鉴权、调用与支付状态留在服务端，减少密钥暴露面。
+            RelayBase 只将完成目录、安全与价格审核的数据能力放进可用市场。
+            平台来源、只读边界、调用状态与结算证据都被明确记录。
           </p>
         </div>
         <div className="security-list">
           <div>
-            <span>KEY</span>
+            <span>CURATE</span>
             <p>
-              <b>密钥仅创建时明文展示</b>
-              之后只保留可识别前缀，可独立撤销和轮换。
+              <b>数据供给经过审核</b>
+              未完成目录同步、安全核验和价格复核的产品不会进入可用市场。
             </p>
           </div>
           <div>
-            <span>PAY</span>
+            <span>BOUNDARY</span>
             <p>
-              <b>支付回调服务端验证</b>
-              充值状态以链上确认与控制台账本为准。
+              <b>只开放数据查询</b>
+              不代理写入、发布、互动或删除操作，来源与控制字段不会向客户暴露。
             </p>
           </div>
           <div>
-            <span>LOG</span>
+            <span>LEDGER</span>
             <p>
               <b>请求级审计记录</b>
-              状态码、延迟、平台与扣费金额逐条可查。
+              状态码、延迟、数据来源、单价与扣费金额逐条可查。
             </p>
           </div>
         </div>
@@ -466,18 +467,18 @@ export default async function Home() {
 
       <section className="final-cta">
         <div className="cta-grid" aria-hidden="true" />
-        <p>SHIP THE FIRST REQUEST</p>
+        <p>ENTER THE DATA MARKET</p>
         <h2>
-          第一条稳定数据，
+          下一项数据能力，
           <br />
-          不该等到下个迭代。
+          不必再从零寻找。
         </h2>
         <div>
-          <Link className="button button-lime button-large" href="/console">
-            进入控制台 <span aria-hidden="true">↗</span>
+          <Link className="button button-lime button-large" href="/catalog">
+            进入数据市场 <span aria-hidden="true">↗</span>
           </Link>
           <Link className="button button-ghost-light button-large" href="/docs">
-            先看文档
+            查看接入文档
           </Link>
         </div>
       </section>

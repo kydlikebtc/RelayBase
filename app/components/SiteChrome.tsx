@@ -7,7 +7,7 @@ import { PlatformStatus } from "./PlatformStatus";
 
 const navigation = [
   { href: "/", label: "首页" },
-  { href: "/catalog", label: "API 市场" },
+  { href: "/catalog", label: "数据市场" },
   { href: "/pricing", label: "定价" },
   { href: "/docs", label: "文档" },
 ] as const;
@@ -23,12 +23,12 @@ export function SiteHeader() {
     <>
       <header className="site-header">
         <div className="site-header-inner">
-          <Link className="brand" href="/" aria-label="RelayBase API 首页">
+          <Link className="brand" href="/" aria-label="RelayBase 数据市场首页">
             <span className="brand-mark" aria-hidden="true">
               R/
             </span>
             <span className="brand-name">RelayBase</span>
-            <span className="brand-suffix">API</span>
+            <span className="brand-suffix">MARKET</span>
           </Link>
 
           <nav className="desktop-nav" aria-label="主导航">
@@ -85,7 +85,7 @@ export function SiteHeader() {
           aria-current={pathname.startsWith("/catalog") ? "page" : undefined}
           href="/catalog"
         >
-          API
+          市场
         </Link>
         <Link
           aria-current={pathname.startsWith("/pricing") ? "page" : undefined}
@@ -118,13 +118,13 @@ export function SiteFooter() {
   return (
     <footer className="site-footer">
       <div className="site-footer-inner">
-        <span>RelayBase API</span>
+        <span>RelayBase 数据市场</span>
         <span className="footer-separator">·</span>
         <PlatformStatus className="footer-status" />
         <span className="footer-separator">·</span>
         <span>稳定币结算</span>
         <span className="footer-separator">·</span>
-        <Link href="/catalog">API 市场</Link>
+        <Link href="/catalog">数据市场</Link>
         <span className="footer-separator">·</span>
         <Link href="/pricing">定价</Link>
         <span className="footer-separator">·</span>
@@ -132,7 +132,7 @@ export function SiteFooter() {
         <span className="footer-separator">·</span>
         <Link href="/console">控制台</Link>
         <span className="site-footer-meta">
-          © 2026 · v{packageJson.version} · 独立服务封装层 ·
+          © 2026 · v{packageJson.version} · 独立数据市场与服务封装层 ·
           非上游平台官方产品
         </span>
       </div>
