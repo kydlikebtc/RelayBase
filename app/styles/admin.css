@@ -6504,3 +6504,74 @@
     box-shadow: none;
   }
 }
+
+/* Slim admin workspace navigation */
+.admin-workspace {
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.admin-sidebar {
+  gap: 4px;
+  padding: 6px;
+}
+
+.admin-sidebar-label {
+  margin: 3px 6px 5px;
+  font-size: 8px;
+}
+
+.admin-tabs {
+  gap: 2px;
+}
+
+.admin-tabs button {
+  grid-template-columns: 17px minmax(0, 1fr) auto;
+  min-height: 38px;
+  padding: 5px 6px;
+  border-radius: 5px;
+}
+
+.admin-tabs button .admin-tab-index {
+  font-size: 8px;
+}
+
+.admin-tabs button .admin-tab-copy {
+  display: block;
+}
+
+.admin-tabs button .admin-tab-copy strong {
+  display: block;
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-tabs button .admin-tab-copy small {
+  display: none;
+}
+
+.admin-tabs button .admin-tab-badge {
+  min-width: 18px;
+  padding: 2px 4px;
+  font-size: 8px;
+}
+
+.admin-sidebar-status {
+  display: none;
+}
+
+@media (max-width: 980px) {
+  .admin-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-sidebar {
+    padding: 5px;
+  }
+
+  .admin-tabs button {
+    min-height: 38px;
+  }
+}
