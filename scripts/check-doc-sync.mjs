@@ -1,50 +1,52 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 
-const catalog = JSON.parse(
-  readFileSync("data/tikhub-catalog-reference.json", "utf8"),
-);
-const operationCount = catalog.stats.operationCount.toLocaleString("en-US");
-const catalogDocTokens = [
-  catalog.source.version,
-  `${operationCount} 个`,
-  `GET ${catalog.stats.methodCounts.GET}`,
-  `POST ${catalog.stats.methodCounts.POST}`,
-  `${catalog.stats.platformCount} 个平台`,
-  `${catalog.stats.tagCount} 个`,
-  `${catalog.stats.dataTypeCount} 个`,
+const filesIn = (path) =>
+  readdirSync(path, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => `${path}/${entry.name}`);
+const presentArtifacts = [
+  ...filesIn("data").filter((path) => /catalog.*\.json$/i.test(path)),
+  ...filesIn("scripts").filter((path) =>
+    /generate-.*catalog-reference/i.test(path),
+  ),
+  ...filesIn("docs").filter((path) => /provider.*provenance/i.test(path)),
 ];
-for (const path of [
+if (presentArtifacts.length > 0) {
+  throw new Error(
+    `Provider-derived catalog artifacts must not be committed: ${presentArtifacts.join(", ")}`,
+  );
+}
+
+const publicDocuments = [
+  ".env.example",
+  ".github/PULL_REQUEST_TEMPLATE.md",
   "README.md",
   "CHANGELOG.md",
+  "app/catalog/page.tsx",
+  "app/catalog/CatalogClient.tsx",
+  "app/console/ConsoleClient.tsx",
   "app/docs/page.tsx",
-  "docs/TIKHUB-PROVENANCE.md",
-]) {
+  "docs/RELEASES.md",
+  "docs/UPSTREAM-INTEGRATION.md",
+];
+const prohibitedPublicPatterns = [
+  /\b(?:api|docs|user)\.[a-z0-9-]+\.(?:io|dev)\b/i,
+  /\bOpenAPI\s+V?\d+\.\d+\.\d+\b/i,
+  /"(?:snapshotHash|snapshotSha256)"\s*:\s*"[0-9a-f]{64}"/i,
+];
+for (const path of publicDocuments) {
   const document = readFileSync(path, "utf8");
-  const missingTokens = catalogDocTokens.filter(
-    (token) => !document.includes(token),
+  const match = prohibitedPublicPatterns.find((pattern) =>
+    pattern.test(document),
   );
-  if (missingTokens.length > 0) {
+  if (match) {
     throw new Error(
-      `${path} is out of sync with the TikHub catalog manifest: ${missingTokens.join(", ")}`,
+      `${path} exposes provider-specific catalog or documentation metadata (${match}).`,
     );
   }
 }
-for (const path of [
-  "app/docs/page.tsx",
-  "docs/TIKHUB-PROVENANCE.md",
-]) {
-  if (
-    !readFileSync(path, "utf8").includes(
-      catalog.source.snapshotSha256,
-    )
-  ) {
-    throw new Error(
-      `${path} is out of sync with the TikHub snapshot hash.`,
-    );
-  }
-}
-console.log("TikHub catalog documentation matches the committed manifest.");
+console.log("Public documentation contains no committed provider catalog snapshot.");
 
 const base = process.env.DOC_SYNC_BASE?.trim();
 if (!base || /^0+$/.test(base)) {
@@ -85,7 +87,6 @@ try {
 const changed = changedOutput.split("\n").filter(Boolean);
 const productFile = (path) =>
   /^(app|worker|db|drizzle|build|public|scripts)\//.test(path) ||
-  path === "data/tikhub-catalog-reference.json" ||
   /^(\.openai\/hosting\.json|package(?:-lock)?\.json|vite\.config\.ts|next\.config\.ts|worker-configuration\.d\.ts)$/.test(
     path,
   );

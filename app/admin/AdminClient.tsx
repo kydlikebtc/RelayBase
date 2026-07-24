@@ -388,11 +388,11 @@ const readinessMissingLabels: Record<string, string> = {
   database: "数据库绑定",
   configuration: "运行配置",
   legal_review: "适用地区法律审查",
-  reseller_authorization: "TikHub 转售 / 白标授权",
-  upstream_credentials: "TikHub 活动数据源",
+  reseller_authorization: "上游 转售 / 白标授权",
+  upstream_credentials: "上游 活动数据源",
   admin_credentials: "管理与调度密钥",
   crypto_payments: "稳定币生产支付开关",
-  tikhub_crypto_payment_clearance: "TikHub 稳定币付款书面澄清",
+  commercial_clearance: "上游 稳定币付款书面澄清",
   payment_provider: "支付服务商生产配置",
   authentication: "客户登录方式",
   database_migrations: "数据库迁移",
@@ -2147,7 +2147,7 @@ export function AdminClient() {
   const [previewingCatalogBatch, setPreviewingCatalogBatch] = useState(false);
   const [refreshingCatalogBatch, setRefreshingCatalogBatch] = useState(false);
   const [applyingCatalogBatch, setApplyingCatalogBatch] = useState(false);
-  const [upstreamLabel, setUpstreamLabel] = useState("TikHub Production");
+  const [upstreamLabel, setUpstreamLabel] = useState("Primary Provider");
   const [upstreamApiKey, setUpstreamApiKey] = useState("");
   const [activateUpstreamAfterSave, setActivateUpstreamAfterSave] =
     useState(true);
@@ -2323,7 +2323,7 @@ export function AdminClient() {
           message:
             error instanceof Error
               ? error.message
-              : "无法读取 TikHub 凭据。",
+              : "无法读取 上游 凭据。",
         });
       }
     },
@@ -2708,23 +2708,23 @@ export function AdminClient() {
   ) {
     event.preventDefault();
     if (upstreamCredentials.status !== "ready") {
-      setNotice("请先刷新 TikHub 凭据状态。");
+      setNotice("请先刷新 上游 凭据状态。");
       return;
     }
     const label = upstreamLabel.replace(/\s+/g, " ").trim();
     if (label.length < 2 || label.length > 80) {
-      setNotice("TikHub 凭据名称必须是 2–80 个字符。");
+      setNotice("上游 凭据名称必须是 2–80 个字符。");
       return;
     }
     if (
       !/^[\x21-\x7E]{16,512}$/.test(upstreamApiKey)
     ) {
-      setNotice("请输入 16–512 个 ASCII 可见字符组成的 TikHub API Key。");
+      setNotice("请输入 16–512 个 ASCII 可见字符组成的 上游 API Key。");
       return;
     }
     if (!upstreamCredentials.data.encryptionConfigured) {
       setNotice(
-        "服务端尚未配置 TIKHUB_CREDENTIALS_ENCRYPTION_KEY，不能保存上游密钥。",
+        "服务端尚未配置 UPSTREAM_CREDENTIALS_ENCRYPTION_KEY，不能保存上游密钥。",
       );
       return;
     }
@@ -2752,7 +2752,7 @@ export function AdminClient() {
         result.activationConflict
           ? `已加密保存 ${result.credential.label} 为备用；活动数据源在提交期间发生变化，请从列表重新确认切换。`
           : result.credential.status === "active"
-          ? `已验证并启用 ${result.credential.label}；下一步请到“路由与定价”同步 TikHub 目录。`
+          ? `已验证并启用 ${result.credential.label}；下一步请到“路由与定价”同步 上游 目录。`
           : `已加密保存 ${result.credential.label}，当前为备用状态。`,
       );
       await Promise.all([
@@ -2763,7 +2763,7 @@ export function AdminClient() {
       setNotice(
         error instanceof Error
           ? error.message
-          : "TikHub 凭据保存失败。",
+          : "上游 凭据保存失败。",
       );
       await loadUpstreamCredentials();
     } finally {
@@ -2780,7 +2780,7 @@ export function AdminClient() {
       !catalog.data.sync.coverage
     ) {
       setCatalogBatchError(
-        "当前目录没有完整覆盖证明，请先成功同步 TikHub 后再生成批量预览。",
+        "当前目录没有完整覆盖证明，请先成功同步 上游 后再生成批量预览。",
       );
       return;
     }
@@ -3151,7 +3151,7 @@ export function AdminClient() {
       } else if (confirmAction.kind === "credential") {
         if (upstreamCredentials.status !== "ready") {
           throw new AdminApiError(
-            "TikHub 凭据状态尚未加载，请刷新后重试。",
+            "上游 凭据状态尚未加载，请刷新后重试。",
             409,
           );
         }
@@ -3170,7 +3170,7 @@ export function AdminClient() {
         );
         setNotice(
           confirmAction.action === "activate"
-            ? `已验证并切换到 ${result.credential.label}；下一步请到“路由与定价”重新同步 TikHub 目录。`
+            ? `已验证并切换到 ${result.credential.label}；下一步请到“路由与定价”重新同步 上游 目录。`
             : `已撤销 ${result.credential.label}；密文不会再被运行时使用。`,
         );
         await Promise.all([
@@ -3198,7 +3198,7 @@ export function AdminClient() {
       ) {
         setConfirmAction(null);
         await loadUpstreamCredentials();
-        setNotice("TikHub 活动凭据状态已变化，请重新确认本次操作。");
+        setNotice("上游 活动凭据状态已变化，请重新确认本次操作。");
       } else {
         setNotice(error instanceof Error ? error.message : "管理操作失败。");
       }
@@ -3217,7 +3217,7 @@ export function AdminClient() {
           <p className="section-kicker">RELAYBASE / OPERATIONS</p>
           <h1 id="admin-login-title">运营管理后台</h1>
           <p className="admin-login-intro">
-            查看实际用户与调用数据，维护 TikHub 路由、成本、客户价和支付复核队列。
+            查看实际用户与调用数据，维护 上游 路由、成本、客户价和支付复核队列。
           </p>
           <form onSubmit={submitSecret}>
             <label htmlFor="admin-secret">管理员主密钥</label>
@@ -3310,7 +3310,7 @@ export function AdminClient() {
             [
               ["overview", "运营总览"],
               ["users", "用户管理"],
-              ["upstream", "TikHub 数据源"],
+              ["upstream", "上游 数据源"],
               ["catalog", "路由与定价"],
               ["payments", "支付复核"],
             ] as const
@@ -3394,7 +3394,7 @@ export function AdminClient() {
                         aria-hidden="true"
                       />
                       <div>
-                        <strong>TikHub 上游连接</strong>
+                        <strong>上游连接</strong>
                         <p>
                           {overviewData.upstream.baseUrl ?? "上游地址尚未配置"}
                         </p>
@@ -3714,8 +3714,8 @@ export function AdminClient() {
           >
             <div className="admin-section-head">
               <div>
-                <p className="section-kicker">TIKHUB / DATA SOURCE</p>
-                <h2 id="upstream-credentials-title">TikHub 数据源</h2>
+                <p className="section-kicker">UPSTREAM / DATA SOURCE</p>
+                <h2 id="upstream-credentials-title">上游 数据源</h2>
               </div>
               <button
                 className="button button-ghost button-small"
@@ -3726,7 +3726,7 @@ export function AdminClient() {
             </div>
             <StatePanel
               state={upstreamCredentials}
-              label="TikHub 凭据"
+              label="上游 凭据"
               onRetry={() => void loadUpstreamCredentials()}
             >
               {upstreamCredentials.status === "ready" ? (
@@ -3738,8 +3738,8 @@ export function AdminClient() {
                         <p>
                           先在 Sites 环境中设置 32 字节、无 padding、
                           43 字符 base64url 格式的
-                          TIKHUB_CREDENTIALS_ENCRYPTION_KEY，再保存
-                          TikHub API Key。
+                          UPSTREAM_CREDENTIALS_ENCRYPTION_KEY，再保存
+                          上游 API Key。
                         </p>
                       </div>
                     </div>
@@ -3762,7 +3762,7 @@ export function AdminClient() {
                       <div>
                         <strong>旧环境变量 Key 已被安全忽略</strong>
                         <p>
-                          托管模式启用后不会回退 TIKHUB_API_KEY；
+                          托管模式启用后不会回退 UPSTREAM_API_KEY；
                           请在此处切换活动凭据，避免意外使用旧 Key。
                         </p>
                       </div>
@@ -3811,7 +3811,7 @@ export function AdminClient() {
                   >
                     <div>
                       <p className="section-kicker">ADD CREDENTIAL</p>
-                      <h3>新增 TikHub API Key</h3>
+                      <h3>新增 上游 API Key</h3>
                       <p>
                         Key 经同源 HTTPS 提交后立即使用 AES-256-GCM
                         加密；D1 保存密文、完整哈希、已验证 scope
@@ -3828,11 +3828,11 @@ export function AdminClient() {
                         onChange={(event) =>
                           setUpstreamLabel(event.target.value)
                         }
-                        placeholder="例如：TikHub Production"
+                        placeholder="例如：Primary Provider"
                       />
                     </label>
                     <label>
-                      <span>TikHub API Key</span>
+                      <span>上游 API Key</span>
                       <input
                         type="password"
                         autoComplete="off"
@@ -3856,7 +3856,7 @@ export function AdminClient() {
                         }
                       />
                       <span>
-                        保存后向 TikHub 验证并设为活动数据源
+                        保存后向 上游 验证并设为活动数据源
                         <small>
                           关闭时仅加密保存为备用，不会用于任何客户请求
                         </small>
@@ -3970,9 +3970,9 @@ export function AdminClient() {
                     </div>
                   ) : (
                     <div className="admin-empty">
-                      <strong>尚未保存 TikHub 凭据</strong>
+                      <strong>尚未保存 上游 凭据</strong>
                       <p>
-                        配置加密主密钥后，在上方添加第一个 TikHub API Key。
+                        配置加密主密钥后，在上方添加第一个 上游 API Key。
                       </p>
                     </div>
                   )}
@@ -3986,7 +3986,7 @@ export function AdminClient() {
           <section className="admin-section" aria-labelledby="catalog-admin-title">
             <div className="admin-section-head">
               <div>
-                <p className="section-kicker">TIKHUB CATALOG CONTROL</p>
+                <p className="section-kicker">UPSTREAM CATALOG CONTROL</p>
                 <h2 id="catalog-admin-title">路由与定价</h2>
               </div>
               <div className="admin-section-actions">
@@ -4000,7 +4000,7 @@ export function AdminClient() {
                   className="button button-dark button-small"
                   onClick={() => setConfirmAction({ kind: "sync" })}
                 >
-                  同步 TikHub
+                  同步 上游
                 </button>
               </div>
             </div>
@@ -4121,7 +4121,7 @@ export function AdminClient() {
                       <div className="admin-catalog-proof-missing">
                         <strong>当前记录缺少覆盖证明</strong>
                         <p>
-                          请重新同步 TikHub；在新快照成功发布前，系统不会伪造覆盖数量。
+                          请重新同步 上游；在新快照成功发布前，系统不会伪造覆盖数量。
                         </p>
                       </div>
                     )}
@@ -4674,7 +4674,7 @@ export function AdminClient() {
                     <div className="admin-empty">
                       <strong>没有符合条件的接口</strong>
                       <p>
-                        调整筛选条件，或从 TikHub 同步最新端点目录。
+                        调整筛选条件，或从 上游 同步最新端点目录。
                       </p>
                     </div>
                   )}
@@ -5040,9 +5040,9 @@ export function AdminClient() {
                   : "下架此接口？"
                 : confirmAction.kind === "credential"
                   ? confirmAction.action === "activate"
-                    ? "验证并切换 TikHub 数据源？"
-                    : "撤销这个 TikHub API Key？"
-                  : "从 TikHub 同步全部接口？"
+                    ? "验证并切换 上游 数据源？"
+                    : "撤销这个 上游 API Key？"
+                  : "从 上游 同步全部接口？"
           }
           description={
             confirmAction.kind === "user"
@@ -5055,11 +5055,11 @@ export function AdminClient() {
                   : `${confirmAction.endpoint.path} 将立即停止接受新调用，历史账单不受影响。`
                 : confirmAction.kind === "credential"
                   ? confirmAction.action === "activate"
-                    ? `服务端会先向 TikHub 验证 ${confirmAction.credential.label}，成功后用版本比较切换唯一活动凭据。`
+                    ? `服务端会先向 上游 验证 ${confirmAction.credential.label}，成功后用版本比较切换唯一活动凭据。`
                     : confirmAction.credential.status === "active"
                       ? `撤销 ${confirmAction.credential.label} 后托管模式会保持开启，但数据调用和目录同步将安全关闭，直到启用另一个 Key。`
                       : `${confirmAction.credential.label} 将永久标记为已撤销，不能再次启用。`
-                  : "同步会读取 TikHub 当前目录。新接口默认下架，价格变化的已上架接口会自动下架等待复核，客户价不会被静默覆盖。"
+                  : "同步会读取 上游 当前目录。新接口默认下架，价格变化的已上架接口会自动下架等待复核，客户价不会被静默覆盖。"
           }
           confirmLabel={
             confirmAction.kind === "user"

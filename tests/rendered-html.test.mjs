@@ -9,18 +9,6 @@ const root = new URL("../", import.meta.url);
 const packageMetadata = JSON.parse(
   await readFile(new URL("package.json", root), "utf8"),
 );
-const marketplaceReferenceFixture = JSON.parse(
-  await readFile(
-    new URL("data/tikhub-catalog-reference.json", root),
-    "utf8",
-  ),
-);
-const { buildCatalog: buildTikHubReferenceCatalog } = await import(
-  new URL(
-    "scripts/generate-tikhub-catalog-reference.mjs",
-    root,
-  ).href,
-);
 const workerUrl = new URL("../dist/server/index.js", import.meta.url);
 workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
 const { default: worker } = await import(workerUrl.href);
@@ -189,49 +177,6 @@ async function migrate(db, names = migrationFiles) {
 
 const TEST_CATALOG_GENERATION = "sync_test_complete_0001";
 
-function seedCompleteMarketplaceIdentitySet(
-  db,
-  generation = TEST_CATALOG_GENERATION,
-) {
-  const insert = db.raw.prepare(
-    `INSERT INTO endpoint_catalog
-     (path, platform, http_method,
-      data_type, tags_json, surface, operation_id,
-      upstream_price_usd_micros, customer_price_usd_micros,
-      price_verified, enabled, read_only, safety_classification,
-      safety_reasons_json, safety_policy_version, sync_generation)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 'ambiguous',
-             '["test_fixture_unreviewed"]', 1, ?)
-     ON CONFLICT(path) DO UPDATE SET
-       platform = excluded.platform,
-       http_method = excluded.http_method,
-       data_type = excluded.data_type,
-       tags_json = excluded.tags_json,
-       surface = excluded.surface,
-       operation_id = excluded.operation_id,
-       sync_generation = excluded.sync_generation`,
-  );
-  db.raw.exec("BEGIN IMMEDIATE");
-  try {
-    for (const operation of marketplaceReferenceFixture.operations) {
-      insert.run(
-        operation.path,
-        operation.platform,
-        operation.method,
-        operation.dataType,
-        JSON.stringify(operation.tags),
-        operation.surface,
-        operation.operationId,
-        generation,
-      );
-    }
-    db.raw.exec("COMMIT");
-  } catch (error) {
-    db.raw.exec("ROLLBACK");
-    throw error;
-  }
-}
-
 function enableCatalogEndpoint(
   db,
   path = "/v1/tiktok/web/fetch_user_profile",
@@ -239,10 +184,19 @@ function enableCatalogEndpoint(
   upstreamApiKey = "upstream-key",
 ) {
   const generation = TEST_CATALOG_GENERATION;
-  const referenceOperation =
-    marketplaceReferenceFixture.operations.find(
-      (operation) => operation.path === path,
-    ) ?? null;
+  const surface = path.split("/").includes("web") ? "web" : "other";
+  const dataType = path.includes("profile") ? "profile_creator" : "other";
+  const tags =
+    path === "/v1/tiktok/web/fetch_user_profile"
+      ? ["TikTok-Web-API"]
+      : [dataType, surface].sort();
+  const operationId =
+    path === "/v1/tiktok/web/fetch_user_profile"
+      ? "fetch_user_profile_api_v1_tiktok_web_fetch_user_profile_get"
+      : `relaybase_${path
+          .split("/")
+          .filter(Boolean)
+          .join("_")}`;
   const credentialFingerprint = createHash("sha256")
     .update(upstreamApiKey)
     .digest("hex")
@@ -304,10 +258,10 @@ function enableCatalogEndpoint(
     )
     .run(
       customerPriceUsdMicros,
-      referenceOperation?.dataType ?? "other",
-      JSON.stringify(referenceOperation?.tags ?? []),
-      referenceOperation?.surface ?? "other",
-      referenceOperation?.operationId ?? null,
+      dataType,
+      JSON.stringify(tags),
+      surface,
+      operationId,
       generation,
       path,
     );
@@ -355,157 +309,6 @@ function responseCookie(response, name) {
   return match ? `${name}=${match[1]}` : null;
 }
 
-test("sanitizes invalid Example Object metadata and rejects multi-method paths", () => {
-  const operation = {
-    tags: ["Demo-API"],
-    operationId: "fetch_example",
-    requestBody: {
-      content: {
-        "application/json": {
-          schema: {
-            type: "object",
-            properties: {
-              payload: {
-                type: "object",
-                examples: {
-                  invalid_metadata: {
-                    summary: {
-                      note: "runtime-invalid-summary-fixture",
-                    },
-                    description: [
-                      "runtime-invalid-description-fixture",
-                    ],
-                    externalValue: {
-                      href: "runtime-invalid-external-fixture",
-                    },
-                    value: {
-                      credential:
-                        "runtime-invalid-credential-fixture",
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    },
-  };
-  const openApi = {
-    openapi: "3.1.0",
-    info: { title: "Synthetic TikHub API", version: "test" },
-    paths: {
-      "/api/v1/demo/web/fetch_example": {
-        post: operation,
-      },
-    },
-  };
-  const catalog = buildTikHubReferenceCatalog(
-    openApi,
-    "d".repeat(64),
-    512,
-  );
-  const serialized = JSON.stringify(
-    catalog.operations[0].requestBody,
-  );
-  assert.equal(
-    (
-      serialized.match(
-        /\[REDACTED_INVALID_EXAMPLE_METADATA\]/g,
-      ) ?? []
-    ).length,
-    3,
-  );
-  assert.match(serialized, /YOUR_CREDENTIAL/);
-  assert.doesNotMatch(serialized, /runtime-invalid-/);
-  assert.deepEqual(catalog.operations[0].tags, ["Demo-API"]);
-  assert.equal(catalog.operations[0].operationId, "fetch_example");
-  assert.equal(catalog.operations[0].surface, "web");
-  assert.equal(catalog.operations[0].dataType, "system");
-
-  assert.throws(
-    () =>
-      buildTikHubReferenceCatalog(
-        {
-          ...openApi,
-          paths: {
-            "/api/v1/demo/web/fetch_example": {
-              get: { ...operation, requestBody: undefined },
-              post: operation,
-            },
-          },
-        },
-        "e".repeat(64),
-        640,
-      ),
-    /summary counts do not match operations/,
-  );
-});
-
-test("strictly normalizes reference taxonomy metadata and rejects unsafe source values", () => {
-  const generate = (operation) => {
-    const openApi = {
-      openapi: "3.1.0",
-      info: { title: "Synthetic TikHub API", version: "taxonomy-test" },
-      paths: {
-        "/api/v1/custom/other/fetch": {
-          get: operation,
-        },
-      },
-    };
-    return buildTikHubReferenceCatalog(
-      openApi,
-      "a".repeat(64),
-      Buffer.byteLength(JSON.stringify(openApi)),
-    ).operations[0];
-  };
-
-  const omitted = generate({});
-  assert.deepEqual(omitted.tags, []);
-  assert.equal(omitted.operationId, null);
-
-  const explicitNull = generate({
-    tags: null,
-    operationId: null,
-  });
-  assert.deepEqual(explicitNull.tags, []);
-  assert.equal(explicitNull.operationId, null);
-
-  const normalized = generate({
-    tags: ["Zulu-API", "Alpha-API", "Zulu-API"],
-    operationId:
-      "  video Bearer abcdefghijklmnop  ",
-  });
-  assert.deepEqual(normalized.tags, ["Alpha-API", "Zulu-API"]);
-  assert.equal(normalized.operationId, "video Bearer [REDACTED]");
-  assert.equal(normalized.dataType, "content");
-
-  for (const tags of [
-    "not-an-array",
-    [" leading-space"],
-    ["unsafe?tag"],
-    ["sk-abcdefghijklmnop"],
-    Array.from({ length: 101 }, (_, index) => `tag-${index}`),
-  ]) {
-    assert.throws(
-      () => generate({ tags }),
-      /invalid or sensitive tags metadata/,
-    );
-  }
-
-  for (const operationId of [
-    42,
-    "   ",
-    "fetch\nvideo",
-    "x".repeat(501),
-  ]) {
-    assert.throws(
-      () => generate({ operationId }),
-      /operationId/,
-    );
-  }
-});
-
 test("renders the finished product routes without starter metadata", async () => {
   for (const [path, expected] of [
     ["/", "把分散的接口"],
@@ -536,145 +339,24 @@ test("renders the finished product routes without starter metadata", async () =>
   }
 });
 
-test("serves the complete TikHub reference marketplace and endpoint docs", async () => {
-  const marketplace = await fetchWorker(
-    "/api/marketplace?limit=20&offset=0",
-  );
+test("returns an empty provider-neutral marketplace before runtime sync", async () => {
+  const marketplace = await fetchWorker("/api/marketplace?limit=20&offset=0");
   assert.equal(marketplace.status, 200);
   assert.equal(marketplace.headers.get("cache-control"), "no-store");
   const data = await marketplace.json();
-  assert.equal(data.source.provider, "TikHub");
-  assert.equal(data.source.openApiVersion, "V5.3.2");
-  assert.match(data.source.snapshotHash, /^[a-f0-9]{64}$/);
-  assert.equal(data.source.operationCount, 1025);
-  assert.equal(data.stats.total, 1025);
-  assert.equal(data.stats.platforms, 27);
-  assert.equal(data.stats.categories, 53);
-  assert.equal(data.stats.dataTypes, 15);
-  assert.equal(data.count, 20);
-  assert.equal(data.total, 1025);
-  assert.equal(data.nextOffset, 20);
-  assert.ok(
-    data.facets.methods.some(
-      (facet) => facet.value === "GET" && facet.count === 839,
-    ),
-  );
-  assert.ok(
-    data.facets.methods.some(
-      (facet) => facet.value === "POST" && facet.count === 186,
-    ),
-  );
-  assert.equal(data.facets.tags.length, 53);
-  assert.ok(
-    data.facets.tags.some(
-      (facet) => facet.value === "TikTok-App-V3-API",
-    ),
-  );
-
-  const filtered = await fetchWorker(
-    "/api/marketplace?q=fetch_one_video&platform=tiktok" +
-      "&tag=TikTok-App-V3-API&dataType=content" +
-      "&method=GET&surface=app&limit=100",
-  );
-  assert.equal(filtered.status, 200);
-  const filteredData = await filtered.json();
-  assert.ok(filteredData.total >= 3);
-  assert.ok(
-    filteredData.endpoints.every(
-      (endpoint) =>
-        endpoint.platform === "tiktok" &&
-        endpoint.dataType === "content" &&
-        endpoint.method === "GET" &&
-        endpoint.surface === "app",
-    ),
-  );
+  assert.equal(data.source.provider, "Configured upstream");
+  assert.equal(data.source.openApiVersion, null);
+  assert.equal(data.source.snapshotHash, null);
+  assert.equal(data.source.operationCount, 0);
+  assert.equal(data.stats.total, 0);
+  assert.deepEqual(data.endpoints, []);
+  assert.equal(data.total, 0);
+  assert.equal(data.nextOffset, null);
 
   const detail = await fetchWorker(
-    "/api/marketplace/detail" +
-      "?path=%2Fv1%2Ftiktok%2Fapp%2Fv3%2Ffetch_one_video" +
-      "&method=GET",
+    "/api/marketplace/detail?path=%2Fv1%2Fexample%2Fprofile%2Fread&method=GET",
   );
-  assert.equal(detail.status, 200);
-  const detailData = await detail.json();
-  assert.deepEqual(detailData.source, data.source);
-  assert.equal(
-    detailData.endpoint.path,
-    "/v1/tiktok/app/v3/fetch_one_video",
-  );
-  assert.deepEqual(detailData.endpoint.tags, ["TikTok-App-V3-API"]);
-  assert.equal(
-    detailData.endpoint.operationId,
-    "fetch_one_video_api_v1_tiktok_app_v3_fetch_one_video_get",
-  );
-  assert.equal(detailData.endpoint.availability, "pending");
-  assert.equal(detailData.endpoint.priceUsdMicros, null);
-  assert.equal(detailData.endpoint.parameters[0].name, "aweme_id");
-  assert.equal(detailData.endpoint.parameters[0].required, true);
-  assert.ok(
-    detailData.endpoint.response.statuses.some(
-      (response) => response.status === "200",
-    ),
-  );
-  assert.match(
-    detailData.examples.curl,
-    /http:\/\/localhost\/v1\/tiktok\/app\/v3\/fetch_one_video/,
-  );
-  assert.doesNotMatch(detailData.examples.curl, /api\.tikhub\.io/);
-  assert.match(detailData.examples.javascript, /rb_live_YOUR_KEY/);
-  assert.match(detailData.examples.python, /marketplace-example-001/);
-
-  const postDetail = await fetchWorker(
-    "/api/marketplace/detail" +
-      "?path=%2Fv1%2Fdouyin%2Fapp%2Fv3%2Ffetch_multi_video" +
-      "&method=POST",
-  );
-  assert.equal(postDetail.status, 200);
-  const postDetailData = await postDetail.json();
-  assert.equal(postDetailData.endpoint.method, "POST");
-  assert.equal(
-    postDetailData.endpoint.requestBody.content["application/json"].schema.type,
-    "array",
-  );
-  assert.match(postDetailData.examples.curl, /--request POST/);
-  assert.match(postDetailData.examples.curl, /--data '\[/);
-  assert.doesNotMatch(postDetailData.examples.curl, /"value":/);
-  assert.match(postDetailData.examples.javascript, /body: JSON\.stringify\(\[/);
-  assert.match(postDetailData.examples.python, /json=json\.loads\("\[/);
-
-  const tokenDetail = await fetchWorker(
-    "/api/marketplace/detail" +
-      "?path=%2Fv1%2Fxiaohongshu%2Fweb_v3%2Ffetch_note_detail" +
-      "&method=GET",
-  );
-  assert.equal(tokenDetail.status, 200);
-  const tokenDetailData = await tokenDetail.json();
-  const tokenParameter = tokenDetailData.endpoint.parameters.find(
-    (parameter) => parameter.name === "xsec_token",
-  );
-  assert.equal(tokenParameter.example, "YOUR_XSEC_TOKEN");
-  assert.doesNotMatch(
-    JSON.stringify(tokenDetailData),
-    /"example":"[A-Za-z0-9_=-]{40,}"/,
-  );
-  assert.doesNotMatch(tokenDetailData.examples.curl, /xsec_token=/);
-
-  const cookieDetail = await fetchWorker(
-    "/api/marketplace/detail" +
-      "?path=%2Fv1%2Fbilibili%2Fweb%2Ffetch_vip_video_playurl" +
-      "&method=POST",
-  );
-  assert.equal(cookieDetail.status, 200);
-  const cookieDetailData = await cookieDetail.json();
-  assert.equal(
-    cookieDetailData.endpoint.requestBody.content["application/json"].schema
-      .properties.cookie.example,
-    "YOUR_COOKIE",
-  );
-  assert.match(cookieDetailData.examples.curl, /"cookie": "YOUR_COOKIE"/);
-  assert.match(
-    cookieDetailData.endpoint.description,
-    /上游原始示例已移除/,
-  );
+  assert.equal(detail.status, 404);
 
   const duplicateFilter = await fetchWorker(
     "/api/marketplace?method=GET&method=POST",
@@ -686,176 +368,65 @@ test("serves the complete TikHub reference marketplace and endpoint docs", async
   );
 });
 
-test("only marks marketplace endpoints available when the live proxy is callable", async (t) => {
+test("publishes only the runtime catalog with provider-neutral public metadata", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
   await migrate(db);
   enableCatalogEndpoint(db);
-  const referenceSnapshotHash =
-    "f941ffbce28988ca158b2fb8febf2a206004eaba1d2d0e1a7eba9678f9461a01";
   const env = baseEnv({
     DB: db,
-    TIKHUB_API_KEY: "upstream-key",
+    UPSTREAM_API_KEY: "upstream-key",
     RESELLER_AUTHORIZED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
-    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
-    RECONCILIATION_SECRET:
-      "marketplace-reconcile-secret-32-characters",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
+    RECONCILIATION_SECRET: "marketplace-reconcile-secret-32-characters",
   });
-  db.raw
-    .prepare(
-      `UPDATE catalog_sync_state
-       SET openapi_operation_count = 1025,
-           openapi_price_mapped_count = 1,
-           openapi_only_count = 1024,
-           awaiting_price_count = 1024,
-           openapi_snapshot_hash = ?
-       WHERE id = 1`,
-    )
-    .run(referenceSnapshotHash);
-  const incompleteDetail = await fetchWorker(
-    "/api/marketplace/detail" +
-      "?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_profile" +
-      "&method=GET",
-    {},
-    { ...env },
-  );
-  assert.equal(incompleteDetail.status, 200);
-  const incomplete = await incompleteDetail.json();
-  assert.equal(incomplete.endpoint.availability, "pending");
-  assert.equal(incomplete.endpoint.priceUsdMicros, null);
 
-  seedCompleteMarketplaceIdentitySet(db);
-  db.raw
-    .prepare(
-      `UPDATE catalog_sync_state
-       SET openapi_version = 'V9-mixed-overlay',
-           openapi_operation_count = 800,
-           openapi_price_mapped_count = 1,
-           openapi_only_count = 799,
-           awaiting_price_count = 799,
-           openapi_snapshot_hash = ?
-       WHERE id = 1`,
-    )
-    .run("c".repeat(64));
+  const marketplace = await fetchWorker("/api/marketplace", {}, env);
+  assert.equal(marketplace.status, 200);
+  const marketplaceData = await marketplace.json();
+  assert.equal(marketplaceData.source.provider, "Configured upstream");
+  assert.equal(marketplaceData.source.openApiVersion, null);
+  assert.equal(marketplaceData.source.snapshotHash, null);
+  assert.equal(marketplaceData.source.operationCount, 1);
+  assert.equal(marketplaceData.total, 1);
+  assert.doesNotMatch(JSON.stringify(marketplaceData), /tikhub/i);
 
-  const mismatchedDetail = await fetchWorker(
-    "/api/marketplace/detail" +
-      "?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_profile" +
-      "&method=GET",
+  const detail = await fetchWorker(
+    "/api/marketplace/detail?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_profile&method=GET",
     {},
     env,
-  );
-  assert.equal(mismatchedDetail.status, 200);
-  const mismatched = await mismatchedDetail.json();
-  assert.equal(mismatched.source.openApiVersion, "V5.3.2");
-  assert.equal(mismatched.source.operationCount, 1025);
-  assert.notEqual(mismatched.source.snapshotHash, "c".repeat(64));
-  assert.equal(mismatched.endpoint.availability, "pending");
-  assert.equal(mismatched.endpoint.priceUsdMicros, null);
-
-  db.raw
-    .prepare(
-      `UPDATE catalog_sync_state
-       SET openapi_operation_count = 1025,
-           openapi_price_mapped_count = 1,
-           openapi_only_count = 1024,
-           awaiting_price_count = 1024,
-           openapi_snapshot_hash = ?
-       WHERE id = 1`,
-    )
-    .run(referenceSnapshotHash);
-  const matchingEnv = { ...env };
-  const detail = await fetchWorker(
-    "/api/marketplace/detail" +
-      "?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_profile" +
-      "&method=GET",
-    {},
-    matchingEnv,
   );
   assert.equal(detail.status, 200);
   const available = await detail.json();
   assert.equal(available.endpoint.availability, "available");
   assert.equal(available.endpoint.priceUsdMicros, 2000);
-  assert.equal(available.endpoint.rateLimitRpm, null);
+  assert.deepEqual(available.endpoint.tags, ["profile_creator", "web"]);
+  assert.equal(available.endpoint.operationId, null);
+  assert.equal(available.endpoint.response, null);
+  assert.match(available.endpoint.summary, /Fetch User Profile/);
+  assert.match(available.endpoint.description, /RelayBase/);
+  assert.doesNotMatch(JSON.stringify(available), /tikhub/i);
   assert.match(
     available.examples.curl,
     /X-RelayBase-Max-Cost-Usd-Micros: 2000/,
   );
-  assert.match(
-    available.examples.javascript,
-    /"X-RelayBase-Max-Cost-Usd-Micros": "2000"/,
-  );
-  assert.match(
-    available.examples.python,
-    /"X-RelayBase-Max-Cost-Usd-Micros": "2000"/,
-  );
 
-  const resetProfileTaxonomy = () =>
-    db.raw
-      .prepare(
-        `UPDATE endpoint_catalog
-         SET data_type = 'profile_creator',
-             tags_json = '["TikTok-Web-API"]',
-             surface = 'web',
-             operation_id =
-               'fetch_user_profile_api_v1_tiktok_web_fetch_user_profile_get'
-         WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
-      )
-      .run();
-  for (const [field, sql] of [
-    [
-      "dataType",
-      `UPDATE endpoint_catalog SET data_type = 'content'
-       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
-    ],
-    [
-      "tags",
-      `UPDATE endpoint_catalog SET tags_json = '["TikTok-Web-V2-API"]'
-       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
-    ],
-    [
-      "surface",
-      `UPDATE endpoint_catalog SET surface = 'app'
-       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
-    ],
-    [
-      "operationId",
-      `UPDATE endpoint_catalog SET operation_id = 'fetch_other_profile'
-       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
-    ],
-  ]) {
-    resetProfileTaxonomy();
-    db.raw.prepare(sql).run();
-    const mismatchedTaxonomyDetail = await fetchWorker(
-      "/api/marketplace/detail" +
-        "?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_profile" +
-        "&method=GET",
-      {},
-      { ...matchingEnv },
-    );
-    assert.equal(mismatchedTaxonomyDetail.status, 200, field);
-    const mismatchedTaxonomy = await mismatchedTaxonomyDetail.json();
-    assert.equal(
-      mismatchedTaxonomy.endpoint.availability,
-      "pending",
-      field,
-    );
-    assert.equal(mismatchedTaxonomy.endpoint.priceUsdMicros, null, field);
-  }
-  resetProfileTaxonomy();
-
-  const sandboxDetail = await fetchWorker(
-    "/api/marketplace/detail" +
-      "?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_profile" +
-      "&method=GET",
+  db.raw
+    .prepare(
+      `UPDATE catalog_sync_state
+       SET openapi_operation_count = 2, openapi_only_count = 1,
+           awaiting_price_count = 1
+       WHERE id = 1`,
+    )
+    .run();
+  const inconsistent = await fetchWorker(
+    "/api/marketplace/detail?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_profile&method=GET",
     {},
-    { ...matchingEnv, RESELLER_AUTHORIZED: "false" },
+    { ...env },
   );
-  assert.equal(sandboxDetail.status, 200);
-  const pending = await sandboxDetail.json();
-  assert.equal(pending.endpoint.availability, "pending");
-  assert.equal(pending.endpoint.priceUsdMicros, null);
+  assert.equal(inconsistent.status, 200);
+  assert.equal((await inconsistent.json()).endpoint.availability, "pending");
 });
 
 test("reports sandbox health and blocks live operations by default", async () => {
@@ -884,7 +455,7 @@ test("reports sandbox health and blocks live operations by default", async () =>
   assert.equal((await payment.json()).error.code, "payments_in_sandbox");
 });
 
-test("requires exact TikHub crypto-payment clearance before proxy or checkout", async (t) => {
+test("requires exact Synthetic Provider crypto-payment clearance before proxy or checkout", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
   await migrate(db);
@@ -892,9 +463,9 @@ test("requires exact TikHub crypto-payment clearance before proxy or checkout", 
     DB: db,
     LEGAL_REVIEW_CONFIRMED: "true",
     RESELLER_AUTHORIZED: "true",
-    TIKHUB_API_KEY: "upstream-key",
+    UPSTREAM_API_KEY: "upstream-key",
     CRYPTO_PAYMENTS_ENABLED: "true",
-    TIKHUB_CRYPTO_PAYMENT_CLEARED: "TRUE",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "TRUE",
     PAYMENT_PROVIDER: "nowpayments",
     NOWPAYMENTS_API_KEY: "provider-key",
     NOWPAYMENTS_IPN_SECRET: "ipn-secret",
@@ -908,13 +479,13 @@ test("requires exact TikHub crypto-payment clearance before proxy or checkout", 
   assert.equal(health.status, 200);
   const healthData = await health.json();
   assert.equal(
-    healthData.capabilities.tikhubCryptoPaymentCleared,
+    healthData.capabilities.commercialClearanceConfirmed,
     false,
   );
   assert.equal(healthData.capabilities.proxyEnabled, false);
   assert.equal(healthData.capabilities.paymentsEnabled, false);
   assert.ok(
-    healthData.missing.includes("tikhub_crypto_payment_clearance"),
+    healthData.missing.includes("commercial_clearance"),
   );
   const readiness = await fetchWorker("/api/readiness", {}, env);
   assert.equal(readiness.status, 503);
@@ -922,7 +493,7 @@ test("requires exact TikHub crypto-payment clearance before proxy or checkout", 
   assert.equal(readinessData.ok, false);
   assert.notEqual(readinessData.mode, "live");
   assert.equal(
-    readinessData.capabilities.tikhubCryptoPaymentCleared,
+    readinessData.capabilities.commercialClearanceConfirmed,
     false,
   );
 
@@ -949,7 +520,7 @@ test("requires exact TikHub crypto-payment clearance before proxy or checkout", 
   assert.equal(proxy.status, 503);
   assert.equal(
     (await proxy.json()).error.code,
-    "tikhub_crypto_payment_not_cleared",
+    "commercial_clearance_required",
   );
 
   const payment = await fetchWorker(
@@ -969,7 +540,7 @@ test("requires exact TikHub crypto-payment clearance before proxy or checkout", 
   assert.equal(payment.status, 503);
   assert.equal(
     (await payment.json()).error.code,
-    "tikhub_crypto_payment_not_cleared",
+    "commercial_clearance_required",
   );
   assert.equal(externalCalls, 0);
   assert.equal(
@@ -988,17 +559,17 @@ test("requires exact TikHub crypto-payment clearance before proxy or checkout", 
     {},
     {
       ...env,
-      TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
+      UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
     },
   );
   const clearedHealthData = await clearedHealth.json();
   assert.equal(
-    clearedHealthData.capabilities.tikhubCryptoPaymentCleared,
+    clearedHealthData.capabilities.commercialClearanceConfirmed,
     true,
   );
   assert.ok(
     !clearedHealthData.missing.includes(
-      "tikhub_crypto_payment_clearance",
+      "commercial_clearance",
     ),
   );
 });
@@ -1018,9 +589,9 @@ test("fails readiness and payment creation when database migrations are stale", 
     DB: db,
     LEGAL_REVIEW_CONFIRMED: "true",
     RESELLER_AUTHORIZED: "true",
-    TIKHUB_API_KEY: "upstream-key",
+    UPSTREAM_API_KEY: "upstream-key",
     CRYPTO_PAYMENTS_ENABLED: "true",
-    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
     PAYMENT_PROVIDER: "nowpayments",
     NOWPAYMENTS_API_KEY: "provider-key",
     NOWPAYMENTS_IPN_SECRET: "ipn-secret",
@@ -1251,10 +822,10 @@ test("adds catalog coverage evidence without changing the previous live generati
     .run();
   const env = baseEnv({
     DB: db,
-    TIKHUB_API_KEY: upstreamKey,
+    UPSTREAM_API_KEY: upstreamKey,
     RESELLER_AUTHORIZED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
-    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
     RECONCILIATION_SECRET: "coverage-reconcile-secret-32-minimum",
   });
   const health = await fetchWorker("/api/health", {}, env);
@@ -1490,8 +1061,8 @@ test("fails closed when the catalog is still on the pre-taxonomy schema", async 
     DB: db,
     LEGAL_REVIEW_CONFIRMED: "true",
     RESELLER_AUTHORIZED: "true",
-    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
-    TIKHUB_API_KEY: "upstream-key",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
+    UPSTREAM_API_KEY: "upstream-key",
     RECONCILIATION_SECRET:
       "pre-taxonomy-reconcile-secret-32-minimum",
   });
@@ -1531,10 +1102,10 @@ test("never reports live readiness for non-canonical stored taxonomy", async (t)
     .run();
   const env = baseEnv({
     DB: db,
-    TIKHUB_API_KEY: "upstream-key",
+    UPSTREAM_API_KEY: "upstream-key",
     RESELLER_AUTHORIZED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
-    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
     RECONCILIATION_SECRET:
       "taxonomy-corruption-reconcile-secret-32-minimum",
   });
@@ -1677,10 +1248,10 @@ test("fails closed before upstream access when catalog coverage evidence is inco
   const catalogSecret = "catalog-evidence-secret-32-minimum";
   const env = baseEnv({
     DB: db,
-    TIKHUB_API_KEY: "upstream-key",
+    UPSTREAM_API_KEY: "upstream-key",
     RESELLER_AUTHORIZED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
-    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
     CATALOG_SYNC_SECRET: catalogSecret,
     RECONCILIATION_SECRET: "catalog-evidence-reconcile-secret-32-minimum",
   });
@@ -1731,7 +1302,7 @@ test("fails closed before upstream access when catalog coverage evidence is inco
   assert.equal(upstreamReads, 0);
 });
 
-test("encrypts, verifies, rotates and fail-closes managed TikHub credentials", async (t) => {
+test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider credentials", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
   await migrate(db);
@@ -1743,8 +1314,8 @@ test("encrypts, verifies, rotates and fail-closes managed TikHub credentials", a
   const env = baseEnv({
     DB: db,
     ADMIN_MASTER_SECRET: adminSecret,
-    TIKHUB_API_KEY: legacyApiKey,
-    TIKHUB_CREDENTIALS_ENCRYPTION_KEY: encryptionKey,
+    UPSTREAM_API_KEY: legacyApiKey,
+    UPSTREAM_CREDENTIALS_ENCRYPTION_KEY: encryptionKey,
     LEGAL_REVIEW_CONFIRMED: "true",
     RESELLER_AUTHORIZED: "true",
   });
@@ -1774,7 +1345,7 @@ test("encrypts, verifies, rotates and fail-closes managed TikHub credentials", a
       method: "POST",
       headers: adminHeaders,
       body: JSON.stringify({
-        label: "TikHub production",
+        label: "Synthetic Provider production",
         apiKey: managedApiKey,
         activate: false,
         expectedVersion: 0,
@@ -1857,7 +1428,7 @@ test("encrypts, verifies, rotates and fail-closes managed TikHub credentials", a
             allow_discount: 1,
             rate_limit: "10/second",
             endpoint_type: "self-operated",
-            endpoint_owner: "TikHub",
+            endpoint_owner: "Synthetic Provider",
           },
         ],
       });
@@ -1865,7 +1436,7 @@ test("encrypts, verifies, rotates and fail-closes managed TikHub credentials", a
     if (url.pathname === "/openapi.json") {
       return Response.json({
         openapi: "3.1.0",
-        info: { title: "TikHub API", version: "V5.3.2" },
+        info: { title: "Synthetic Provider API", version: "test-5.3.2" },
         paths: {
           "/api/v1/tiktok/web/fetch_user_profile": {
             get: {
@@ -1960,7 +1531,7 @@ test("encrypts, verifies, rotates and fail-closes managed TikHub credentials", a
       method: "POST",
       headers: adminHeaders,
       body: JSON.stringify({
-        label: "TikHub standby",
+        label: "Synthetic Provider standby",
         apiKey: "tikhub-managed-secret-value-0002",
         activate: false,
         expectedVersion: 1,
@@ -2015,7 +1586,7 @@ test("encrypts, verifies, rotates and fail-closes managed TikHub credentials", a
 
   const wrongKeyEnv = {
     ...env,
-    TIKHUB_CREDENTIALS_ENCRYPTION_KEY: Buffer.alloc(32, 8).toString(
+    UPSTREAM_CREDENTIALS_ENCRYPTION_KEY: Buffer.alloc(32, 8).toString(
       "base64url",
     ),
   };
@@ -2095,10 +1666,10 @@ test("validates browser and admin JSON without coercion", async (t) => {
   const env = baseEnv({
     DB: db,
     CRYPTO_PAYMENTS_ENABLED: "true",
-    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
     RESELLER_AUTHORIZED: "true",
-    TIKHUB_API_KEY: "upstream-test-key",
+    UPSTREAM_API_KEY: "upstream-test-key",
     PAYMENT_PROVIDER: "nowpayments",
     NOWPAYMENTS_API_KEY: "test-provider-key",
     NOWPAYMENTS_IPN_SECRET: "test-ipn-secret",
@@ -2857,8 +2428,8 @@ test("atomically invalidates every session and API key when suspending a user", 
     TRUST_SITES_IDENTITY_HEADERS: "false",
     RESELLER_AUTHORIZED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
-    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
-    TIKHUB_API_KEY: "upstream-secret",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
+    UPSTREAM_API_KEY: "upstream-secret",
     RECONCILIATION_SECRET: "user-suspend-reconcile-secret-32-minimum",
   });
   const updateStatus = (status) => {
@@ -3091,9 +2662,9 @@ test("creates hashed customer keys and proxies with idempotent billing", async (
     DB: db,
     RESELLER_AUTHORIZED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
-    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
-    TIKHUB_API_KEY: "upstream-secret",
-    TIKHUB_BASE_URL: "https://api.tikhub.io/api/v1",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
+    UPSTREAM_API_KEY: "upstream-secret",
+    UPSTREAM_BASE_URL: "https://api.tikhub.io/api/v1",
     API_RATE_LIMIT_RPM: "4",
     RECONCILIATION_SECRET: "reconcile-secret-32-characters-minimum",
   });
@@ -5524,7 +5095,7 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
   const catalogSecret = "catalog-secret-32-characters-minimum";
   const env = baseEnv({
     DB: db,
-    TIKHUB_API_KEY: "upstream-key",
+    UPSTREAM_API_KEY: "upstream-key",
     CATALOG_SYNC_SECRET: catalogSecret,
   });
   let youtubeTags = ["YouTube-Web-API"];
@@ -5563,7 +5134,7 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
           allow_discount: 1,
           rate_limit: "10/second",
           endpoint_type: "self-operated",
-          endpoint_owner: "TikHub",
+          endpoint_owner: "Synthetic Provider",
         },
       ],
     });
@@ -5737,7 +5308,7 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
   });
 });
 
-test("syncs the real TikHub price shape, verifies zero cost and deduplicates identical rows", async (t) => {
+test("syncs the real Synthetic Provider price shape, verifies zero cost and deduplicates identical rows", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
   await migrate(db);
@@ -5745,12 +5316,12 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
   const catalogSecret = "catalog-real-shape-secret-32-minimum";
   const env = baseEnv({
     DB: db,
-    TIKHUB_API_KEY: "upstream-key",
+    UPSTREAM_API_KEY: "upstream-key",
     CATALOG_SYNC_SECRET: catalogSecret,
   });
   const syntheticOpenApi = {
     openapi: "3.1.0",
-    info: { title: "TikHub API", version: "V5.3.2" },
+    info: { title: "Synthetic Provider API", version: "test-5.3.2" },
     paths: {
       "/api/v1/ios_shortcut/shortcut": {
         get: {
@@ -5795,7 +5366,7 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
       allow_discount: 1,
       rate_limit: "10/second",
       endpoint_type: "self-operated",
-      endpoint_owner: "TikHub",
+      endpoint_owner: "Synthetic Provider",
     };
     return Response.json({
       code: 200,
@@ -5807,7 +5378,7 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
           allow_discount: 0,
           rate_limit: "10/second",
           endpoint_type: "self-operated",
-          endpoint_owner: "TikHub",
+          endpoint_owner: "Synthetic Provider",
         },
         youtubePrice,
         { ...youtubePrice },
@@ -5816,7 +5387,7 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
           endpoint_cost: 0.002,
           rate_limit: "5/second",
           endpoint_type: "self-operated",
-          endpoint_owner: "TikHub",
+          endpoint_owner: "Synthetic Provider",
         },
       ],
     });
@@ -5836,7 +5407,7 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.equal(result.synced, 3);
-  assert.equal(result.openApiVersion, "V5.3.2");
+  assert.equal(result.openApiVersion, "test-5.3.2");
   assert.equal(result.openApiOperations, 3);
   assert.equal(result.rawPriceRows, 4);
   assert.equal(result.normalizedPrices, 3);
@@ -5896,34 +5467,6 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
       operation_id: "fetch_youtube_video",
     },
   ]);
-  const generatedTaxonomy = new Map(
-    buildTikHubReferenceCatalog(
-      syntheticOpenApi,
-      "f".repeat(64),
-      Buffer.byteLength(JSON.stringify(syntheticOpenApi)),
-    ).operations.map((operation) => [
-      operation.path,
-      {
-        data_type: operation.dataType,
-        tags_json: JSON.stringify(operation.tags),
-        surface: operation.surface,
-        operation_id: operation.operationId,
-      },
-    ]),
-  );
-  for (const row of rows) {
-    assert.deepEqual(
-      {
-        data_type: row.data_type,
-        tags_json: row.tags_json,
-        surface: row.surface,
-        operation_id: row.operation_id,
-      },
-      generatedTaxonomy.get(row.path),
-      row.path,
-    );
-  }
-
   const syncState = db.raw
     .prepare(
       `SELECT openapi_version, openapi_operation_count,
@@ -5944,7 +5487,7 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
       price_snapshot_hash: "64-hex",
     },
     {
-      openapi_version: "V5.3.2",
+      openapi_version: "test-5.3.2",
       openapi_operation_count: 3,
       raw_price_row_count: 4,
       normalized_price_count: 3,
@@ -6044,14 +5587,14 @@ test("syncs the real TikHub price shape, verifies zero cost and deduplicates ide
   }
 });
 
-test("classifies TikHub data reads without trusting mutation or credential inputs", async (t) => {
+test("classifies Synthetic Provider data reads without trusting mutation or credential inputs", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
   await migrate(db);
   const catalogSecret = "catalog-safety-secret-32-characters-minimum";
   const env = baseEnv({
     DB: db,
-    TIKHUB_API_KEY: "upstream-key",
+    UPSTREAM_API_KEY: "upstream-key",
     CATALOG_SYNC_SECRET: catalogSecret,
   });
   const nativeFetch = globalThis.fetch;
@@ -6063,7 +5606,7 @@ test("classifies TikHub data reads without trusting mutation or credential input
     if (url.pathname === "/openapi.json") {
       return Response.json({
         openapi: "3.1.0",
-        info: { title: "TikHub API", version: "safety-test" },
+        info: { title: "Synthetic Provider API", version: "safety-test" },
         paths: {
           "/api/v1/douyin/creator/fetch_creator_activity_list": {
             get: {
@@ -6268,7 +5811,7 @@ test("classifies TikHub data reads without trusting mutation or credential input
     ...env,
     RESELLER_AUTHORIZED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
-    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
     RECONCILIATION_SECRET: "safety-reconcile-secret-32-minimum",
   };
   assert.match(generation, /^sync_/);
@@ -6311,7 +5854,7 @@ test("resolves bounded local OpenAPI refs before classifying inputs", async (t) 
   const catalogSecret = "catalog-ref-secret-32-characters-minimum";
   const env = baseEnv({
     DB: db,
-    TIKHUB_API_KEY: "upstream-key",
+    UPSTREAM_API_KEY: "upstream-key",
     CATALOG_SYNC_SECRET: catalogSecret,
   });
   const nativeFetch = globalThis.fetch;
@@ -6322,7 +5865,7 @@ test("resolves bounded local OpenAPI refs before classifying inputs", async (t) 
     if (url.pathname === "/openapi.json") {
       return Response.json({
         openapi: "3.1.0",
-        info: { title: "TikHub API", version: "ref-test" },
+        info: { title: "Synthetic Provider API", version: "ref-test" },
         components: {
           schemas: {
             SafeQuery: {
@@ -6583,7 +6126,7 @@ test("resolves bounded local OpenAPI refs before classifying inputs", async (t) 
   assert.ok(oversized.parameter_schema_json.length < 1_000);
 });
 
-test("rejects conflicting duplicate TikHub prices without replacing the live catalog", async (t) => {
+test("rejects conflicting duplicate Synthetic Provider prices without replacing the live catalog", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
   await migrate(db);
@@ -6599,7 +6142,7 @@ test("rejects conflicting duplicate TikHub prices without replacing the live cat
   const catalogSecret = "catalog-conflict-secret-32-minimum";
   const env = baseEnv({
     DB: db,
-    TIKHUB_API_KEY: "upstream-key",
+    UPSTREAM_API_KEY: "upstream-key",
     CATALOG_SYNC_SECRET: catalogSecret,
   });
   const nativeFetch = globalThis.fetch;
@@ -6626,7 +6169,7 @@ test("rejects conflicting duplicate TikHub prices without replacing the live cat
       allow_discount: 1,
       rate_limit: "10/second",
       endpoint_type: "self-operated",
-      endpoint_owner: "TikHub",
+      endpoint_owner: "Synthetic Provider",
     };
     return Response.json({
       code: 200,
@@ -6698,7 +6241,7 @@ test("rejects conflicting duplicate TikHub prices without replacing the live cat
   );
 });
 
-test("rejects an explicit unsupported TikHub price method instead of treating it as a wildcard", async (t) => {
+test("rejects an explicit unsupported Synthetic Provider price method instead of treating it as a wildcard", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
   await migrate(db);
@@ -6713,7 +6256,7 @@ test("rejects an explicit unsupported TikHub price method instead of treating it
   const catalogSecret = "catalog-method-secret-32-minimum";
   const env = baseEnv({
     DB: db,
-    TIKHUB_API_KEY: "upstream-key",
+    UPSTREAM_API_KEY: "upstream-key",
     CATALOG_SYNC_SECRET: catalogSecret,
   });
   const nativeFetch = globalThis.fetch;
@@ -6780,7 +6323,7 @@ test("rejects an explicit unsupported TikHub price method instead of treating it
   );
 });
 
-test("rejects malformed official TikHub price envelopes without legacy-field fallback", async (t) => {
+test("rejects malformed official Synthetic Provider price envelopes without legacy-field fallback", async (t) => {
   const cases = [
     {
       payload: {
@@ -6816,7 +6359,7 @@ test("rejects malformed official TikHub price envelopes without legacy-field fal
     const catalogSecret = `catalog-price-envelope-secret-32-minimum-${index}`;
     const env = baseEnv({
       DB: db,
-      TIKHUB_API_KEY: "upstream-key",
+      UPSTREAM_API_KEY: "upstream-key",
       CATALOG_SYNC_SECRET: catalogSecret,
     });
     const nativeFetch = globalThis.fetch;
@@ -6871,7 +6414,7 @@ test("rejects malformed official TikHub price envelopes without legacy-field fal
   }
 });
 
-test("rejects non-decimal and sub-micro TikHub costs instead of rounding them", async (t) => {
+test("rejects non-decimal and sub-micro Synthetic Provider costs instead of rounding them", async (t) => {
   const invalidCosts = ["1e-3", "0x10", 0.0000004];
   for (const [index, endpointCost] of invalidCosts.entries()) {
     const db = new TestD1();
@@ -6881,7 +6424,7 @@ test("rejects non-decimal and sub-micro TikHub costs instead of rounding them", 
     const catalogSecret = `catalog-price-value-secret-32-minimum-${index}`;
     const env = baseEnv({
       DB: db,
-      TIKHUB_API_KEY: "upstream-key",
+      UPSTREAM_API_KEY: "upstream-key",
       CATALOG_SYNC_SECRET: catalogSecret,
     });
     const nativeFetch = globalThis.fetch;
@@ -7001,7 +6544,7 @@ test("rejects ambiguous, malformed or sensitive OpenAPI operations", async (t) =
     const catalogSecret = `catalog-openapi-method-secret-32-minimum-${index}`;
     const env = baseEnv({
       DB: db,
-      TIKHUB_API_KEY: "upstream-key",
+      UPSTREAM_API_KEY: "upstream-key",
       CATALOG_SYNC_SECRET: catalogSecret,
     });
     const nativeFetch = globalThis.fetch;
@@ -7053,7 +6596,7 @@ test("rejects ambiguous, malformed or sensitive OpenAPI operations", async (t) =
   }
 });
 
-test("keeps the live catalog when the same TikHub credential returns a partial price snapshot", async (t) => {
+test("keeps the live catalog when the same Synthetic Provider credential returns a partial price snapshot", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
   await migrate(db);
@@ -7098,7 +6641,7 @@ test("keeps the live catalog when the same TikHub credential returns a partial p
   const catalogSecret = "catalog-partial-price-secret-32-minimum";
   const env = baseEnv({
     DB: db,
-    TIKHUB_API_KEY: upstreamKey,
+    UPSTREAM_API_KEY: upstreamKey,
     CATALOG_SYNC_SECRET: catalogSecret,
   });
   const nativeFetch = globalThis.fetch;
@@ -7228,7 +6771,7 @@ test("keeps the last successful catalog live when a staged sync batch fails", as
             allow_discount: 1,
             rate_limit: "10/second",
             endpoint_type: "self-operated",
-            endpoint_owner: "TikHub",
+            endpoint_owner: "Synthetic Provider",
           })),
         });
   };
@@ -7254,7 +6797,7 @@ test("keeps the last successful catalog live when a staged sync batch fails", as
 
   const env = baseEnv({
     DB: db,
-    TIKHUB_API_KEY: "upstream-key",
+    UPSTREAM_API_KEY: "upstream-key",
     CATALOG_SYNC_SECRET: "catalog-secret-32-characters-minimum",
   });
   const sync = await fetchWorker(
@@ -7313,9 +6856,9 @@ test("publishes reviewed catalog prices and creates idempotent recoverable payme
     DB: db,
     LEGAL_REVIEW_CONFIRMED: "true",
     RESELLER_AUTHORIZED: "true",
-    TIKHUB_API_KEY: "upstream-key",
+    UPSTREAM_API_KEY: "upstream-key",
     CRYPTO_PAYMENTS_ENABLED: "true",
-    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
     PAYMENT_PROVIDER: "nowpayments",
     NOWPAYMENTS_API_KEY: "provider-key",
     NOWPAYMENTS_IPN_SECRET: "ipn-secret",
@@ -8130,11 +7673,11 @@ test("does not refresh reconciliation health when every due provider read fails"
 
   const env = baseEnv({
     DB: db,
-    TIKHUB_API_KEY: "upstream-key",
+    UPSTREAM_API_KEY: "upstream-key",
     RESELLER_AUTHORIZED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
     CRYPTO_PAYMENTS_ENABLED: "true",
-    TIKHUB_CRYPTO_PAYMENT_CLEARED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
     PAYMENT_PROVIDER: "nowpayments",
     NOWPAYMENTS_API_KEY: "provider-key",
     NOWPAYMENTS_IPN_SECRET: "provider-down-ipn-secret",

@@ -1,6 +1,6 @@
-export const TIKHUB_SURFACES = ["app", "web", "app_web", "other"];
+export const PROVIDER_SURFACES = ["app", "web", "app_web", "other"];
 
-export const TIKHUB_DATA_TYPES = [
+export const PROVIDER_DATA_TYPES = [
   "account",
   "analytics_trends",
   "comments",
@@ -18,7 +18,7 @@ export const TIKHUB_DATA_TYPES = [
   "other",
 ];
 
-export function tikhubSurfaceForPath(sourcePath, tags) {
+export function providerSurfaceForPath(sourcePath, tags) {
   const segments = sourcePath
     .split("/")
     .filter(Boolean)
@@ -57,7 +57,7 @@ function matchesAny(text, expressions) {
   return expressions.some((expression) => expression.test(text));
 }
 
-export function tikhubDataTypeFor({
+export function providerDataTypeFor({
   platform,
   sourcePath,
   tags,
@@ -74,17 +74,6 @@ export function tikhubDataTypeFor({
     matchesAny(text, [/\btemp mail\b/, /\binbox\b/, /\bemail\b/])
   ) {
     return "email";
-  }
-  if (
-    platform === "tikhub" &&
-    matchesAny(text, [
-      /\buser\b/,
-      /\bapi key\b/,
-      /\bbalance\b/,
-      /\bcredential\b/,
-    ])
-  ) {
-    return "account";
   }
   if (
     matchesAny(text, [

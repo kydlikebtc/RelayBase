@@ -1,12 +1,11 @@
 import { recoverMessageAddress } from "viem";
 import packageJson from "../package.json";
-import tikHubCatalogReferenceJson from "../data/tikhub-catalog-reference.json";
 import {
-  TIKHUB_DATA_TYPES,
-  TIKHUB_SURFACES,
-  tikhubDataTypeFor,
-  tikhubSurfaceForPath,
-} from "../shared/tikhub-taxonomy.mjs";
+  PROVIDER_DATA_TYPES,
+  PROVIDER_SURFACES,
+  providerDataTypeFor,
+  providerSurfaceForPath,
+} from "../shared/provider-taxonomy.mjs";
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -124,15 +123,15 @@ function catalogTaxonomyValidWhere(alias: string): string {
 
 export interface PlatformEnv {
   DB?: D1Database;
-  TIKHUB_API_KEY?: string;
-  TIKHUB_CREDENTIALS_ENCRYPTION_KEY?: string;
-  TIKHUB_BASE_URL?: string;
+  UPSTREAM_API_KEY?: string;
+  UPSTREAM_CREDENTIALS_ENCRYPTION_KEY?: string;
+  UPSTREAM_BASE_URL?: string;
   RESELLER_AUTHORIZED?: string;
   PAYMENT_PROVIDER?: string;
   NOWPAYMENTS_API_KEY?: string;
   NOWPAYMENTS_IPN_SECRET?: string;
   CRYPTO_PAYMENTS_ENABLED?: string;
-  TIKHUB_CRYPTO_PAYMENT_CLEARED?: string;
+  UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED?: string;
   LEGAL_REVIEW_CONFIRMED?: string;
   PUBLIC_APP_URL?: string;
   API_RATE_LIMIT_RPM?: string;
@@ -226,33 +225,6 @@ type MarketplaceReferenceEndpoint = {
   parameters: Record<string, unknown>[];
   requestBody: Record<string, unknown> | null;
   response: Record<string, unknown> | null;
-};
-
-type MarketplaceReferenceFileEndpoint = Omit<
-  MarketplaceReferenceEndpoint,
-  "response"
-> & {
-  responses: Array<{
-    status: string;
-    description: string | null;
-    schemaRef: string | null;
-  }>;
-};
-
-type MarketplaceReferenceFile = {
-  generatedAt: string | null;
-  source: {
-    name: string;
-    version: string | null;
-    snapshotSha256: string | null;
-  };
-  stats: {
-    operationCount: number;
-    methodCounts: { GET: number; POST: number };
-    platformCount: number;
-    dataTypeCount: number;
-  };
-  operations: MarketplaceReferenceFileEndpoint[];
 };
 
 type MarketplaceReference = {
@@ -424,7 +396,7 @@ type ManagedUpstreamCredentialRecord = {
   revoked_at: string | null;
 };
 
-type ResolvedTikHubCredential = {
+type ResolvedUpstreamProviderCredential = {
   secret: string;
   fingerprint: string;
   source: "managed" | "environment";
@@ -434,7 +406,7 @@ type ResolvedTikHubCredential = {
   stateVersion: number;
 };
 
-type TikHubCredentialVerification = {
+type UpstreamProviderCredentialVerification = {
   scopes: string[];
   expiresAt: string | null;
 };
@@ -2147,11 +2119,11 @@ async function handleCreatePayment(
       "真实加密充值尚未启用；完成商户审核与法律审查后方可开放。",
     );
   }
-  if (env.TIKHUB_CRYPTO_PAYMENT_CLEARED !== "true") {
+  if (env.UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED !== "true") {
     throw new PlatformError(
       503,
-      "tikhub_crypto_payment_not_cleared",
-      "TikHub 对稳定币仅作为 API 服务付款方式的书面澄清尚未归档，真实充值保持关闭。",
+      "commercial_clearance_required",
+      "UpstreamProvider 对稳定币仅作为 API 服务付款方式的书面澄清尚未归档，真实充值保持关闭。",
     );
   }
   const readiness = await operationalReadiness(env);
@@ -3199,19 +3171,19 @@ async function handleProxyRequest(
     readiness.capabilities.legalReviewConfirmed &&
     readiness.capabilities.resellerAuthorized &&
     readiness.capabilities.upstreamConfigured &&
-    !readiness.capabilities.tikhubCryptoPaymentCleared
+    !readiness.capabilities.commercialClearanceConfirmed
   ) {
     throw new PlatformError(
       503,
-      "tikhub_crypto_payment_not_cleared",
-      "TikHub 对稳定币仅作为 API 服务付款方式的书面澄清尚未归档，真实代理保持关闭。",
+      "commercial_clearance_required",
+      "UpstreamProvider 对稳定币仅作为 API 服务付款方式的书面澄清尚未归档，真实代理保持关闭。",
     );
   }
   if (!readiness.capabilities.proxyEnabled) {
     throw new PlatformError(
       503,
       "upstream_not_authorized",
-      "上游转售尚未启用；需先完成 TikHub 经销/白标授权并配置服务端密钥。",
+      "上游转售尚未启用；需先完成 UpstreamProvider 经销/白标授权并配置服务端密钥。",
     );
   }
   if (
@@ -3350,7 +3322,7 @@ async function handleProxyRequest(
     throw new PlatformError(
       503,
       "catalog_coverage_unverified",
-      "最近目录缺少完整覆盖证据，已停止真实调用与扣费；请重新同步 TikHub。",
+      "最近目录缺少完整覆盖证据，已停止真实调用与扣费；请重新同步 UpstreamProvider。",
     );
   }
   if (catalog.enabled !== 1 || catalog.read_only !== 1) {
@@ -3489,16 +3461,16 @@ async function handleProxyRequest(
       );
     }
   }
-  const upstreamCredential = await resolveTikHubCredential(env, db);
+  const upstreamCredential = await resolveUpstreamProviderCredential(env, db);
   if (!upstreamCredential) {
     throw new PlatformError(
       503,
       "upstream_not_configured",
-      "TikHub 服务端密钥尚未配置。",
+      "UpstreamProvider 服务端密钥尚未配置。",
     );
   }
   if (
-    !tikHubCredentialAllowsPath(
+    !upstreamProviderCredentialAllowsPath(
       upstreamCredential.scopes,
       url.pathname,
     )
@@ -3506,7 +3478,7 @@ async function handleProxyRequest(
     throw new PlatformError(
       403,
       "upstream_credential_scope_denied",
-      "当前 TikHub 活动凭据没有调用该数据接口的权限。",
+      "当前 UpstreamProvider 活动凭据没有调用该数据接口的权限。",
     );
   }
   const currentCatalogCredential = await db
@@ -3532,7 +3504,7 @@ async function handleProxyRequest(
     throw new PlatformError(
       409,
       "catalog_credential_changed",
-      "TikHub 活动凭据在请求准备期间发生变化，请稍后重试。",
+      "UpstreamProvider 活动凭据在请求准备期间发生变化，请稍后重试。",
     );
   }
 
@@ -3694,7 +3666,7 @@ async function handleProxyRequest(
   }
   await markProxyRequest(db, requestId, "charged", null);
 
-  const upstreamBase = normalizeUpstreamBase(env.TIKHUB_BASE_URL);
+  const upstreamBase = normalizeUpstreamBase(env.UPSTREAM_BASE_URL);
   const upstreamUrl = new URL(
     `${upstreamBase}${url.pathname.slice("/v1".length)}${url.search}`,
   );
@@ -3900,21 +3872,20 @@ async function handleProxyRequest(
   });
 }
 
-const TIKHUB_CATALOG_REFERENCE_FILE =
-  tikHubCatalogReferenceJson as unknown as MarketplaceReferenceFile;
-let normalizedMarketplaceReference: MarketplaceReference | null = null;
-let normalizedMarketplaceReferenceKeys: ReadonlySet<string> | null = null;
-let normalizedMarketplaceReferenceByKey:
-  | ReadonlyMap<string, MarketplaceReferenceEndpoint>
-  | null = null;
 const marketplaceReferenceSafetyCache = new Map<
   string,
   ReturnType<typeof classifyCatalogSafety>
 >();
+const EMPTY_MARKETPLACE_SOURCE: MarketplaceReference["source"] = {
+  provider: "Configured upstream",
+  openApiVersion: null,
+  snapshotHash: null,
+  generatedAt: null,
+  operationCount: 0,
+};
 type MarketplaceOverlay = {
   rows: Map<string, MarketplaceCatalogOverlay>;
   catalogReady: boolean;
-  referenceMatchesLive: boolean;
   source: MarketplaceReference["source"];
 };
 const marketplaceOverlayCache = new WeakMap<
@@ -3925,141 +3896,68 @@ const marketplaceOverlayCache = new WeakMap<
   }
 >();
 
-function marketplaceReference(): MarketplaceReference {
-  if (normalizedMarketplaceReference) return normalizedMarketplaceReference;
-  const file = TIKHUB_CATALOG_REFERENCE_FILE;
-  const reference: MarketplaceReference = {
-    source: {
-      provider: "TikHub",
-      openApiVersion: file.source?.version ?? null,
-      snapshotHash: file.source?.snapshotSha256 ?? null,
-      generatedAt: file.generatedAt ?? null,
-      operationCount: Number(file.stats?.operationCount ?? 0),
-    },
-    stats: {
-      total: Number(file.stats?.operationCount ?? 0),
-      get: Number(file.stats?.methodCounts?.GET ?? 0),
-      post: Number(file.stats?.methodCounts?.POST ?? 0),
-      platforms: Number(file.stats?.platformCount ?? 0),
-      dataTypes: Number(file.stats?.dataTypeCount ?? 0),
-    },
-    endpoints: Array.isArray(file.operations)
-      ? file.operations.map((endpoint) => ({
-          ...endpoint,
-          response: { statuses: endpoint.responses ?? [] },
-        }))
-      : [],
-  };
-  const identities = new Set<string>();
-  const paths = new Set<string>();
-  const tags = new Set<string>();
-  let getCount = 0;
-  let postCount = 0;
-  let endpointsValid = true;
-  for (const endpoint of reference.endpoints) {
-    const identity = `${endpoint.method}:${endpoint.path}`;
-    if (
-      (endpoint.method !== "GET" && endpoint.method !== "POST") ||
-      !/^\/v1\/[A-Za-z0-9/_-]+$/.test(endpoint.path) ||
-      endpoint.path.includes("..") ||
-      endpoint.path.includes("//") ||
-      endpoint.path.endsWith("/") ||
-      endpoint.platform !== endpoint.path.split("/")[2] ||
-      !TIKHUB_SURFACES.includes(endpoint.surface) ||
-      !TIKHUB_DATA_TYPES.includes(endpoint.dataType) ||
-      !Array.isArray(endpoint.tags) ||
-      endpoint.tags.length > 100 ||
-      !endpoint.tags.every(
-        (tag) =>
-          typeof tag === "string" &&
-          tag.length > 0 &&
-          tag.length <= 160 &&
-          tag.trim() === tag &&
-          !/[?&#=\u0000-\u001F\u007F]/.test(tag),
-      ) ||
-      new Set(endpoint.tags).size !== endpoint.tags.length ||
-      JSON.stringify(endpoint.tags) !==
-        JSON.stringify(
-          [...endpoint.tags].sort((left, right) =>
-            left < right ? -1 : left > right ? 1 : 0,
-          ),
-        ) ||
-      (endpoint.operationId !== null &&
-        (typeof endpoint.operationId !== "string" ||
-          endpoint.operationId.length < 1 ||
-          endpoint.operationId.length > 500 ||
-          endpoint.operationId.trim() !== endpoint.operationId ||
-          /[\u0000-\u001F\u007F]/.test(endpoint.operationId))) ||
-      !Array.isArray(endpoint.parameters) ||
-      endpoint.parameters.length > 200 ||
-      !endpoint.parameters.every(isPlainRecord) ||
-      (endpoint.requestBody !== null &&
-        !isPlainRecord(endpoint.requestBody)) ||
-      (endpoint.response !== null && !isPlainRecord(endpoint.response)) ||
-      identities.has(identity) ||
-      paths.has(endpoint.path)
-    ) {
-      endpointsValid = false;
-      break;
-    }
-    identities.add(identity);
-    paths.add(endpoint.path);
-    for (const tag of endpoint.tags) tags.add(tag);
-    if (endpoint.method === "GET") getCount += 1;
-    if (endpoint.method === "POST") postCount += 1;
-  }
-  if (
-    !reference ||
-    !isPlainRecord(reference.source) ||
-    reference.source.provider !== "TikHub" ||
-    typeof reference.source.openApiVersion !== "string" ||
-    reference.source.openApiVersion.length > 80 ||
-    typeof reference.source.snapshotHash !== "string" ||
-    !/^[0-9a-f]{64}$/.test(reference.source.snapshotHash) ||
-    typeof reference.source.generatedAt !== "string" ||
-    !/^\d{4}-\d{2}-\d{2}$/.test(reference.source.generatedAt) ||
-    !Array.isArray(reference.endpoints) ||
-    !endpointsValid ||
-    !Number.isSafeInteger(reference.source.operationCount) ||
-    reference.source.operationCount !== reference.endpoints.length ||
-    reference.stats.total !== reference.endpoints.length ||
-    reference.stats.get !== getCount ||
-    reference.stats.post !== postCount ||
-    tags.size > 500 ||
-    reference.endpoints.length < 1 ||
-    reference.endpoints.length > 5_000
-  ) {
-    throw new PlatformError(
-      500,
-      "marketplace_reference_invalid",
-      "API 市场参考目录无效。",
+function marketplaceGeneratedSummary(path: string): string {
+  const capability = path
+    .split("/")
+    .filter(Boolean)
+    .at(-1)
+    ?.replace(/[_-]+/g, " ")
+    .trim();
+  return capability
+    ? capability.replace(/\b[a-z]/g, (character) =>
+        character.toUpperCase(),
+      )
+    : "Data query";
+}
+
+function marketplaceGeneratedDescription(
+  platform: string,
+  dataType: CatalogDataType,
+): string {
+  return `通过 RelayBase 查询 ${platform} 的 ${dataType} 数据。请求参数来自当前运行时目录，只有已审核并核价的服务可以调用。`;
+}
+
+function marketplacePublicInputSchema(
+  value: unknown,
+  depth = 0,
+): unknown {
+  if (depth > 32) return null;
+  if (Array.isArray(value)) {
+    return value.map((item) =>
+      marketplacePublicInputSchema(item, depth + 1),
     );
   }
-  normalizedMarketplaceReferenceKeys = new Set(
-    reference.endpoints.map(
-      (endpoint) => `${endpoint.method}:${endpoint.path}`,
-    ),
+  if (!isPlainRecord(value)) return value;
+  const omitted = new Set([
+    "$ref",
+    "description",
+    "example",
+    "examples",
+    "externalDocs",
+    "title",
+  ]);
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(
+        ([key]) =>
+          !omitted.has(key) &&
+          !key.toLowerCase().startsWith("x-"),
+      )
+      .map(([key, child]) => [
+        key,
+        marketplacePublicInputSchema(child, depth + 1),
+      ]),
   );
-  normalizedMarketplaceReferenceByKey = new Map(
-    reference.endpoints.map((endpoint) => [
-      `${endpoint.method}:${endpoint.path}`,
-      endpoint,
-    ]),
-  );
-  normalizedMarketplaceReference = reference;
-  return reference;
 }
 
 async function loadMarketplaceCatalogOverlay(
   env: PlatformEnv,
 ): Promise<MarketplaceOverlay> {
-  const reference = marketplaceReference();
   if (!env.DB) {
     return {
       rows: new Map(),
       catalogReady: false,
-      referenceMatchesLive: false,
-      source: reference.source,
+      source: EMPTY_MARKETPLACE_SOURCE,
     };
   }
   const readiness = await operationalReadiness(env);
@@ -4067,8 +3965,7 @@ async function loadMarketplaceCatalogOverlay(
     return {
       rows: new Map(),
       catalogReady: false,
-      referenceMatchesLive: false,
-      source: reference.source,
+      source: EMPTY_MARKETPLACE_SOURCE,
     };
   }
   try {
@@ -4095,63 +3992,58 @@ async function loadMarketplaceCatalogOverlay(
     ).all();
     const catalogRows =
       resultRows<MarketplaceCatalogOverlay>(catalogResult);
+    const publicRows = catalogRows.filter(
+      (row) =>
+        row.platform.toLowerCase() !== "tikhub" &&
+        !/^\/v1\/tikhub(?:\/|$)/i.test(row.path),
+    );
     const rows = new Map(
-      catalogRows.map((row) => [
+      publicRows.map((row) => [
         `${row.http_method.toUpperCase()}:${row.path}`,
         row,
       ]),
     );
-    const referenceKeys =
-      normalizedMarketplaceReferenceKeys ??
+    const stateOperationCount = Number(
+      catalogRows[0]?.catalog_openapi_operation_count ?? 0,
+    );
+    const stateSnapshotHash =
+      catalogRows[0]?.catalog_openapi_snapshot_hash ?? null;
+    const catalogStateMatches =
+      catalogRows.length > 0 &&
+      catalogRows.length === stateOperationCount &&
       new Set(
-        reference.endpoints.map(
-          (endpoint) => `${endpoint.method}:${endpoint.path}`,
+        catalogRows.map(
+          (row) => `${row.http_method.toUpperCase()}:${row.path}`,
         ),
-      );
-    const liveKeys = new Set(rows.keys());
-    const identitySetMatches =
-      catalogRows.length === reference.source.operationCount &&
-      rows.size === catalogRows.length &&
-      referenceKeys.size === reference.source.operationCount &&
-      [...referenceKeys].every((key) => liveKeys.has(key));
-    const referenceMatchesLive =
-      typeof reference.source.snapshotHash === "string" &&
-      identitySetMatches &&
-      catalogRows.every((row) => {
-        const referenceEndpoint =
-          normalizedMarketplaceReferenceByKey?.get(
-            `${row.http_method.toUpperCase()}:${row.path}`,
-          );
-        const taxonomy = strictStoredCatalogTaxonomy(
-          row,
-          500,
-          "marketplace_overlay_taxonomy_invalid",
-          "实时目录分类元数据无效，API 市场已停止发布。",
-        );
-        return (
-          referenceEndpoint != null &&
-          row.platform === referenceEndpoint.platform &&
-          taxonomy.dataType === referenceEndpoint.dataType &&
-          taxonomy.surface === referenceEndpoint.surface &&
-          taxonomy.operationId === referenceEndpoint.operationId &&
-          JSON.stringify(taxonomy.tags) ===
-            JSON.stringify(referenceEndpoint.tags) &&
-          row.catalog_openapi_snapshot_hash ===
-            reference.source.snapshotHash &&
+      ).size === catalogRows.length &&
+      typeof stateSnapshotHash === "string" &&
+      /^[0-9a-f]{64}$/.test(stateSnapshotHash) &&
+      catalogRows.every(
+        (row) =>
           Number(row.catalog_openapi_operation_count) ===
-            reference.source.operationCount
-        );
-      });
+            stateOperationCount &&
+          row.catalog_openapi_snapshot_hash === stateSnapshotHash,
+      );
+    const latestUpdate = publicRows
+      .map((row) => row.updated_at)
+      .filter((value) => typeof value === "string" && value.length > 0)
+      .sort()
+      .at(-1);
     return {
       rows,
       catalogReady:
-        referenceMatchesLive &&
+        catalogStateMatches &&
         readiness.capabilities.catalogReady &&
         readiness.capabilities.proxyEnabled &&
         readiness.capabilities.reconciliationConfigured &&
         readiness.capabilities.reconciliationRecent,
-      referenceMatchesLive,
-      source: reference.source,
+      source: {
+        provider: "Configured upstream",
+        openApiVersion: null,
+        snapshotHash: null,
+        generatedAt: latestUpdate ?? null,
+        operationCount: publicRows.length,
+      },
     };
   } catch (error) {
     console.error("Marketplace overlay unavailable", {
@@ -4160,8 +4052,7 @@ async function loadMarketplaceCatalogOverlay(
     return {
       rows: new Map(),
       catalogReady: false,
-      referenceMatchesLive: false,
-      source: reference.source,
+      source: EMPTY_MARKETPLACE_SOURCE,
     };
   }
 }
@@ -4194,52 +4085,90 @@ function mergedMarketplaceEndpoints(
     updatedAt: string | null;
   }
 > {
-  const reference = marketplaceReference();
-  const byKey = new Map<string, MarketplaceReferenceEndpoint>();
-  for (const endpoint of reference.endpoints) {
-    byKey.set(`${endpoint.method}:${endpoint.path}`, endpoint);
-  }
-
-  return [...byKey.values()].map((referenceEndpoint) => {
-    const key = `${referenceEndpoint.method}:${referenceEndpoint.path}`;
-    const row = overlay.rows.get(key);
-    const referenceKeys =
-      normalizedMarketplaceReferenceKeys ??
-      new Set(
-        reference.endpoints.map(
-          (endpoint) => `${endpoint.method}:${endpoint.path}`,
-        ),
+  return [...overlay.rows.values()].map((row) => {
+    const method = row.http_method.toUpperCase();
+    if (method !== "GET" && method !== "POST") {
+      throw new PlatformError(
+        500,
+        "marketplace_catalog_invalid",
+        "运行时目录包含不支持的请求方法。",
       );
+    }
+    const path = normalizeCatalogPath(row.path);
+    if (row.platform !== path.split("/")[2]) {
+      throw new PlatformError(
+        500,
+        "marketplace_catalog_invalid",
+        "运行时目录的平台分类无效。",
+      );
+    }
+    const taxonomy = strictStoredCatalogTaxonomy(
+      row,
+      500,
+      "marketplace_overlay_taxonomy_invalid",
+      "实时目录分类元数据无效，API 市场已停止发布。",
+    );
+    const schema = safeStoredJson(row.parameter_schema_json);
+    const parameters =
+      isPlainRecord(schema) &&
+      Array.isArray(schema.parameters) &&
+      schema.parameters.length <= 200 &&
+      schema.parameters.every(isPlainRecord)
+        ? (marketplacePublicInputSchema(
+            schema.parameters,
+          ) as Record<string, unknown>[])
+        : [];
+    const requestBody =
+      isPlainRecord(schema) && isPlainRecord(schema.requestBody)
+        ? (marketplacePublicInputSchema(
+            schema.requestBody,
+          ) as Record<string, unknown>)
+        : null;
+    const endpoint: MarketplaceReferenceEndpoint = {
+      path,
+      platform: row.platform,
+      dataType: taxonomy.dataType,
+      method,
+      surface: taxonomy.surface,
+      tags: [taxonomy.dataType, taxonomy.surface].sort(),
+      summary: marketplaceGeneratedSummary(path),
+      description: marketplaceGeneratedDescription(
+        row.platform,
+        taxonomy.dataType,
+      ),
+      operationId: null,
+      parameters,
+      requestBody,
+      response: null,
+    };
+    const key = `${endpoint.method}:${endpoint.path}`;
     let staticSafety = marketplaceReferenceSafetyCache.get(key);
-    if (!staticSafety || !referenceKeys.has(key)) {
+    if (!staticSafety) {
       staticSafety = classifyCatalogSafety(
-        referenceEndpoint.path,
-        referenceEndpoint.method,
+        endpoint.path,
+        endpoint.method,
         {
-          summary: referenceEndpoint.summary,
-          operationId: referenceEndpoint.operationId,
-          parameters: referenceEndpoint.parameters,
-          requestBody: referenceEndpoint.requestBody,
+          summary: endpoint.summary,
+          operationId: taxonomy.operationId,
+          parameters: endpoint.parameters,
+          requestBody: endpoint.requestBody,
         },
       );
-      if (referenceKeys.has(key)) {
-        marketplaceReferenceSafetyCache.set(key, staticSafety);
-      }
+      marketplaceReferenceSafetyCache.set(key, staticSafety);
     }
     const restricted =
-      row?.safety_classification === "prohibited" ||
+      row.safety_classification === "prohibited" ||
       staticSafety.classification === "prohibited";
     const available =
       !restricted &&
       overlay.catalogReady &&
-      row != null &&
       row.enabled === 1 &&
       row.read_only === 1 &&
       row.price_verified === 1 &&
       row.safety_classification === "safe_data_read" &&
       row.safety_policy_version === CATALOG_SAFETY_POLICY_VERSION;
     return {
-      ...referenceEndpoint,
+      ...endpoint,
       availability: available
         ? ("available" as const)
         : restricted
@@ -4249,7 +4178,7 @@ function mergedMarketplaceEndpoints(
         ? Math.max(0, Number(row.customer_price_usd_micros))
         : null,
       rateLimitRpm: null,
-      updatedAt: row?.updated_at ?? null,
+      updatedAt: row.updated_at ?? null,
     };
   });
 }
@@ -4426,7 +4355,6 @@ function marketplaceResponseShape(
           telegram: "Telegram",
           temp_mail: "Temp Mail",
           threads: "Threads",
-          tikhub: "TikHub",
           tiktok: "TikTok",
           toutiao: "今日头条 / Toutiao",
           twitter: "X / Twitter",
@@ -4803,17 +4731,6 @@ async function handleMarketplaceDetail(
       "API 市场请求方法无效。",
     );
   }
-  marketplaceReference();
-  const referenceEndpoint = normalizedMarketplaceReferenceByKey?.get(
-    `${method}:${path}`,
-  );
-  if (!referenceEndpoint) {
-    throw new PlatformError(
-      404,
-      "marketplace_endpoint_not_found",
-      "API 市场中没有这个端点。",
-    );
-  }
   const overlay = await marketplaceCatalogOverlay(env);
   const endpoint = mergedMarketplaceEndpoints(overlay).find(
     (candidate) =>
@@ -4908,7 +4825,7 @@ function normalizeCatalogListFilters(
   }
   const dataTypeRaw =
     single("dataType", 80)?.normalize("NFKC").toLowerCase() ?? null;
-  if (dataTypeRaw && !TIKHUB_DATA_TYPES.includes(dataTypeRaw)) {
+  if (dataTypeRaw && !PROVIDER_DATA_TYPES.includes(dataTypeRaw)) {
     throw new PlatformError(
       400,
       "invalid_catalog_filter",
@@ -4919,7 +4836,7 @@ function normalizeCatalogListFilters(
     single("tag", 160)?.normalize("NFKC").toLowerCase() ?? null;
   const surfaceRaw =
     single("surface", 16)?.normalize("NFKC").toLowerCase() ?? null;
-  if (surfaceRaw && !TIKHUB_SURFACES.includes(surfaceRaw)) {
+  if (surfaceRaw && !PROVIDER_SURFACES.includes(surfaceRaw)) {
     throw new PlatformError(
       400,
       "invalid_catalog_filter",
@@ -5487,7 +5404,7 @@ function normalizeCatalogBatchPreview(
         : "";
   if (
     dataTypeRaw !== null &&
-    !TIKHUB_DATA_TYPES.includes(dataTypeRaw)
+    !PROVIDER_DATA_TYPES.includes(dataTypeRaw)
   ) {
     throw new PlatformError(
       400,
@@ -5521,7 +5438,7 @@ function normalizeCatalogBatchPreview(
         : "";
   if (
     surfaceRaw !== null &&
-    !TIKHUB_SURFACES.includes(surfaceRaw)
+    !PROVIDER_SURFACES.includes(surfaceRaw)
   ) {
     throw new PlatformError(
       400,
@@ -6920,12 +6837,12 @@ async function handleAdminOverview(
   requireAdminSecret(request, env, "platform");
   const db = requireDb(env);
   const readiness = await operationalReadiness(env);
-  const upstreamSnapshot = await managedTikHubCredentialsSnapshot(db);
+  const upstreamSnapshot = await managedUpstreamProviderCredentialsSnapshot(db);
   const activeManagedCredential =
     upstreamSnapshot.credentials.find(
       (credential) => credential.status === "active",
     ) ?? null;
-  const environmentUpstreamKey = env.TIKHUB_API_KEY;
+  const environmentUpstreamKey = env.UPSTREAM_API_KEY;
   const environmentUpstreamConfigured = hasConfiguredCredential(
     environmentUpstreamKey,
   );
@@ -7074,11 +6991,11 @@ async function handleAdminOverview(
         managedEnabled: upstreamSnapshot.managedEnabled,
         managedCredentialCount: upstreamSnapshot.credentials.length,
         stateVersion: upstreamSnapshot.stateVersion,
-        encryptionConfigured: hasValidTikHubCredentialsEncryptionKey(
-          env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY,
+        encryptionConfigured: hasValidUpstreamProviderCredentialsEncryptionKey(
+          env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY,
         ),
         baseUrl: hasValidRuntimeConfiguration(env)
-          ? normalizeUpstreamBase(env.TIKHUB_BASE_URL)
+          ? normalizeUpstreamBase(env.UPSTREAM_BASE_URL)
           : null,
       },
       generatedAt: new Date().toISOString(),
@@ -8188,10 +8105,10 @@ async function handleUpstreamCredentialsList(
 ): Promise<Response> {
   requireAdminSecret(request, env, "platform");
   const db = requireDb(env);
-  const snapshot = await managedTikHubCredentialsSnapshot(db);
+  const snapshot = await managedUpstreamProviderCredentialsSnapshot(db);
   const active =
     snapshot.credentials.find((row) => row.status === "active") ?? null;
-  const environmentKey = env.TIKHUB_API_KEY;
+  const environmentKey = env.UPSTREAM_API_KEY;
   const environmentConfigured = hasConfiguredCredential(environmentKey);
   const environmentFingerprint = environmentConfigured
     ? (await sha256Hex(environmentKey)).slice(0, 16)
@@ -8199,7 +8116,7 @@ async function handleUpstreamCredentialsList(
 
   return jsonResponse(
     {
-      credentials: snapshot.credentials.map(publicManagedTikHubCredential),
+      credentials: snapshot.credentials.map(publicManagedUpstreamProviderCredential),
       activeSource: active
         ? "managed"
         : !snapshot.managedEnabled && environmentConfigured
@@ -8211,8 +8128,8 @@ async function handleUpstreamCredentialsList(
         (!snapshot.managedEnabled ? environmentFingerprint : null),
       stateVersion: snapshot.stateVersion,
       managedEnabled: snapshot.managedEnabled,
-      encryptionConfigured: hasValidTikHubCredentialsEncryptionKey(
-        env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY,
+      encryptionConfigured: hasValidUpstreamProviderCredentialsEncryptionKey(
+        env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY,
       ),
       environmentFallbackConfigured: environmentConfigured,
     },
@@ -8228,7 +8145,7 @@ async function handleUpstreamCredentialCreate(
 ): Promise<Response> {
   assertSameOrigin(request, env);
   requireAdminSecret(request, env, "platform");
-  const encryptionKey = requireTikHubCredentialsEncryptionKey(env);
+  const encryptionKey = requireUpstreamProviderCredentialsEncryptionKey(env);
   const body = await readJsonBody<{
     label?: unknown;
     apiKey?: unknown;
@@ -8238,11 +8155,11 @@ async function handleUpstreamCredentialCreate(
   const label = sanitizeUpstreamCredentialLabel(body.label);
   const apiKey =
     typeof body.apiKey === "string" ? body.apiKey : "";
-  if (!isValidTikHubApiKey(apiKey)) {
+  if (!isValidUpstreamProviderApiKey(apiKey)) {
     throw new PlatformError(
       400,
       "invalid_upstream_credential",
-      "TikHub API Key 格式无效。",
+      "UpstreamProvider API Key 格式无效。",
     );
   }
   if (typeof body.activate !== "boolean") {
@@ -8265,7 +8182,7 @@ async function handleUpstreamCredentialCreate(
     throw new PlatformError(
       400,
       "invalid_upstream_credential_version",
-      "启用 TikHub 凭据时必须提供当前状态版本。",
+      "启用 UpstreamProvider 凭据时必须提供当前状态版本。",
     );
   }
 
@@ -8276,18 +8193,18 @@ async function handleUpstreamCredentialCreate(
       throw new PlatformError(
         409,
         "upstream_credential_update_conflict",
-        "TikHub 活动凭据已发生变化，请刷新后重试。",
+        "UpstreamProvider 活动凭据已发生变化，请刷新后重试。",
       );
     }
   }
   const verification = body.activate
-    ? await verifyTikHubApiKey(apiKey, env)
+    ? await verifyUpstreamProviderApiKey(apiKey, env)
     : null;
 
   const id = `upc_${randomBase64Url(18)}`;
   const secretHash = await sha256Hex(apiKey);
   const fingerprint = secretHash.slice(0, 16);
-  const encryptedSecret = await encryptTikHubApiKey(
+  const encryptedSecret = await encryptUpstreamProviderApiKey(
     apiKey,
     encryptionKey,
     id,
@@ -8349,25 +8266,25 @@ async function handleUpstreamCredentialCreate(
       throw new PlatformError(
         409,
         "upstream_credential_exists",
-        "相同 TikHub API Key 已经存在。",
+        "相同 UpstreamProvider API Key 已经存在。",
       );
     }
     throw new PlatformError(
       409,
       "upstream_credential_limit",
-      "当前未撤销的 TikHub 凭据已达到 100 条安全上限。",
+      "当前未撤销的 UpstreamProvider 凭据已达到 100 条安全上限。",
     );
   }
 
   let activationConflict = false;
   if (body.activate) {
     try {
-      await activateManagedTikHubCredential(
+      await activateManagedUpstreamProviderCredential(
         db,
         request,
         id,
         expectedVersion,
-        verification as TikHubCredentialVerification,
+        verification as UpstreamProviderCredentialVerification,
       );
     } catch (error) {
       if (
@@ -8380,17 +8297,17 @@ async function handleUpstreamCredentialCreate(
       }
     }
   }
-  const stored = await managedTikHubCredentialById(db, id);
+  const stored = await managedUpstreamProviderCredentialById(db, id);
   if (!stored) {
     throw new PlatformError(
       500,
       "upstream_credential_write_failed",
-      "TikHub 凭据保存失败。",
+      "UpstreamProvider 凭据保存失败。",
     );
   }
   return jsonResponse(
     {
-      credential: publicManagedTikHubCredential(stored),
+      credential: publicManagedUpstreamProviderCredential(stored),
       verified: body.activate,
       activationConflict,
     },
@@ -8418,14 +8335,14 @@ async function handleUpstreamCredentialUpdate(
     throw new PlatformError(
       400,
       "invalid_upstream_credential_id",
-      "TikHub 凭据编号无效。",
+      "UpstreamProvider 凭据编号无效。",
     );
   }
   if (action !== "activate" && action !== "revoke") {
     throw new PlatformError(
       400,
       "invalid_upstream_credential_action",
-      "TikHub 凭据操作仅支持 activate 或 revoke。",
+      "UpstreamProvider 凭据操作仅支持 activate 或 revoke。",
     );
   }
   const expectedVersion =
@@ -8440,24 +8357,24 @@ async function handleUpstreamCredentialUpdate(
     throw new PlatformError(
       400,
       "invalid_upstream_credential_version",
-      "TikHub 凭据操作必须提供当前状态版本。",
+      "UpstreamProvider 凭据操作必须提供当前状态版本。",
     );
   }
 
   const db = requireDb(env);
-  const existing = await managedTikHubCredentialById(db, id);
+  const existing = await managedUpstreamProviderCredentialById(db, id);
   if (!existing) {
     throw new PlatformError(
       404,
       "upstream_credential_not_found",
-      "没有找到这个 TikHub 凭据。",
+      "没有找到这个 UpstreamProvider 凭据。",
     );
   }
   if (existing.status === "revoked") {
     throw new PlatformError(
       409,
       "upstream_credential_revoked",
-      "已撤销的 TikHub 凭据不能再次使用。",
+      "已撤销的 UpstreamProvider 凭据不能再次使用。",
     );
   }
 
@@ -8467,17 +8384,17 @@ async function handleUpstreamCredentialUpdate(
       throw new PlatformError(
         409,
         "upstream_credential_update_conflict",
-        "TikHub 活动凭据已发生变化，请刷新后重试。",
+        "UpstreamProvider 活动凭据已发生变化，请刷新后重试。",
       );
     }
-    const encryptionKey = requireTikHubCredentialsEncryptionKey(env);
-    const apiKey = await decryptTikHubApiKey(
+    const encryptionKey = requireUpstreamProviderCredentialsEncryptionKey(env);
+    const apiKey = await decryptUpstreamProviderApiKey(
       existing.encrypted_secret,
       encryptionKey,
       existing.id,
     );
-    const verification = await verifyTikHubApiKey(apiKey, env);
-    await activateManagedTikHubCredential(
+    const verification = await verifyUpstreamProviderApiKey(apiKey, env);
+    await activateManagedUpstreamProviderCredential(
       db,
       request,
       id,
@@ -8542,7 +8459,7 @@ async function handleUpstreamCredentialUpdate(
         throw new PlatformError(
           409,
           "upstream_credential_update_conflict",
-          "TikHub 活动凭据已发生变化，请刷新后重试。",
+          "UpstreamProvider 活动凭据已发生变化，请刷新后重试。",
         );
       }
     } else {
@@ -8572,22 +8489,22 @@ async function handleUpstreamCredentialUpdate(
         throw new PlatformError(
           409,
           "upstream_credential_update_conflict",
-          "TikHub 凭据状态已发生变化，请刷新后重试。",
+          "UpstreamProvider 凭据状态已发生变化，请刷新后重试。",
         );
       }
     }
   }
 
-  const updated = await managedTikHubCredentialById(db, id);
+  const updated = await managedUpstreamProviderCredentialById(db, id);
   if (!updated) {
     throw new PlatformError(
       500,
       "upstream_credential_write_failed",
-      "TikHub 凭据状态更新失败。",
+      "UpstreamProvider 凭据状态更新失败。",
     );
   }
   return jsonResponse(
-    { credential: publicManagedTikHubCredential(updated) },
+    { credential: publicManagedUpstreamProviderCredential(updated) },
     200,
     requestId,
   );
@@ -8623,16 +8540,16 @@ async function handleCatalogSync(
   }
 
   try {
-    const credential = await resolveTikHubCredential(env, db);
+    const credential = await resolveUpstreamProviderCredential(env, db);
     if (!credential) {
       throw new PlatformError(
         503,
         "upstream_not_configured",
-        "TikHub 服务端密钥尚未配置。",
+        "UpstreamProvider 服务端密钥尚未配置。",
       );
     }
 
-    const upstreamBase = normalizeUpstreamBase(env.TIKHUB_BASE_URL);
+    const upstreamBase = normalizeUpstreamBase(env.UPSTREAM_BASE_URL);
     let response: Response;
     try {
       response = await fetch(
@@ -8657,14 +8574,14 @@ async function handleCatalogSync(
       throw new PlatformError(
         502,
         "catalog_sync_failed",
-        "TikHub 端点目录暂时不可用。",
+        "UpstreamProvider 端点目录暂时不可用。",
       );
     }
     if (!response.ok) {
       throw new PlatformError(
         502,
         "catalog_sync_failed",
-        `TikHub 端点目录同步失败（${response.status}）。`,
+        `UpstreamProvider 端点目录同步失败（${response.status}）。`,
       );
     }
 
@@ -8695,14 +8612,14 @@ async function handleCatalogSync(
       throw new PlatformError(
         502,
         "catalog_schema_sync_failed",
-        "TikHub OpenAPI 文档暂时不可用。",
+        "UpstreamProvider OpenAPI 文档暂时不可用。",
       );
     }
     if (!openApiResponse.ok) {
       throw new PlatformError(
         502,
         "catalog_schema_sync_failed",
-        `TikHub OpenAPI 文档同步失败（${openApiResponse.status}）。`,
+        `UpstreamProvider OpenAPI 文档同步失败（${openApiResponse.status}）。`,
       );
     }
     const openApiSnapshot = await readResponseJsonSnapshot(
@@ -9009,7 +8926,7 @@ async function handleCatalogSync(
       );
     }
 
-    const publishCredential = await resolveTikHubCredential(env, db);
+    const publishCredential = await resolveUpstreamProviderCredential(env, db);
     if (
       !publishCredential ||
       publishCredential.id !== credential.id ||
@@ -9020,7 +8937,7 @@ async function handleCatalogSync(
       throw new PlatformError(
         409,
         "catalog_sync_credential_changed",
-        "TikHub 活动凭据在同步期间发生变化，本次快照不会发布。",
+        "UpstreamProvider 活动凭据在同步期间发生变化，本次快照不会发布。",
       );
     }
     const managedCredentialFlag =
@@ -9490,7 +9407,7 @@ async function handleCatalogUpdate(
     throw new PlatformError(
       409,
       "endpoint_price_unverified",
-      "该端点尚未从 TikHub 价格目录获得可验证价格，不能启用。",
+      "该端点尚未从 UpstreamProvider 价格目录获得可验证价格，不能启用。",
     );
   }
   const nextRevision = existing.revision + 1;
@@ -10265,7 +10182,7 @@ async function getNowPaymentsPayment(
   return payload as NowPaymentsPayment;
 }
 
-async function managedTikHubCredentialsSnapshot(
+async function managedUpstreamProviderCredentialsSnapshot(
   db: D1Database,
 ): Promise<{
   credentials: ManagedUpstreamCredentialRecord[];
@@ -10303,7 +10220,7 @@ async function managedTikHubCredentialsSnapshot(
     throw new PlatformError(
       503,
       "database_migrations_required",
-      "TikHub 凭据库迁移尚未完成。",
+      "UpstreamProvider 凭据库迁移尚未完成。",
     );
   }
   return {
@@ -10353,12 +10270,12 @@ async function upstreamCredentialState(
     throw new PlatformError(
       503,
       "database_migrations_required",
-      "TikHub 凭据库迁移尚未完成。",
+      "UpstreamProvider 凭据库迁移尚未完成。",
     );
   }
 }
 
-async function managedTikHubCredentialById(
+async function managedUpstreamProviderCredentialById(
   db: D1Database,
   id: string,
 ): Promise<ManagedUpstreamCredentialRecord | null> {
@@ -10384,17 +10301,17 @@ async function managedTikHubCredentialById(
     throw new PlatformError(
       503,
       "database_migrations_required",
-      "TikHub 凭据库迁移尚未完成。",
+      "UpstreamProvider 凭据库迁移尚未完成。",
     );
   }
 }
 
-function publicManagedTikHubCredential(
+function publicManagedUpstreamProviderCredential(
   credential: ManagedUpstreamCredentialRecord,
 ) {
   let scopeCount = 0;
   try {
-    const scopes = normalizeTikHubCredentialScopes(
+    const scopes = normalizeUpstreamProviderCredentialScopes(
       credential.verified_scopes_json
         ? (JSON.parse(credential.verified_scopes_json) as unknown)
         : null,
@@ -10417,26 +10334,26 @@ function publicManagedTikHubCredential(
   };
 }
 
-async function activateManagedTikHubCredential(
+async function activateManagedUpstreamProviderCredential(
   db: D1Database,
   request: Request,
   id: string,
   expectedVersion: number,
-  verification: TikHubCredentialVerification,
+  verification: UpstreamProviderCredentialVerification,
 ): Promise<void> {
-  const existing = await managedTikHubCredentialById(db, id);
+  const existing = await managedUpstreamProviderCredentialById(db, id);
   if (!existing) {
     throw new PlatformError(
       404,
       "upstream_credential_not_found",
-      "没有找到这个 TikHub 凭据。",
+      "没有找到这个 UpstreamProvider 凭据。",
     );
   }
   if (existing.status === "revoked") {
     throw new PlatformError(
       409,
       "upstream_credential_revoked",
-      "已撤销的 TikHub 凭据不能再次使用。",
+      "已撤销的 UpstreamProvider 凭据不能再次使用。",
     );
   }
   const nextVersion = expectedVersion + 1;
@@ -10527,7 +10444,7 @@ async function activateManagedTikHubCredential(
     throw new PlatformError(
       409,
       "upstream_credential_update_conflict",
-      "TikHub 活动凭据已发生变化，请刷新后重试。",
+      "UpstreamProvider 活动凭据已发生变化，请刷新后重试。",
     );
   }
 }
@@ -10537,7 +10454,7 @@ function sanitizeUpstreamCredentialLabel(value: unknown): string {
     throw new PlatformError(
       400,
       "invalid_upstream_credential_label",
-      "TikHub 凭据名称无效。",
+      "UpstreamProvider 凭据名称无效。",
     );
   }
   const label = value.replace(/\s+/g, " ").trim();
@@ -10549,17 +10466,17 @@ function sanitizeUpstreamCredentialLabel(value: unknown): string {
     throw new PlatformError(
       400,
       "invalid_upstream_credential_label",
-      "TikHub 凭据名称必须是 2–80 个可见字符。",
+      "UpstreamProvider 凭据名称必须是 2–80 个可见字符。",
     );
   }
   return label;
 }
 
-function isValidTikHubApiKey(value: string): boolean {
+function isValidUpstreamProviderApiKey(value: string): boolean {
   return /^[\x21-\x7E]{16,512}$/.test(value);
 }
 
-function hasValidTikHubCredentialsEncryptionKey(
+function hasValidUpstreamProviderCredentialsEncryptionKey(
   value?: string,
 ): value is string {
   if (!value || !/^[A-Za-z0-9_-]{43}$/.test(value)) return false;
@@ -10570,22 +10487,22 @@ function hasValidTikHubCredentialsEncryptionKey(
   }
 }
 
-function requireTikHubCredentialsEncryptionKey(env: PlatformEnv): string {
+function requireUpstreamProviderCredentialsEncryptionKey(env: PlatformEnv): string {
   if (
-    !hasValidTikHubCredentialsEncryptionKey(
-      env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY,
+    !hasValidUpstreamProviderCredentialsEncryptionKey(
+      env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY,
     )
   ) {
     throw new PlatformError(
       503,
       "upstream_credential_encryption_unavailable",
-      "TikHub 凭据加密主密钥尚未正确配置。",
+      "UpstreamProvider 凭据加密主密钥尚未正确配置。",
     );
   }
-  return env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY;
+  return env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY;
 }
 
-async function importTikHubCredentialsEncryptionKey(
+async function importUpstreamProviderCredentialsEncryptionKey(
   encodedKey: string,
 ): Promise<CryptoKey> {
   return await crypto.subtle.importKey(
@@ -10597,13 +10514,13 @@ async function importTikHubCredentialsEncryptionKey(
   );
 }
 
-function tikHubCredentialAdditionalData(id: string): ArrayBuffer {
+function upstreamProviderCredentialAdditionalData(id: string): ArrayBuffer {
   return bytesToArrayBuffer(
     new TextEncoder().encode(`relaybase:tikhub:${id}:v1`),
   );
 }
 
-async function encryptTikHubApiKey(
+async function encryptUpstreamProviderApiKey(
   apiKey: string,
   encodedKey: string,
   id: string,
@@ -10613,10 +10530,10 @@ async function encryptTikHubApiKey(
     {
       name: "AES-GCM",
       iv,
-      additionalData: tikHubCredentialAdditionalData(id),
+      additionalData: upstreamProviderCredentialAdditionalData(id),
       tagLength: 128,
     },
-    await importTikHubCredentialsEncryptionKey(encodedKey),
+    await importUpstreamProviderCredentialsEncryptionKey(encodedKey),
     new TextEncoder().encode(apiKey),
   );
   return `v1.${bytesToBase64Url(iv)}.${bytesToBase64Url(
@@ -10624,7 +10541,7 @@ async function encryptTikHubApiKey(
   )}`;
 }
 
-async function decryptTikHubApiKey(
+async function decryptUpstreamProviderApiKey(
   encryptedSecret: string,
   encodedKey: string,
   id: string,
@@ -10639,7 +10556,7 @@ async function decryptTikHubApiKey(
     throw new PlatformError(
       503,
       "upstream_credential_decryption_failed",
-      "TikHub 凭据密文格式无效，已停止上游调用。",
+      "UpstreamProvider 凭据密文格式无效，已停止上游调用。",
     );
   }
   try {
@@ -10647,16 +10564,16 @@ async function decryptTikHubApiKey(
       {
         name: "AES-GCM",
         iv: bytesToArrayBuffer(base64UrlToBytes(parts[1] ?? "")),
-        additionalData: tikHubCredentialAdditionalData(id),
+        additionalData: upstreamProviderCredentialAdditionalData(id),
         tagLength: 128,
       },
-      await importTikHubCredentialsEncryptionKey(encodedKey),
+      await importUpstreamProviderCredentialsEncryptionKey(encodedKey),
       bytesToArrayBuffer(base64UrlToBytes(parts[2] ?? "")),
     );
     const apiKey = new TextDecoder("utf-8", { fatal: true }).decode(
       plaintext,
     );
-    if (!isValidTikHubApiKey(apiKey)) {
+    if (!isValidUpstreamProviderApiKey(apiKey)) {
       throw new Error("invalid decrypted secret");
     }
     return apiKey;
@@ -10664,16 +10581,16 @@ async function decryptTikHubApiKey(
     throw new PlatformError(
       503,
       "upstream_credential_decryption_failed",
-      "TikHub 凭据无法解密，已停止上游调用。",
+      "UpstreamProvider 凭据无法解密，已停止上游调用。",
     );
   }
 }
 
-async function verifyTikHubApiKey(
+async function verifyUpstreamProviderApiKey(
   apiKey: string,
   env: PlatformEnv,
-): Promise<TikHubCredentialVerification> {
-  const upstreamBase = normalizeUpstreamBase(env.TIKHUB_BASE_URL);
+): Promise<UpstreamProviderCredentialVerification> {
+  const upstreamBase = normalizeUpstreamBase(env.UPSTREAM_BASE_URL);
   let response: Response | null = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
@@ -10715,21 +10632,21 @@ async function verifyTikHubApiKey(
     throw new PlatformError(
       502,
       "upstream_credential_verification_failed",
-      "TikHub 暂时无法验证这个 API Key。",
+      "UpstreamProvider 暂时无法验证这个 API Key。",
     );
   }
   if (response.status === 401 || response.status === 403) {
     throw new PlatformError(
       400,
       "upstream_credential_rejected",
-      "TikHub 拒绝了这个 API Key。",
+      "UpstreamProvider 拒绝了这个 API Key。",
     );
   }
   if (!response.ok) {
     throw new PlatformError(
       502,
       "upstream_credential_verification_failed",
-      `TikHub 凭据验证失败（${response.status}）。`,
+      `UpstreamProvider 凭据验证失败（${response.status}）。`,
     );
   }
   const payload = await readResponseJson(
@@ -10746,7 +10663,7 @@ async function verifyTikHubApiKey(
     throw new PlatformError(
       502,
       "upstream_credential_verification_failed",
-      "TikHub 凭据验证响应格式无效。",
+      "UpstreamProvider 凭据验证响应格式无效。",
     );
   }
   const apiKeyData = payload.api_key_data;
@@ -10759,7 +10676,7 @@ async function verifyTikHubApiKey(
     throw new PlatformError(
       400,
       "upstream_credential_inactive",
-      "这个 TikHub API Key 或所属账户当前不可用。",
+      "这个 UpstreamProvider API Key 或所属账户当前不可用。",
     );
   }
   let expiresAt: string | null = null;
@@ -10772,25 +10689,25 @@ async function verifyTikHubApiKey(
       throw new PlatformError(
         400,
         "upstream_credential_expired",
-        "这个 TikHub API Key 已过期。",
+        "这个 UpstreamProvider API Key 已过期。",
       );
     }
     expiresAt = new Date(apiKeyData.expires_at).toISOString();
   }
-  const scopes = normalizeTikHubCredentialScopes(
+  const scopes = normalizeUpstreamProviderCredentialScopes(
     apiKeyData.api_key_scopes,
   );
-  if (!scopes || !hasTikHubDataScope(scopes)) {
+  if (!scopes || !hasUpstreamProviderDataScope(scopes)) {
     throw new PlatformError(
       400,
       "upstream_credential_scope_insufficient",
-      "这个 TikHub API Key 没有可用于数据接口的授权范围。",
+      "这个 UpstreamProvider API Key 没有可用于数据接口的授权范围。",
     );
   }
   return { scopes, expiresAt };
 }
 
-function normalizeTikHubCredentialScopes(
+function normalizeUpstreamProviderCredentialScopes(
   value: unknown,
 ): string[] | null {
   if (!Array.isArray(value) || value.length === 0 || value.length > 500) {
@@ -10814,7 +10731,7 @@ function normalizeTikHubCredentialScopes(
   return [...new Set(normalized)].sort();
 }
 
-function hasTikHubDataScope(scopes: string[]): boolean {
+function hasUpstreamProviderDataScope(scopes: string[]): boolean {
   return scopes.some((normalized) => {
     if (
       normalized === "*" ||
@@ -10832,7 +10749,7 @@ function hasTikHubDataScope(scopes: string[]): boolean {
   });
 }
 
-function tikHubCredentialAllowsPath(
+function upstreamProviderCredentialAllowsPath(
   scopes: string[] | null,
   catalogPath: string,
 ): boolean {
@@ -10849,36 +10766,36 @@ function tikHubCredentialAllowsPath(
   });
 }
 
-function storedTikHubCredentialScopes(value: string | null): string[] {
+function storedUpstreamProviderCredentialScopes(value: string | null): string[] {
   if (!value) {
     throw new PlatformError(
       503,
       "upstream_credential_state_invalid",
-      "TikHub 活动凭据缺少已验证的授权范围。",
+      "UpstreamProvider 活动凭据缺少已验证的授权范围。",
     );
   }
   try {
     const parsed = JSON.parse(value) as unknown;
-    const scopes = normalizeTikHubCredentialScopes(parsed);
-    if (!scopes || !hasTikHubDataScope(scopes)) throw new Error();
+    const scopes = normalizeUpstreamProviderCredentialScopes(parsed);
+    if (!scopes || !hasUpstreamProviderDataScope(scopes)) throw new Error();
     return scopes;
   } catch {
     throw new PlatformError(
       503,
       "upstream_credential_state_invalid",
-      "TikHub 活动凭据授权范围无效，已停止上游调用。",
+      "UpstreamProvider 活动凭据授权范围无效，已停止上游调用。",
     );
   }
 }
 
-async function resolveTikHubCredential(
+async function resolveUpstreamProviderCredential(
   env: PlatformEnv,
   db: D1Database,
-): Promise<ResolvedTikHubCredential | null> {
+): Promise<ResolvedUpstreamProviderCredential | null> {
   const state = await upstreamCredentialState(db);
   if (state.managedEnabled) {
     if (!state.activeCredentialId) return null;
-    const managed = await managedTikHubCredentialById(
+    const managed = await managedUpstreamProviderCredentialById(
       db,
       state.activeCredentialId,
     );
@@ -10886,7 +10803,7 @@ async function resolveTikHubCredential(
       throw new PlatformError(
         503,
         "upstream_credential_state_invalid",
-        "TikHub 活动凭据状态无效，已停止上游调用。",
+        "UpstreamProvider 活动凭据状态无效，已停止上游调用。",
       );
     }
     if (
@@ -10897,12 +10814,12 @@ async function resolveTikHubCredential(
       throw new PlatformError(
         503,
         "upstream_credential_expired",
-        "TikHub 活动凭据已过期，已停止上游调用。",
+        "UpstreamProvider 活动凭据已过期，已停止上游调用。",
       );
     }
-    const encryptionKey = requireTikHubCredentialsEncryptionKey(env);
+    const encryptionKey = requireUpstreamProviderCredentialsEncryptionKey(env);
     return {
-      secret: await decryptTikHubApiKey(
+      secret: await decryptUpstreamProviderApiKey(
         managed.encrypted_secret,
         encryptionKey,
         managed.id,
@@ -10910,17 +10827,17 @@ async function resolveTikHubCredential(
       fingerprint: managed.secret_hash.slice(0, 16),
       source: "managed",
       id: managed.id,
-      scopes: storedTikHubCredentialScopes(
+      scopes: storedUpstreamProviderCredentialScopes(
         managed.verified_scopes_json,
       ),
       expiresAt: managed.expires_at,
       stateVersion: state.version,
     };
   }
-  if (!hasConfiguredCredential(env.TIKHUB_API_KEY)) return null;
+  if (!hasConfiguredCredential(env.UPSTREAM_API_KEY)) return null;
   return {
-    secret: env.TIKHUB_API_KEY,
-    fingerprint: (await sha256Hex(env.TIKHUB_API_KEY)).slice(0, 16),
+    secret: env.UPSTREAM_API_KEY,
+    fingerprint: (await sha256Hex(env.UPSTREAM_API_KEY)).slice(0, 16),
     source: "environment",
     id: null,
     scopes: null,
@@ -10964,9 +10881,9 @@ function platformReadiness(env: PlatformEnv) {
   const databaseConfigured = Boolean(env.DB);
   const legalReviewConfirmed = env.LEGAL_REVIEW_CONFIRMED === "true";
   const resellerAuthorized = env.RESELLER_AUTHORIZED === "true";
-  const tikhubCryptoPaymentCleared =
-    env.TIKHUB_CRYPTO_PAYMENT_CLEARED === "true";
-  const upstreamConfigured = hasConfiguredCredential(env.TIKHUB_API_KEY);
+  const commercialClearanceConfirmed =
+    env.UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED === "true";
+  const upstreamConfigured = hasConfiguredCredential(env.UPSTREAM_API_KEY);
   const configurationValid = hasValidRuntimeConfiguration(env);
   const masterAdminConfigured =
     hasConfiguredAdminSecret(env.ADMIN_MASTER_SECRET);
@@ -11003,14 +10920,14 @@ function platformReadiness(env: PlatformEnv) {
     databaseConfigured &&
     legalReviewConfirmed &&
     resellerAuthorized &&
-    tikhubCryptoPaymentCleared &&
+    commercialClearanceConfirmed &&
     upstreamConfigured &&
     configurationValid;
   const paymentsEnabled =
     proxyEnabled &&
     productionAuthenticationConfigured &&
     env.CRYPTO_PAYMENTS_ENABLED === "true" &&
-    tikhubCryptoPaymentCleared &&
+    commercialClearanceConfirmed &&
     paymentProviderConfigured;
   const missing: string[] = [];
   if (!databaseConfigured) missing.push("database");
@@ -11022,8 +10939,8 @@ function platformReadiness(env: PlatformEnv) {
   if (env.CRYPTO_PAYMENTS_ENABLED !== "true") {
     missing.push("crypto_payments");
   }
-  if (!tikhubCryptoPaymentCleared) {
-    missing.push("tikhub_crypto_payment_clearance");
+  if (!commercialClearanceConfirmed) {
+    missing.push("commercial_clearance");
   }
   if (!paymentProviderConfigured) missing.push("payment_provider");
   if (!authenticationConfigured) missing.push("authentication");
@@ -11052,7 +10969,7 @@ function platformReadiness(env: PlatformEnv) {
       configurationValid,
       legalReviewConfirmed,
       resellerAuthorized,
-      tikhubCryptoPaymentCleared,
+      commercialClearanceConfirmed,
       upstreamConfigured,
       proxyEnabled,
       paymentsEnabled,
@@ -11086,14 +11003,14 @@ function hasConfiguredAdminSecret(value?: string): value is string {
 
 function hasValidRuntimeConfiguration(env: PlatformEnv): boolean {
   try {
-    normalizeUpstreamBase(env.TIKHUB_BASE_URL);
+    normalizeUpstreamBase(env.UPSTREAM_BASE_URL);
   } catch {
     return false;
   }
   if (
-    env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY &&
-    !hasValidTikHubCredentialsEncryptionKey(
-      env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY,
+    env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY &&
+    !hasValidUpstreamProviderCredentialsEncryptionKey(
+      env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY,
     )
   ) {
     return false;
@@ -11264,7 +11181,7 @@ async function operationalReadiness(env: PlatformEnv) {
       reconciliationRecent =
         Number(row?.reconciliation_recent ?? 0) === 1;
       try {
-        const resolved = await resolveTikHubCredential(env, env.DB);
+        const resolved = await resolveUpstreamProviderCredential(env, env.DB);
         upstreamConfigured = Boolean(resolved);
         catalogReady =
           taxonomyReady &&
@@ -11293,13 +11210,13 @@ async function operationalReadiness(env: PlatformEnv) {
     base.capabilities.configurationValid &&
     base.capabilities.legalReviewConfirmed &&
     base.capabilities.resellerAuthorized &&
-    base.capabilities.tikhubCryptoPaymentCleared &&
+    base.capabilities.commercialClearanceConfirmed &&
     upstreamConfigured;
   const paymentsEnabled =
     proxyEnabled &&
     base.capabilities.productionAuthenticationConfigured &&
     env.CRYPTO_PAYMENTS_ENABLED === "true" &&
-    base.capabilities.tikhubCryptoPaymentCleared &&
+    base.capabilities.commercialClearanceConfirmed &&
     (env.PAYMENT_PROVIDER ?? "nowpayments") === "nowpayments" &&
     hasConfiguredCredential(env.NOWPAYMENTS_API_KEY) &&
     hasConfiguredCredential(env.NOWPAYMENTS_IPN_SECRET) &&
@@ -11959,7 +11876,7 @@ function extractCatalogPrices(payload: unknown): {
     throw new PlatformError(
       502,
       "catalog_price_response_failed",
-      "TikHub 价格目录返回非成功业务状态，本次同步已停止。",
+      "UpstreamProvider 价格目录返回非成功业务状态，本次同步已停止。",
     );
   }
   const byPath = new Map<string, CatalogPriceEntry>();
@@ -11997,14 +11914,14 @@ function extractCatalogPrices(payload: unknown): {
       throw new PlatformError(
         502,
         "catalog_price_schema_invalid",
-        "TikHub 正式价格目录记录缺少 endpoint_uri 或 endpoint_cost。",
+        "UpstreamProvider 正式价格目录记录缺少 endpoint_uri 或 endpoint_cost。",
       );
     }
     if (rawPath && price.present && price.usdMicros == null) {
       throw new PlatformError(
         502,
         "catalog_price_value_invalid",
-        "TikHub 价格目录包含无法精确表示的成本，本次同步已停止。",
+        "UpstreamProvider 价格目录包含无法精确表示的成本，本次同步已停止。",
       );
     }
     if (rawPath && price.usdMicros != null) {
@@ -12024,7 +11941,7 @@ function extractCatalogPrices(payload: unknown): {
           throw new PlatformError(
             502,
             "catalog_price_method_invalid",
-            "TikHub 价格目录包含不受支持的显式请求方法，本次同步已停止。",
+            "UpstreamProvider 价格目录包含不受支持的显式请求方法，本次同步已停止。",
           );
         }
         const httpMethod: CatalogPriceEntry["httpMethod"] =
@@ -12048,7 +11965,7 @@ function extractCatalogPrices(payload: unknown): {
           throw new PlatformError(
             502,
             "catalog_price_conflict",
-            "TikHub 价格目录包含相互冲突的重复端点，本次同步已停止。",
+            "UpstreamProvider 价格目录包含相互冲突的重复端点，本次同步已停止。",
           );
         }
         byPath.set(
@@ -12074,7 +11991,7 @@ function extractCatalogPrices(payload: unknown): {
           throw new PlatformError(
             502,
             "catalog_price_schema_invalid",
-            "TikHub 正式价格目录包含无效端点路径，本次同步已停止。",
+            "UpstreamProvider 正式价格目录包含无效端点路径，本次同步已停止。",
           );
         }
         // Ignore non-endpoint URLs and malformed catalog records.
@@ -12109,7 +12026,7 @@ function extractCatalogPrices(payload: unknown): {
         throw new PlatformError(
           502,
           "catalog_price_schema_invalid",
-          "TikHub 正式价格目录包含非对象记录，本次同步已停止。",
+          "UpstreamProvider 正式价格目录包含非对象记录，本次同步已停止。",
         );
       }
       parseRecord(item, true);
@@ -12583,7 +12500,7 @@ function normalizeCatalogOperationTags(value: unknown): string[] {
     throw new PlatformError(
       502,
       "catalog_openapi_taxonomy_invalid",
-      "TikHub OpenAPI 的 operation tags 无效，本次同步已停止。",
+      "UpstreamProvider OpenAPI 的 operation tags 无效，本次同步已停止。",
     );
   }
   const tags = value.map((item) => {
@@ -12599,7 +12516,7 @@ function normalizeCatalogOperationTags(value: unknown): string[] {
       throw new PlatformError(
         502,
         "catalog_openapi_taxonomy_invalid",
-        "TikHub OpenAPI 的 operation tag 无效，本次同步已停止。",
+        "UpstreamProvider OpenAPI 的 operation tag 无效，本次同步已停止。",
       );
     }
     return item;
@@ -12615,7 +12532,7 @@ function normalizeCatalogOperationId(value: unknown): string | null {
     throw new PlatformError(
       502,
       "catalog_openapi_taxonomy_invalid",
-      "TikHub OpenAPI 的 operationId 无效，本次同步已停止。",
+      "UpstreamProvider OpenAPI 的 operationId 无效，本次同步已停止。",
     );
   }
   const operationId = value.trim();
@@ -12627,7 +12544,7 @@ function normalizeCatalogOperationId(value: unknown): string | null {
     throw new PlatformError(
       502,
       "catalog_openapi_taxonomy_invalid",
-      "TikHub OpenAPI 的 operationId 无效，本次同步已停止。",
+      "UpstreamProvider OpenAPI 的 operationId 无效，本次同步已停止。",
     );
   }
   return redactSensitiveCatalogText(operationId);
@@ -12652,13 +12569,13 @@ function strictStoredCatalogTaxonomy(
   try {
     if (
       typeof value.data_type !== "string" ||
-      !TIKHUB_DATA_TYPES.includes(value.data_type)
+      !PROVIDER_DATA_TYPES.includes(value.data_type)
     ) {
       throw new Error("invalid data type");
     }
     if (
       typeof value.surface !== "string" ||
-      !TIKHUB_SURFACES.includes(value.surface)
+      !PROVIDER_SURFACES.includes(value.surface)
     ) {
       throw new Error("invalid surface");
     }
@@ -12756,7 +12673,7 @@ function extractOpenApiCatalog(
     throw new PlatformError(
       502,
       "catalog_schema_sync_failed",
-      "TikHub OpenAPI 文档格式无效。",
+      "UpstreamProvider OpenAPI 文档格式无效。",
     );
   }
   const byPath = new Map<
@@ -12774,7 +12691,7 @@ function extractOpenApiCatalog(
       throw new PlatformError(
         502,
         "catalog_openapi_operation_invalid",
-        "TikHub OpenAPI 的 v1 path item 无效，本次同步已停止。",
+        "UpstreamProvider OpenAPI 的 v1 path item 无效，本次同步已停止。",
       );
     }
     const operationMethods = [
@@ -12800,7 +12717,7 @@ function extractOpenApiCatalog(
       throw new PlatformError(
         502,
         "catalog_openapi_operation_invalid",
-        "TikHub OpenAPI 的 v1 operation 无效，本次同步已停止。",
+        "UpstreamProvider OpenAPI 的 v1 operation 无效，本次同步已停止。",
       );
     }
     const documentedMethods = presentMethods;
@@ -12812,14 +12729,14 @@ function extractOpenApiCatalog(
       throw new PlatformError(
         502,
         "catalog_openapi_method_unsupported",
-        "TikHub OpenAPI 出现 GET/POST 之外的操作，本次同步已停止。",
+        "UpstreamProvider OpenAPI 出现 GET/POST 之外的操作，本次同步已停止。",
       );
     }
     if (documentedMethods.length > 1) {
       throw new PlatformError(
         502,
         "catalog_openapi_method_collision",
-        "TikHub OpenAPI 同一路径出现多个请求方法，当前目录模型无法安全区分。",
+        "UpstreamProvider OpenAPI 同一路径出现多个请求方法，当前目录模型无法安全区分。",
       );
     }
     let selected:
@@ -12841,7 +12758,7 @@ function extractOpenApiCatalog(
           throw new PlatformError(
             502,
             "catalog_openapi_operation_invalid",
-            "TikHub OpenAPI 的 v1 operation 输入元数据无效，本次同步已停止。",
+            "UpstreamProvider OpenAPI 的 v1 operation 输入元数据无效，本次同步已停止。",
           );
         }
         const path = normalizeCatalogPath(rawPath);
@@ -12850,25 +12767,25 @@ function extractOpenApiCatalog(
         const operationId = normalizeCatalogOperationId(
           operation.operationId,
         );
-        const surface = tikhubSurfaceForPath(
+        const surface = providerSurfaceForPath(
           rawPath,
           tags,
         ) as MarketplaceSurface;
         const platform = path.split("/")[2] || "other";
-        const dataType = tikhubDataTypeFor({
+        const dataType = providerDataTypeFor({
           platform,
           sourcePath: rawPath,
           tags,
           operationId,
         }) as CatalogDataType;
         if (
-          !TIKHUB_SURFACES.includes(surface) ||
-          !TIKHUB_DATA_TYPES.includes(dataType)
+          !PROVIDER_SURFACES.includes(surface) ||
+          !PROVIDER_DATA_TYPES.includes(dataType)
         ) {
           throw new PlatformError(
             502,
             "catalog_openapi_taxonomy_invalid",
-            "TikHub OpenAPI 的数据分类无效，本次同步已停止。",
+            "UpstreamProvider OpenAPI 的数据分类无效，本次同步已停止。",
           );
         }
         const pathParameters = Array.isArray(pathItem.parameters)
@@ -12943,7 +12860,7 @@ function extractOpenApiCatalog(
         throw new PlatformError(
           502,
           "catalog_openapi_taxonomy_invalid",
-          "TikHub OpenAPI 的 v1 operation 元数据无效，本次同步已停止。",
+          "UpstreamProvider OpenAPI 的 v1 operation 元数据无效，本次同步已停止。",
         );
       }
     }
@@ -12952,7 +12869,7 @@ function extractOpenApiCatalog(
         throw new PlatformError(
           502,
           "catalog_openapi_path_collision",
-          "TikHub OpenAPI 出现归一化后重复的 v1 路径，本次同步已停止。",
+          "UpstreamProvider OpenAPI 出现归一化后重复的 v1 路径，本次同步已停止。",
         );
       }
       byPath.set(selected.path, selected);
@@ -12973,7 +12890,7 @@ function mergeCatalogEntries(
       price != null &&
       (price.httpMethod == null ||
         price.httpMethod === metadata.httpMethod) &&
-      tikHubCredentialAllowsPath(credentialScopes, metadata.path);
+      upstreamProviderCredentialAllowsPath(credentialScopes, metadata.path);
     return {
       ...metadata,
       upstreamPriceUsdMicros: methodMatches
@@ -13008,7 +12925,7 @@ function catalogCoverageBreakdown(
     }
     openApiPriceMapped += 1;
     if (
-      !tikHubCredentialAllowsPath(
+      !upstreamProviderCredentialAllowsPath(
         credentialScopes,
         metadata.path,
       )

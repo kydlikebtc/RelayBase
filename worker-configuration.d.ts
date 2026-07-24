@@ -3,15 +3,15 @@
 declare namespace Cloudflare {
   interface Env {
     DB: D1Database;
-    TIKHUB_API_KEY?: string;
-    TIKHUB_CREDENTIALS_ENCRYPTION_KEY?: string;
-    TIKHUB_BASE_URL?: string;
+    UPSTREAM_API_KEY?: string;
+    UPSTREAM_CREDENTIALS_ENCRYPTION_KEY?: string;
+    UPSTREAM_BASE_URL?: string;
     RESELLER_AUTHORIZED?: string;
     PAYMENT_PROVIDER?: string;
     NOWPAYMENTS_API_KEY?: string;
     NOWPAYMENTS_IPN_SECRET?: string;
     CRYPTO_PAYMENTS_ENABLED?: string;
-    TIKHUB_CRYPTO_PAYMENT_CLEARED?: string;
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED?: string;
     LEGAL_REVIEW_CONFIRMED?: string;
     PUBLIC_APP_URL?: string;
     GOOGLE_CLIENT_ID?: string;

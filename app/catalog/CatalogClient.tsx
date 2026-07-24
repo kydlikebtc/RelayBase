@@ -542,10 +542,10 @@ function formatPrice(micros: number | null): string {
 }
 
 function formatSourceDate(value: string | null): string {
-  if (!value) return "等待参考快照";
+  if (!value) return "等待运行时同步";
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "快照日期不可用";
+  if (Number.isNaN(date.getTime())) return "更新时间不可用";
   return new Intl.DateTimeFormat("zh-CN", {
     year: "numeric",
     month: "2-digit",
@@ -558,7 +558,7 @@ function formatSourceDate(value: string | null): string {
 }
 
 function formatMarketplaceTotal(total: number | undefined): string {
-  if (total === undefined) return "1,025+";
+  if (total === undefined) return "—";
   return total.toLocaleString("zh-CN");
 }
 
@@ -782,7 +782,7 @@ function DetailPanel({
               <dd>{endpoint.dataType}</dd>
             </div>
             <div>
-              <dt>OpenAPI operationId</dt>
+              <dt>RelayBase 能力 ID</dt>
               <dd>
                 <code>
                   {state.data.endpoint.operationId || "未声明"}
@@ -790,7 +790,7 @@ function DetailPanel({
               </dd>
             </div>
             <div>
-              <dt>TikHub 官方分类</dt>
+              <dt>能力分类</dt>
               <dd>
                 {state.data.endpoint.tags.length > 0 ? (
                   <span className="marketplace-detail-tags">
@@ -855,7 +855,7 @@ function DetailPanel({
             </h3>
             <SchemaDocument
               value={state.data.endpoint.response}
-              emptyLabel="响应状态或 Schema 标识尚未在 OpenAPI 中声明。"
+              emptyLabel="当前 RelayBase 契约未公开响应 Schema。"
             />
           </section>
 
@@ -1197,9 +1197,9 @@ export default function CatalogClient() {
             <span>审核开放的数据 API。</span>
           </h1>
           <p>
-            搜索 TikHub 参考能力，按平台、TikHub 官方分类、RelayBase
-            归一化类型和调用表面精确筛选。只有标记为可调用的服务才会进入
-            RelayBase 代理并按成功请求计费。
+            搜索当前部署已同步的 RelayBase 服务，按平台、能力分类、归一化类型和
+            调用表面精确筛选。只有完成安全审核与核价的服务才会进入代理并按成功
+            请求计费。
           </p>
           <div className="marketplace-masthead-actions">
             <Link className="button button-blue button-large" href="/console">
@@ -1212,20 +1212,20 @@ export default function CatalogClient() {
           </div>
         </div>
 
-        <aside className="marketplace-source-card" aria-label="API 市场数据源">
-          <span>MARKETPLACE SOURCE</span>
-          <strong>{sourceSummary?.provider ?? "TikHub OpenAPI"}</strong>
+        <aside className="marketplace-source-card" aria-label="API 市场目录状态">
+          <span>RUNTIME CATALOG</span>
+          <strong>RelayBase Curated Catalog</strong>
           <dl>
             <div>
-              <dt>OpenAPI</dt>
-              <dd>{sourceSummary?.version ?? "读取中"}</dd>
+              <dt>来源</dt>
+              <dd>管理后台运行时同步</dd>
             </div>
             <div>
-              <dt>快照</dt>
-              <dd>{sourceSummary?.snapshot ?? "读取中"}</dd>
+              <dt>公开范围</dt>
+              <dd>审核后的 RelayBase 契约</dd>
             </div>
             <div>
-              <dt>快照生成</dt>
+              <dt>最近更新</dt>
               <dd>{sourceSummary?.generatedAt ?? "读取中"}</dd>
             </div>
           </dl>
@@ -1236,7 +1236,7 @@ export default function CatalogClient() {
         <article>
           <span>API 服务</span>
           <strong>{formatMarketplaceTotal(marketplace?.stats.total)}</strong>
-          <small>参考快照总量</small>
+          <small>当前运行时目录</small>
         </article>
         <article>
           <span>数据平台</span>
@@ -1244,7 +1244,7 @@ export default function CatalogClient() {
           <small>统一接入</small>
         </article>
         <article>
-          <span>TikHub 官方分类</span>
+          <span>能力分类</span>
           <strong>{marketplace?.stats.categories ?? "—"}</strong>
           <small>完整同步标签</small>
         </article>
@@ -1273,7 +1273,7 @@ export default function CatalogClient() {
                 type="search"
                 value={searchInput}
                 onChange={(event) => setSearchInput(event.target.value)}
-                placeholder="搜索平台、官方分类、服务名称或 /v1/ 路径"
+                placeholder="搜索平台、能力分类、服务名称或 /v1/ 路径"
                 maxLength={160}
                 autoComplete="off"
               />
@@ -1299,14 +1299,14 @@ export default function CatalogClient() {
               </select>
             </label>
             <label>
-              <span>TikHub 官方分类</span>
+              <span>能力分类</span>
               <select
                 value={filters.tag}
                 onChange={(event) =>
                   updateFilter("tag", event.target.value)
                 }
               >
-                <option value="">全部官方分类</option>
+                <option value="">全部能力分类</option>
                 {facets?.tags.map((option) => (
                   <option value={option.value} key={option.value}>
                     {option.label} · {option.count}
@@ -1564,8 +1564,8 @@ export default function CatalogClient() {
                   </h3>
                   <p>
                     {filtersActive
-                      ? "尝试减少筛选条件，或换一个平台、官方分类、归一化类型和关键词。"
-                      : "完成 OpenAPI 同步和安全核验后，服务会在这里出现。"}
+                      ? "尝试减少筛选条件，或换一个平台、能力分类、归一化类型和关键词。"
+                      : "完成运行时目录同步和安全核验后，服务会在这里出现。"}
                   </p>
                   {filtersActive ? (
                     <button type="button" onClick={clearFilters}>

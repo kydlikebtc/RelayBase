@@ -10,14 +10,14 @@ export const metadata: Metadata = {
 
 function codeExamples(origin: string) {
   const curl = `curl --request GET \\
-  '${origin}/v1/tiktok/web/fetch_user_profile?uniqueId=mrbeast' \\
+  '${origin}/v1/example/profile/read?profile_id=demo-123' \\
   --header 'Authorization: Bearer rb_live_YOUR_KEY' \\
   --header 'Idempotency-Key: profile-sync-20260724-001' \\
   --header 'X-RelayBase-Max-Cost-Usd-Micros: 2000' \\
   --header 'Accept: application/json'`;
 
   const javascript = `const response = await fetch(
-  "${origin}/v1/tiktok/web/fetch_user_profile?uniqueId=mrbeast",
+  "${origin}/v1/example/profile/read?profile_id=demo-123",
   {
     headers: {
       Authorization: "Bearer rb_live_YOUR_KEY",
@@ -38,8 +38,8 @@ const payload = await response.json();`;
   const python = `import requests
 
 response = requests.get(
-    "${origin}/v1/tiktok/web/fetch_user_profile",
-    params={"uniqueId": "mrbeast"},
+    "${origin}/v1/example/profile/read",
+    params={"profile_id": "demo-123"},
     headers={
         "Authorization": "Bearer rb_live_YOUR_KEY",
         "Idempotency-Key": "profile-sync-20260724-001",
@@ -78,8 +78,8 @@ const errors = [
   ["502", "upstream_unavailable", "上游网络不可用；请求已退款"],
   [
     "503",
-    "tikhub_crypto_payment_not_cleared",
-    "TikHub 对稳定币付款模式的书面澄清尚未归档；代理与充值关闭",
+    "commercial_clearance_required",
+    "上游商业授权或付款模式书面确认尚未归档；代理与充值关闭",
   ],
   ["503", "upstream_not_authorized", "当前部署仍处于安全沙盒"],
 ] as const;
@@ -158,7 +158,7 @@ export default async function DocsPage() {
             </p>
             <div className="endpoint-box">
               <span>GET</span>
-              <code>/v1/tiktok/web/fetch_user_profile</code>
+              <code>/v1/example/profile/read</code>
             </div>
             <ul className="docs-checklist">
               <li>
@@ -187,27 +187,19 @@ export default async function DocsPage() {
             <h2>区分能力发现与真实可调用。</h2>
             <p>
               <Link href="/catalog">API 市场页面</Link>
-              使用 TikHub OpenAPI V5.3.2 静态参考快照，展示 1,025 个 operations：
-              GET 839、POST 186，覆盖 27 个平台、53 个 TikHub 官方 tags 和 15 个
-              RelayBase 归一化类型。参考市场用于搜索与能力发现，不代表当前部署已经
-              取得调用权限或完成核价。来源可追溯到{" "}
-              <a
-                href="https://docs.tikhub.io/4579905m0"
-                target="_blank"
-                rel="noreferrer"
-              >
-                TikHub 官方文档入口
-              </a>
-              。
+              只读取当前部署在管理后台完成同步的运行时目录。仓库不内置第三方
+              OpenAPI 快照、原始说明、来源哈希或官方标签清单；尚未同步时市场返回
+              空结果。公开文案和分类由 RelayBase 生成，不代表某个 Provider 的
+              官方文档。
             </p>
             <CodePanel title="Marketplace discovery" language="HTTP">
-              {`GET ${origin}/api/marketplace?q=user&platform=tiktok&tag=TikTok-Web-API&dataType=profile_creator&method=GET&surface=web&availability=available&limit=20&offset=0
-GET ${origin}/api/marketplace/detail?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_profile&method=GET`}
+              {`GET ${origin}/api/marketplace?q=profile&platform=example&tag=profile_creator&dataType=profile_creator&method=GET&surface=web&availability=available&limit=20&offset=0
+GET ${origin}/api/marketplace/detail?path=%2Fv1%2Fexample%2Fprofile%2Fread&method=GET`}
             </CodePanel>
             <p>
               市场列表支持 <code>q</code>、<code>platform</code>、
-              TikHub 官方分类 <code>tag</code>、RelayBase 归一化分类{" "}
-              <code>dataType</code>、<code>method</code>、
+              RelayBase 能力分类 <code>tag</code>、归一化分类 <code>dataType</code>、
+              <code>method</code>、
               <code>surface</code>、<code>availability</code>、
               <code>limit</code> 和 <code>offset</code>。默认每页 20 条；
               响应包含 <code>source</code>、全局 <code>stats</code> 与{" "}
@@ -218,44 +210,31 @@ GET ${origin}/api/marketplace/detail?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_prof
             <CodePanel title="Marketplace detail response" language="JSON">
               {`{
   "source": {
-    "provider": "TikHub",
-    "openApiVersion": "V5.3.2",
-    "snapshotHash": "f941ffbce28988ca158b2fb8febf2a206004eaba1d2d0e1a7eba9678f9461a01",
-    "generatedAt": "2026-07-23",
-    "operationCount": 1025
+    "provider": "Configured upstream",
+    "openApiVersion": null,
+    "snapshotHash": null,
+    "generatedAt": "2026-07-24T09:30:00.000Z",
+    "operationCount": 1
   },
   "endpoint": {
-    "path": "/v1/tiktok/web/fetch_user_profile",
+    "path": "/v1/example/profile/read",
     "method": "GET",
     "availability": "pending",
     "dataType": "profile_creator",
-    "tags": ["TikTok-Web-API"],
+    "tags": ["profile_creator", "web"],
     "surface": "web",
-    "operationId": "fetch_user_profile_api_v1_tiktok_web_fetch_user_profile_get",
-    "description": "Get user profile",
+    "operationId": null,
+    "description": "通过 RelayBase 查询 example 的 profile_creator 数据。",
     "parameters": [
       {
-        "name": "uniqueId",
+        "name": "profile_id",
         "in": "query",
-        "required": false,
+        "required": true,
         "schema": { "type": "string" }
       }
     ],
     "requestBody": null,
-    "response": {
-      "statuses": [
-        {
-          "status": "200",
-          "description": "Successful Response",
-          "schemaRef": "#/components/schemas/ResponseModel"
-        },
-        {
-          "status": "422",
-          "description": "Validation Error",
-          "schemaRef": "#/components/schemas/HTTPValidationError"
-        }
-      ]
-    }
+    "response": null
   },
   "examples": {
     "curl": "curl ...",
@@ -266,11 +245,10 @@ GET ${origin}/api/marketplace/detail?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_prof
             </CodePanel>
             <p>
               详情查询必须同时提供 URL 编码的精确 <code>path</code> 和{" "}
-              <code>method=GET|POST</code>。它返回同代来源、官方 tags、
-              <code>operationId</code>、描述、参数、请求体、响应状态与上游 Schema
-              标识，以及按该端点方法生成的 cURL、JavaScript、Python 示例。
-              <code>schemaRef</code> 只用于标识 TikHub OpenAPI 来源，不是在该响应内
-              可独立解析的完整 components。
+              <code>method=GET|POST</code>。它返回 RelayBase 分类、自写说明、经过
+              安全过滤的参数结构，以及按该端点方法生成的 cURL、JavaScript、
+              Python 示例；不会返回 Provider 名称、来源地址、原始描述、原始
+              operationId、响应 Schema 或快照哈希。
               <code>available</code> 才表示当前可代理；<code>pending</code> 是待审核
               或部署尚未就绪，<code>restricted</code> 永不开放。
             </p>
@@ -279,17 +257,15 @@ GET ${origin}/api/marketplace/detail?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_prof
               <div>
                 <b>参考展示不等于可调用</b>
                 <p>
-                  只有真实 TikHub Key、完整同步与覆盖证明、安全审核、核价上架和近期
-                  对账健康全部满足，并且实时 OpenAPI 的哈希与操作数和本页参考快照
-                  完全一致、全部 (method, path) 身份集合无缺失或重复，且每条实时
-                  dataType、tags、surface 与 operationId 都和参考记录一致时，端点
-                  才会成为 available。价格和速率在未开放时可以为 null。
+                  只有真实上游凭据、完整同步与覆盖证明、安全审核、核价上架、商业
+                  授权和近期对账健康全部满足时，端点才会成为 available。任何目录
+                  代次、计数或哈希不一致都会安全降级为 pending。
                 </p>
               </div>
             </div>
             <CodePanel title="Callable endpoint catalog" language="HTTP">
               {`GET ${origin}/api/catalog
-GET ${origin}/api/catalog?platform=tiktok&dataType=profile_creator&tag=TikTok-Web-API&surface=web&limit=100`}
+GET ${origin}/api/catalog?platform=example&dataType=profile_creator&tag=profile_creator&surface=web&limit=100`}
             </CodePanel>
             <p>
               <code>/api/catalog</code> 是端点级已开放清单。客户还必须确认响应中的{" "}
@@ -301,7 +277,7 @@ GET ${origin}/api/catalog?platform=tiktok&dataType=profile_creator&tag=TikTok-We
               分类构建调用与报价页面。
               <code>priceUsdMicros</code> 是每次上游 HTTP 200 成功请求的客户价格；
               未出现在该目录中的路径不能调用。真实代理与充值还要求服务端已归档
-              TikHub 对稳定币付款模式的书面澄清；缺失时两者都会安全关闭。
+              上游商业授权与付款模式书面确认；缺失时两者都会安全关闭。
               <code>capabilities.taxonomyReady</code> 还必须为 true；畸形 v1
               operation、归一化路径冲突或疑似密钥/Token 的分类标签都会让整次同步
               失败并保留上一成功目录。

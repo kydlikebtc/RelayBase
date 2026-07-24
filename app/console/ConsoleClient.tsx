@@ -52,7 +52,7 @@ type DashboardData = {
     configurationValid: boolean;
     legalReviewConfirmed: boolean;
     resellerAuthorized: boolean;
-    tikhubCryptoPaymentCleared: boolean;
+    commercialClearanceConfirmed: boolean;
     proxyEnabled: boolean;
     paymentsEnabled: boolean;
     adminConfigured: boolean;
@@ -262,7 +262,7 @@ function isDashboardData(value: unknown): value is DashboardData {
     typeof capabilities.configurationValid === "boolean" &&
     typeof capabilities.legalReviewConfirmed === "boolean" &&
     typeof capabilities.resellerAuthorized === "boolean" &&
-    typeof capabilities.tikhubCryptoPaymentCleared === "boolean" &&
+    typeof capabilities.commercialClearanceConfirmed === "boolean" &&
     typeof capabilities.proxyEnabled === "boolean" &&
     typeof capabilities.paymentsEnabled === "boolean" &&
     typeof capabilities.adminConfigured === "boolean" &&
@@ -679,8 +679,8 @@ export function ConsoleClient({
   const recentCalls = dashboard?.calls.slice(0, 8) ?? [];
   const recentPayments = dashboard?.payments.slice(0, 6) ?? [];
   const paymentsEnabled = dashboard?.capabilities.paymentsEnabled ?? false;
-  const tikhubCryptoPaymentCleared =
-    dashboard?.capabilities.tikhubCryptoPaymentCleared ?? false;
+  const commercialClearanceConfirmed =
+    dashboard?.capabilities.commercialClearanceConfirmed ?? false;
 
   return (
     <div className="console-shell">
@@ -980,8 +980,8 @@ export function ConsoleClient({
           </form>
           <p className="topup-warning">
             {user && !loading && !paymentsEnabled
-              ? !tikhubCryptoPaymentCleared
-                ? "真实充值保持关闭：尚未归档 TikHub 对稳定币仅作为 API 付款方式的书面澄清。"
+              ? !commercialClearanceConfirmed
+                ? "真实充值保持关闭：尚未归档 上游 对稳定币仅作为 API 付款方式的书面澄清。"
                 : "当前为安全沙盒，真实充值将在数据代理、商户与合规条件全部就绪后开放。"
               : "只向充值单指定的网络和地址转账。链上确认前，余额不会改变。"}
           </p>
