@@ -5503,6 +5503,8 @@ test("normalizes a custom API prefix and anonymously publishes an optional-auth 
     upstreamRequests.push({
       path: url.pathname,
       authorization: new Headers(init?.headers).get("authorization"),
+      userAgent: new Headers(init?.headers).get("user-agent"),
+      redirect: init?.redirect,
     });
     if (url.pathname === "/gateway/api/v1/control/catalog") {
       return Response.json({
@@ -5550,10 +5552,14 @@ test("normalizes a custom API prefix and anonymously publishes an optional-auth 
     {
       path: "/gateway/api/v1/control/catalog",
       authorization: null,
+      userAgent: "RelayBase-API/1.0",
+      redirect: "manual",
     },
     {
       path: "/gateway/openapi.json",
       authorization: null,
+      userAgent: "RelayBase-API/1.0",
+      redirect: "manual",
     },
   ]);
 

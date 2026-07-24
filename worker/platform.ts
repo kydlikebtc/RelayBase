@@ -9503,7 +9503,10 @@ async function handleCatalogSync(
     const credentialId = credential?.id ?? null;
     const credentialFingerprint = credential?.fingerprint ?? null;
     const credentialScopes = credential?.scopes ?? null;
-    const catalogHeaders = new Headers({ accept: "application/json" });
+    const catalogHeaders = new Headers({
+      accept: "application/json",
+      "user-agent": "RelayBase-API/1.0",
+    });
     if (credential && sourceConfig.catalogAuthMode !== "none") {
       catalogHeaders.set(
         "authorization",
@@ -9518,7 +9521,7 @@ async function handleCatalogSync(
         sourceConfig.catalogPath,
       ), {
         headers: catalogHeaders,
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(
           clampInteger(
             env.UPSTREAM_TIMEOUT_MS,
@@ -9528,7 +9531,13 @@ async function handleCatalogSync(
           ),
         ),
       });
-    } catch {
+    } catch (error) {
+      logSourceFetchFailure(
+        "catalog",
+        error,
+        sourceConfig.origin,
+        requestId,
+      );
       throw new PlatformError(
         502,
         "catalog_sync_failed",
@@ -9556,7 +9565,7 @@ async function handleCatalogSync(
         sourceConfig.openApiPath,
       ), {
         headers: catalogHeaders,
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(
           clampInteger(
             env.UPSTREAM_TIMEOUT_MS,
@@ -9566,7 +9575,13 @@ async function handleCatalogSync(
           ),
         ),
       });
-    } catch {
+    } catch (error) {
+      logSourceFetchFailure(
+        "openapi",
+        error,
+        sourceConfig.origin,
+        requestId,
+      );
       throw new PlatformError(
         502,
         "catalog_schema_sync_failed",
@@ -12848,6 +12863,33 @@ async function readResponseText(
     offset += chunk.byteLength;
   }
   return new TextDecoder().decode(combined);
+}
+
+function logSourceFetchFailure(
+  stage: "catalog" | "openapi",
+  error: unknown,
+  configuredOrigin: string,
+  requestId: string,
+): void {
+  const name =
+    error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
+      ? error.name
+      : "UnknownError";
+  const rawMessage =
+    error instanceof Error && error.message.trim()
+      ? error.message.trim()
+      : "No runtime error message";
+  const message = rawMessage
+    .split(configuredOrigin)
+    .join("[configured-origin]")
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "[redacted-url]")
+    .slice(0, 240);
+  console.error("RelayBase source fetch failed", {
+    requestId,
+    stage,
+    name,
+    message,
+  });
 }
 
 async function providerNeutralUpstreamErrorMessage(

@@ -4,6 +4,19 @@
 
 ## Unreleased
 
+## [0.4.0-preview.4] - 2026-07-24
+
+### Fixed
+
+- 目录与 OpenAPI 同步请求使用中性 User-Agent，并将来源抓取网络错误以去除 URL 的
+  诊断写入私有 Worker 日志，便于区分平台出站限制与来源服务失败。
+- 来源抓取改为手动拒绝 HTTP 重定向，避免运行时在 `redirect=error` 下把重定向
+  直接折叠为无诊断的网络异常，同时仍禁止凭据跟随到其他 Origin。
+
+### Changed
+
+- 版本升至 `0.4.0-preview.4`。
+
 ## [0.4.0-preview.3] - 2026-07-24
 
 ### Fixed
