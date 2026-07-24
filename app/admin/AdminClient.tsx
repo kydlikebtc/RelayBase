@@ -45,12 +45,14 @@ type OverviewResponse = {
   upstream: {
     configured: boolean;
     keyFingerprint: string | null;
-    baseUrl: string | null;
     source: "managed" | "environment" | "none";
     managedEnabled: boolean;
     managedCredentialCount: number;
     stateVersion: number;
     encryptionConfigured: boolean;
+    sourceConfigured: boolean;
+    sourceEnabled: boolean;
+    sourceVersion: number | null;
   };
   generatedAt: string;
 };
@@ -539,22 +541,6 @@ function isSafePath(value: unknown): value is string {
   );
 }
 
-function isSafeHttpUrl(value: unknown): value is string {
-  if (!isNonEmptyString(value, 2_000)) return false;
-  try {
-    const url = new URL(value);
-    return (
-      (url.protocol === "https:" ||
-        (url.protocol === "http:" &&
-          (url.hostname === "localhost" || url.hostname === "127.0.0.1"))) &&
-      !url.username &&
-      !url.password
-    );
-  } catch {
-    return false;
-  }
-}
-
 function isUpstreamSourceOrigin(value: unknown): value is string {
   if (!isNonEmptyString(value, 2_000)) return false;
   try {
@@ -730,7 +716,14 @@ function isOverviewResponse(value: unknown): value is OverviewResponse {
     upstream.managedCredentialCount <= 100 &&
     isSafeNonNegativeInteger(upstream.stateVersion) &&
     typeof upstream.encryptionConfigured === "boolean" &&
-    (upstream.baseUrl === null || isSafeHttpUrl(upstream.baseUrl)) &&
+    typeof upstream.sourceConfigured === "boolean" &&
+    typeof upstream.sourceEnabled === "boolean" &&
+    (!upstream.sourceEnabled || upstream.sourceConfigured) &&
+    (upstream.sourceVersion === null ||
+      isSafeNonNegativeInteger(upstream.sourceVersion)) &&
+    (upstream.sourceConfigured
+      ? upstream.sourceVersion !== null
+      : upstream.sourceVersion === null) &&
     isDateString(value.generatedAt) &&
     value.recentCalls.length <= 100 &&
     value.recentCalls.every((call) => {
@@ -4037,7 +4030,13 @@ export function AdminClient() {
                       <div>
                         <strong>上游连接</strong>
                         <p>
-                          {overviewData.upstream.baseUrl ?? "上游地址尚未配置"}
+                          {overviewData.upstream.sourceConfigured
+                            ? `运行时数据源 v${overviewData.upstream.sourceVersion ?? 0} · ${
+                                overviewData.upstream.sourceEnabled
+                                  ? "已启用"
+                                  : "已停用"
+                              }`
+                            : "运行时数据源尚未配置"}
                         </p>
                       </div>
                     </div>
