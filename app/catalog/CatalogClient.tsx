@@ -611,6 +611,97 @@ function facetLabel<T extends string>(
   return options.find((option) => option.value === value)?.label ?? value;
 }
 
+const dataTypePresentation: Record<
+  string,
+  { code: string; description: string; tone: string }
+> = {
+  account: {
+    code: "AC",
+    description: "账户状态、身份与授权信息",
+    tone: "tan",
+  },
+  analytics_trends: {
+    code: "TR",
+    description: "分析指标、表现洞察与趋势数据",
+    tone: "brown",
+  },
+  comments: {
+    code: "CM",
+    description: "评论、回复与互动讨论",
+    tone: "green",
+  },
+  commerce_marketing: {
+    code: "MK",
+    description: "商品、电商、广告与营销数据",
+    tone: "charcoal",
+  },
+  content: {
+    code: "CT",
+    description: "视频、图文、帖子与内容详情",
+    tone: "tan",
+  },
+  email: {
+    code: "EM",
+    description: "邮件、收件箱与临时邮箱数据",
+    tone: "brown",
+  },
+  live: {
+    code: "LV",
+    description: "直播间、场次、礼物与实时互动",
+    tone: "green",
+  },
+  media_download: {
+    code: "MD",
+    description: "图片、音频、视频与媒体地址",
+    tone: "charcoal",
+  },
+  profile_creator: {
+    code: "PR",
+    description: "用户、作者、频道与创作者资料",
+    tone: "tan",
+  },
+  search_discovery: {
+    code: "SR",
+    description: "搜索、推荐、热榜与内容发现",
+    tone: "brown",
+  },
+  social_graph: {
+    code: "SG",
+    description: "关注、粉丝、好友与社交关系",
+    tone: "green",
+  },
+  system: {
+    code: "SY",
+    description: "健康检查与系统运行信息",
+    tone: "charcoal",
+  },
+  taxonomy: {
+    code: "TX",
+    description: "话题、标签、音乐与分类实体",
+    tone: "tan",
+  },
+  utility: {
+    code: "UT",
+    description: "解析、转换与辅助工具",
+    tone: "brown",
+  },
+  other: {
+    code: "OT",
+    description: "未归入标准分类的扩展数据",
+    tone: "charcoal",
+  },
+};
+
+function dataTypeMeta(value: string) {
+  return (
+    dataTypePresentation[value] ?? {
+      code: value.slice(0, 2).toUpperCase() || "DT",
+      description: "RelayBase 归一化市场数据类型",
+      tone: "tan",
+    }
+  );
+}
+
 async function writeToClipboard(value: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(value);
@@ -1176,6 +1267,20 @@ export default function CatalogClient() {
   const totalPages = marketplace
     ? Math.max(1, Math.ceil(marketplace.total / PAGE_SIZE))
     : 1;
+  const catalogTypeTotal =
+    facets?.dataTypes.reduce((sum, option) => sum + option.count, 0) ?? 0;
+  const endpointGroups = marketplace
+    ? facets?.dataTypes
+        .map((option) => ({
+          value: option.value,
+          label: option.label,
+          total: option.count,
+          endpoints: marketplace.endpoints.filter(
+            (endpoint) => endpoint.dataType === option.value,
+          ),
+        }))
+        .filter((group) => group.endpoints.length > 0) ?? []
+    : [];
 
   const catalogSummary = marketplace
     ? {
@@ -1240,6 +1345,99 @@ export default function CatalogClient() {
     copyTimer.current = window.setTimeout(
       () => setCopyFeedback(null),
       2_600,
+    );
+  }
+
+  function renderEndpointCard(endpoint: MarketplaceEndpoint) {
+    const selected = selectedEndpoint?.id === endpoint.id;
+    return (
+      <article
+        className={`marketplace-card ${selected ? "is-selected" : ""}`}
+      >
+        <header>
+          <div>
+            <span
+              className={`marketplace-method ${
+                endpoint.method
+                  ? `is-${endpoint.method.toLowerCase()}`
+                  : "is-pending"
+              }`}
+            >
+              {endpoint.method ?? "待确认"}
+            </span>
+            <span
+              className={`marketplace-availability is-${endpoint.availability}`}
+            >
+              {availabilityLabel(endpoint.availability)}
+            </span>
+            {endpoint.documentationStatus === "pending" ? (
+              <span className="marketplace-availability is-pending">
+                规范待补齐
+              </span>
+            ) : null}
+          </div>
+          <span className="marketplace-surface">
+            {surfaceLabel(endpoint.surface)}
+          </span>
+        </header>
+        <div className="marketplace-card-title">
+          <span>
+            {facets
+              ? facetLabel(facets.platforms, endpoint.platform)
+              : endpoint.platform}
+          </span>
+          <h3>
+            {endpoint.summary?.trim() ||
+              endpoint.path.split("/").filter(Boolean).at(-1)}
+          </h3>
+          <code>{endpoint.path}</code>
+        </div>
+        <p>
+          {endpoint.summary ||
+            `${endpoint.platform} ${
+              facets
+                ? facetLabel(facets.dataTypes, endpoint.dataType)
+                : endpoint.dataType
+            } 数据服务`}
+        </p>
+        <dl>
+          <div>
+            <dt>每次请求价格</dt>
+            <dd className="is-price">
+              {formatPrice(endpoint.pricing.amountUsdMicros)}
+              <small>
+                {endpoint.pricing.verified ? " · 已核价" : " · 待核价"}
+              </small>
+            </dd>
+          </div>
+          <div>
+            <dt>速率上限</dt>
+            <dd>
+              {endpoint.rateLimitRps
+                ? `${endpoint.rateLimitRps.toLocaleString()} RPS`
+                : "按策略"}
+            </dd>
+          </div>
+          <div>
+            <dt>数据类型</dt>
+            <dd>
+              {facets
+                ? facetLabel(facets.dataTypes, endpoint.dataType)
+                : endpoint.dataType}
+            </dd>
+          </div>
+        </dl>
+        <button
+          className="marketplace-card-open"
+          type="button"
+          onClick={(event) => openDetail(endpoint, event.currentTarget)}
+          aria-expanded={selected}
+          aria-controls="marketplace-detail-panel"
+        >
+          查看字段、参数与调用示例
+          <span aria-hidden="true">→</span>
+        </button>
+      </article>
     );
   }
 
@@ -1463,8 +1661,13 @@ export default function CatalogClient() {
           <div>
             <span className="catalog-index">01</span>
             <div>
-              <p className="section-kicker">DISCOVER / SERVER-SIDE RESULTS</p>
-              <h2 id="marketplace-results-title">API 服务</h2>
+              <p className="section-kicker">DISCOVER / MARKET DATA TYPES</p>
+              <h2 id="marketplace-results-title">
+                API 服务，按数据类型整理
+              </h2>
+              <p className="marketplace-results-intro">
+                先选择数据类型，再比较平台、调用方式、价格和可用状态。
+              </p>
             </div>
           </div>
           <p aria-live="polite">
@@ -1478,6 +1681,67 @@ export default function CatalogClient() {
             )}
           </p>
         </header>
+
+        {facets && facets.dataTypes.length > 0 ? (
+          <section
+            className="marketplace-type-overview"
+            aria-labelledby="marketplace-type-overview-title"
+          >
+            <header>
+              <div>
+                <span>DATA TYPE INDEX</span>
+                <h3 id="marketplace-type-overview-title">市场数据类型</h3>
+              </div>
+              <p>点击类型即可筛选；数量来自当前运行时完整目录。</p>
+            </header>
+            <div className="marketplace-type-grid">
+              <button
+                className={`marketplace-type-card is-all ${
+                  filters.dataType === "" ? "is-active" : ""
+                }`}
+                type="button"
+                onClick={() => updateFilter("dataType", "")}
+                aria-pressed={filters.dataType === ""}
+              >
+                <span className="marketplace-type-code">ALL</span>
+                <span className="marketplace-type-copy">
+                  <strong>全部类型</strong>
+                  <small>查看完整市场目录</small>
+                </span>
+                <b>{catalogTypeTotal.toLocaleString()}</b>
+              </button>
+              {facets.dataTypes.map((option) => {
+                const meta = dataTypeMeta(option.value);
+                const active = filters.dataType === option.value;
+                return (
+                  <button
+                    className={`marketplace-type-card is-${meta.tone} ${
+                      active ? "is-active" : ""
+                    }`}
+                    type="button"
+                    onClick={() =>
+                      updateFilter(
+                        "dataType",
+                        active ? "" : option.value,
+                      )
+                    }
+                    aria-pressed={active}
+                    key={option.value}
+                  >
+                    <span className="marketplace-type-code">
+                      {meta.code}
+                    </span>
+                    <span className="marketplace-type-copy">
+                      <strong>{option.label}</strong>
+                      <small>{meta.description}</small>
+                    </span>
+                    <b>{option.count.toLocaleString()}</b>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        ) : null}
 
         {state.status === "error" ? (
           <div className="marketplace-error" role="alert">
@@ -1507,120 +1771,59 @@ export default function CatalogClient() {
             {state.status === "loading" ? <LoadingCards /> : null}
 
             {marketplace && marketplace.endpoints.length > 0 ? (
-              <ul className="marketplace-grid">
-                {marketplace.endpoints.map((endpoint) => {
-                  const selected = selectedEndpoint?.id === endpoint.id;
+              <div className="marketplace-group-list">
+                {endpointGroups.map((group) => {
+                  const meta = dataTypeMeta(group.value);
                   return (
-                    <li key={endpoint.id}>
-                      <article
-                        className={`marketplace-card ${
-                          selected ? "is-selected" : ""
-                        }`}
-                      >
-                        <header>
-                          <div>
-                            <span
-                              className={`marketplace-method ${
-                                endpoint.method
-                                  ? `is-${endpoint.method.toLowerCase()}`
-                                  : "is-pending"
-                              }`}
-                            >
-                              {endpoint.method ?? "待确认"}
-                            </span>
-                            <span
-                              className={`marketplace-availability is-${endpoint.availability}`}
-                            >
-                              {availabilityLabel(endpoint.availability)}
-                            </span>
-                            {endpoint.documentationStatus === "pending" ? (
-                              <span className="marketplace-availability is-pending">
-                                规范待补齐
-                              </span>
-                            ) : null}
-                          </div>
-                          <span className="marketplace-surface">
-                            {surfaceLabel(endpoint.surface)}
-                          </span>
-                        </header>
-                        <div className="marketplace-card-title">
-                          <span>
-                            {facets
-                              ? facetLabel(
-                                  facets.platforms,
-                                  endpoint.platform,
-                                )
-                              : endpoint.platform}
-                          </span>
-                          <h3>
-                            {endpoint.summary?.trim() ||
-                              endpoint.path
-                                .split("/")
-                                .filter(Boolean)
-                                .at(-1)}
-                          </h3>
-                          <code>{endpoint.path}</code>
-                        </div>
-                        <p>
-                          {endpoint.summary ||
-                            `${endpoint.platform} ${
-                              facets
-                                ? facetLabel(
-                                    facets.dataTypes,
-                                    endpoint.dataType,
-                                  )
-                                : endpoint.dataType
-                            } 数据服务`}
-                        </p>
-                        <dl>
-                          <div>
-                            <dt>每次请求价格</dt>
-                            <dd>
-                              {formatPrice(endpoint.pricing.amountUsdMicros)}
-                              <small>
-                                {endpoint.pricing.verified
-                                  ? " · 已核价"
-                                  : " · 待核价"}
-                              </small>
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>速率</dt>
-                            <dd>
-                              {endpoint.rateLimitRps
-                                ? `${endpoint.rateLimitRps.toLocaleString()} RPS`
-                                : "按策略"}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>RelayBase 类型</dt>
-                            <dd>
-                              {facets
-                                ? facetLabel(
-                                    facets.dataTypes,
-                                    endpoint.dataType,
-                                  )
-                                : endpoint.dataType}
-                            </dd>
-                          </div>
-                        </dl>
-                        <button
-                          className="marketplace-card-open"
-                          type="button"
-                          onClick={(event) =>
-                            openDetail(endpoint, event.currentTarget)
-                          }
-                          aria-expanded={selected}
-                          aria-controls="marketplace-detail-panel"
+                    <section
+                      className="marketplace-data-group"
+                      aria-labelledby={`marketplace-group-${group.value}`}
+                      key={group.value}
+                    >
+                      <header className="marketplace-data-group-head">
+                        <span
+                          className={`marketplace-data-group-code is-${meta.tone}`}
+                          aria-hidden="true"
                         >
-                          查看接口详情
-                          <span aria-hidden="true">→</span>
-                        </button>
-                      </article>
-                    </li>
+                          {meta.code}
+                        </span>
+                        <div>
+                          <span>MARKET DATA TYPE</span>
+                          <h3 id={`marketplace-group-${group.value}`}>
+                            {group.label}
+                          </h3>
+                          <p>{meta.description}</p>
+                        </div>
+                        <div className="marketplace-data-group-meta">
+                          <strong>
+                            本页 {group.endpoints.length.toLocaleString()} 项
+                          </strong>
+                          <span>
+                            目录共 {group.total.toLocaleString()} 项
+                          </span>
+                          {filters.dataType !== group.value ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                updateFilter("dataType", group.value)
+                              }
+                            >
+                              只看此类型 →
+                            </button>
+                          ) : null}
+                        </div>
+                      </header>
+                      <ul className="marketplace-grid">
+                        {group.endpoints.map((endpoint) => (
+                          <li key={endpoint.id}>
+                            {renderEndpointCard(endpoint)}
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
                   );
                 })}
-              </ul>
+              </div>
             ) : null}
 
             {marketplace && marketplace.endpoints.length === 0 ? (
