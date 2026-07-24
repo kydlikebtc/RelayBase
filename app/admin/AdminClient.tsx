@@ -9,6 +9,8 @@ type AdminTab =
   | "upstream"
   | "catalog"
   | "payments";
+type UpstreamView = "current" | "add" | "contract";
+type CatalogView = "routes" | "add" | "pricing" | "consistency";
 type RemoteState<T> =
   | { status: "idle" | "loading" }
   | { status: "ready"; data: T }
@@ -472,6 +474,8 @@ const readinessMissingLabels: Record<string, string> = {
   commercial_clearance: "上游稳定币付款书面澄清",
   payment_provider: "支付服务商生产配置",
   authentication: "客户登录方式",
+  google_authentication: "Google 登录配置",
+  wallet_authentication: "钱包登录配置",
   database_migrations: "数据库迁移",
   catalog_taxonomy: "实时目录分类完整性",
   enabled_catalog: "已审核并上架的接口目录",
@@ -2363,6 +2367,9 @@ export function AdminClient() {
   const [checkingSecret, setCheckingSecret] = useState(false);
   const [authError, setAuthError] = useState("");
   const [activeTab, setActiveTab] = useState<AdminTab>("overview");
+  const [upstreamView, setUpstreamView] =
+    useState<UpstreamView>("current");
+  const [catalogView, setCatalogView] = useState<CatalogView>("routes");
   const [overview, setOverview] = useState<RemoteState<OverviewResponse>>({
     status: "idle",
   });
@@ -3911,6 +3918,66 @@ export function AdminClient() {
     paymentReviews.status === "ready"
       ? paymentReviews.data.total
       : overviewData?.summary.manualReviewPayments;
+  const catalogData = catalog.status === "ready" ? catalog.data : null;
+  const pendingCatalogCount =
+    pendingCatalog.status === "ready" ? pendingCatalog.data.total : 0;
+  const publishedRouteCount =
+    catalogData?.endpoints.filter((endpoint) => endpoint.enabled).length ?? 0;
+  const reviewRouteCount =
+    catalogData?.endpoints.filter(
+      (endpoint) =>
+        !endpoint.enabled ||
+        !endpoint.reviewedAt ||
+        !endpoint.presentInLatestSync ||
+        !endpoint.priceVerified ||
+        endpoint.safetyClassification !== "safe_data_read" ||
+        endpoint.safetyPolicyVersion !== CATALOG_SAFETY_POLICY_VERSION,
+    ).length ?? 0;
+  const savedCredentialCount =
+    upstreamCredentials.status === "ready"
+      ? upstreamCredentials.data.credentials.length
+      : overviewData?.upstream.managedCredentialCount ?? 0;
+  const adminModules: Array<{
+    id: AdminTab;
+    index: string;
+    label: string;
+    description: string;
+    badge?: number;
+  }> = [
+    {
+      id: "overview",
+      index: "01",
+      label: "运营总览",
+      description: "运行、收入与风险",
+    },
+    {
+      id: "users",
+      index: "02",
+      label: "用户管理",
+      description: "账户、余额与权限",
+    },
+    {
+      id: "upstream",
+      index: "03",
+      label: "上游数据源",
+      description: "连接、凭据与验证",
+      badge: savedCredentialCount,
+    },
+    {
+      id: "catalog",
+      index: "04",
+      label: "路由与定价",
+      description: "同步、审核与发布",
+      badge: publishedRouteCount,
+    },
+    {
+      id: "payments",
+      index: "05",
+      label: "支付复核",
+      description: "订单、异常与结案",
+      badge: openReviewCount,
+    },
+  ];
 
   return (
     <main className="admin-page" id="main-content">
@@ -3930,7 +3997,7 @@ export function AdminClient() {
               {overviewData
                 ? overviewData.readiness.ready
                   ? "生产能力就绪"
-                  : `${overviewData.readiness.mode} / 未完全就绪`
+                  : "生产配置未完全就绪"
                 : "正在读取状态"}
             </span>
             <button className="button button-ghost button-small" onClick={signOut}>
@@ -3940,25 +4007,22 @@ export function AdminClient() {
         </header>
 
         <nav className="admin-tabs" aria-label="管理模块">
-          {(
-            [
-              ["overview", "运营总览"],
-              ["users", "用户管理"],
-              ["upstream", "上游数据源"],
-              ["catalog", "路由与定价"],
-              ["payments", "支付复核"],
-            ] as const
-          ).map(([id, label]) => (
+          {adminModules.map((module) => (
             <button
-              key={id}
-              className={activeTab === id ? "is-active" : ""}
-              aria-current={activeTab === id ? "page" : undefined}
-              onClick={() => setActiveTab(id)}
+              key={module.id}
+              className={activeTab === module.id ? "is-active" : ""}
+              aria-current={activeTab === module.id ? "page" : undefined}
+              onClick={() => setActiveTab(module.id)}
             >
-              {label}
-              {id === "payments" &&
-              openReviewCount ? (
-                <span>{openReviewCount}</span>
+              <span className="admin-tab-index">{module.index}</span>
+              <span className="admin-tab-copy">
+                <strong>{module.label}</strong>
+                <small>{module.description}</small>
+              </span>
+              {module.badge ? (
+                <span className="admin-tab-badge">
+                  {module.badge.toLocaleString()}
+                </span>
               ) : null}
             </button>
           ))}
@@ -4000,8 +4064,7 @@ export function AdminClient() {
                       <div>
                         <strong>生产能力尚未完全就绪</strong>
                         <p>
-                          当前模式：{overviewData.readiness.mode}。在缺失项补齐前，
-                          客户调用或支付可能保持关闭。
+                          在缺失项补齐前，客户调用或支付能力会按安全策略保持关闭。
                         </p>
                       </div>
                       <ul>
@@ -4356,6 +4419,10 @@ export function AdminClient() {
               <div>
                 <p className="section-kicker">UPSTREAM / DATA SOURCE</p>
                 <h2 id="upstream-title">上游数据源</h2>
+                <p>
+                  维护数据市场的真实供给连接。配置、凭据、在线验证和目录同步按顺序推进，
+                  任一步未就绪都不会暴露给客户调用。
+                </p>
               </div>
               <button
                 className="button button-ghost button-small"
@@ -4369,11 +4436,86 @@ export function AdminClient() {
                 刷新状态
               </button>
             </div>
-            <StatePanel
-              state={upstreamConfig}
-              label="数据源配置"
-              onRetry={() => void loadUpstreamConfig()}
-            >
+            <div className="admin-module-summary" aria-label="上游数据源摘要">
+              <article>
+                <span>连接配置</span>
+                <strong>
+                  {upstreamConfig.status === "ready" &&
+                  upstreamConfig.data.configured
+                    ? upstreamConfig.data.config?.enabled
+                      ? "运行中"
+                      : "已停用"
+                    : "待配置"}
+                </strong>
+                <small>
+                  {upstreamConfig.status === "ready" &&
+                  upstreamConfig.data.config
+                    ? `配置版本 v${upstreamConfig.data.config.version}`
+                    : "尚无可用路由契约"}
+                </small>
+              </article>
+              <article>
+                <span>当前活动来源</span>
+                <strong>
+                  {upstreamCredentials.status === "ready"
+                    ? upstreamCredentials.data.activeSource === "managed"
+                      ? "托管凭据"
+                      : upstreamCredentials.data.activeSource === "environment"
+                        ? "环境变量"
+                        : "未配置"
+                    : "读取中"}
+                </strong>
+                <small>
+                  {upstreamCredentials.status === "ready"
+                    ? upstreamCredentials.data.activeFingerprint ?? "无活动指纹"
+                    : "等待凭据状态"}
+                </small>
+              </article>
+              <article>
+                <span>已保存凭据</span>
+                <strong>{savedCredentialCount.toLocaleString()}</strong>
+                <small>活动、备用与已撤销凭据总数</small>
+              </article>
+              <article>
+                <span>下一步</span>
+                <strong>
+                  {upstreamConfig.status === "ready" &&
+                  !upstreamConfig.data.configured
+                    ? "建立连接"
+                    : upstreamCredentials.status === "ready" &&
+                        !upstreamCredentials.data.activeCredentialId
+                      ? "添加并验证"
+                      : "同步路由"}
+                </strong>
+                <small>完成后进入“路由与定价”审核发布</small>
+              </article>
+            </div>
+            <nav className="admin-subtabs" aria-label="上游数据源视图">
+              {(
+                [
+                  ["current", "当前数据源", "查看运行状态与凭据清单"],
+                  ["add", "添加数据源", "保存并验证新的上游凭据"],
+                  ["contract", "连接规范", "维护 Origin 与目录路径"],
+                ] as const
+              ).map(([id, label, description]) => (
+                <button
+                  type="button"
+                  key={id}
+                  className={upstreamView === id ? "is-active" : ""}
+                  aria-current={upstreamView === id ? "page" : undefined}
+                  onClick={() => setUpstreamView(id)}
+                >
+                  <strong>{label}</strong>
+                  <small>{description}</small>
+                </button>
+              ))}
+            </nav>
+            {upstreamView === "contract" ? (
+              <StatePanel
+                state={upstreamConfig}
+                label="数据源配置"
+                onRetry={() => void loadUpstreamConfig()}
+              >
               {upstreamConfig.status === "ready" ? (
                 <form
                   className="admin-upstream-config-card"
@@ -4616,12 +4758,14 @@ export function AdminClient() {
                   </div>
                 </form>
               ) : null}
-            </StatePanel>
-            <StatePanel
-              state={upstreamCredentials}
-              label="上游凭据"
-              onRetry={() => void loadUpstreamCredentials()}
-            >
+              </StatePanel>
+            ) : null}
+            {upstreamView !== "contract" ? (
+              <StatePanel
+                state={upstreamCredentials}
+                label="上游凭据"
+                onRetry={() => void loadUpstreamCredentials()}
+              >
               {upstreamCredentials.status === "ready" ? (
                 <>
                   {!upstreamCredentials.data.encryptionConfigured ? (
@@ -4661,7 +4805,87 @@ export function AdminClient() {
                       </div>
                     </div>
                   ) : null}
-                  <div className="admin-upstream-source-grid">
+                  {upstreamView === "current" ? (
+                    <div className="admin-view-intro">
+                      <div>
+                        <p className="section-kicker">CURRENT SOURCES</p>
+                        <h3>当前数据源清单</h3>
+                        <p>
+                          这里展示运行时实际选择的来源和全部托管凭据。活动凭据变更会触发目录重新验证，
+                          不会静默沿用旧的发布结果。
+                        </p>
+                      </div>
+                      <button
+                        className="button button-blue button-small"
+                        type="button"
+                        onClick={() => setUpstreamView("add")}
+                      >
+                        添加数据源
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="admin-view-intro">
+                        <div>
+                          <p className="section-kicker">ADD DATA SOURCE</p>
+                          <h3>添加并验证数据源</h3>
+                          <p>
+                            新凭据必须通过在线验证后才能成为活动来源；目录同步和路由发布仍需在下一步单独完成。
+                          </p>
+                        </div>
+                        <button
+                          className="button button-ghost button-small"
+                          type="button"
+                          onClick={() => setUpstreamView("current")}
+                        >
+                          返回当前清单
+                        </button>
+                      </div>
+                      <ol className="admin-flow-steps">
+                        <li className="is-current">
+                          <span>01</span>
+                          <div>
+                            <strong>确认连接规范</strong>
+                            <small>Origin、API 前缀与目录路径已保存</small>
+                          </div>
+                        </li>
+                        <li className="is-current">
+                          <span>02</span>
+                          <div>
+                            <strong>添加并验证凭据</strong>
+                            <small>加密保存，校验授权范围与可用性</small>
+                          </div>
+                        </li>
+                        <li>
+                          <span>03</span>
+                          <div>
+                            <strong>同步并发布路由</strong>
+                            <small>进入路由与定价，完成成本和安全审核</small>
+                          </div>
+                        </li>
+                      </ol>
+                      {upstreamConfig.status === "ready" &&
+                      !upstreamConfig.data.configured ? (
+                        <div className="admin-source-truth is-warning">
+                          <div>
+                            <strong>请先建立上游连接规范</strong>
+                            <p>
+                              尚未保存 Origin 与目录路径；凭据可以加密保存，但无法形成可验证的数据供给。
+                            </p>
+                          </div>
+                          <button
+                            className="button button-dark button-small"
+                            type="button"
+                            onClick={() => setUpstreamView("contract")}
+                          >
+                            配置连接规范
+                          </button>
+                        </div>
+                      ) : null}
+                    </>
+                  )}
+                  {upstreamView === "current" ? (
+                    <div className="admin-upstream-source-grid">
                     <article>
                       <span>当前来源</span>
                       <strong>
@@ -4696,9 +4920,11 @@ export function AdminClient() {
                         明文不会从服务端返回
                       </small>
                     </article>
-                  </div>
+                    </div>
+                  ) : null}
 
-                  <form
+                  {upstreamView === "add" ? (
+                    <form
                     className="admin-upstream-form"
                     onSubmit={submitUpstreamCredential}
                   >
@@ -4769,9 +4995,11 @@ export function AdminClient() {
                           ? "验证、保存并启用"
                           : "加密保存为备用"}
                     </button>
-                  </form>
+                    </form>
+                  ) : null}
 
-                  {upstreamCredentials.data.credentials.length ? (
+                  {upstreamView === "current" &&
+                  upstreamCredentials.data.credentials.length ? (
                     <div className="admin-upstream-credential-list">
                       {upstreamCredentials.data.credentials.map(
                         (credential) => (
@@ -4861,17 +5089,18 @@ export function AdminClient() {
                         ),
                       )}
                     </div>
-                  ) : (
+                  ) : upstreamView === "current" ? (
                     <div className="admin-empty">
                       <strong>尚未保存上游凭据</strong>
                       <p>
-                        配置加密主密钥后，在上方添加第一个上游 API Key。
+                        配置加密主密钥后，进入“添加数据源”保存第一个上游 API Key。
                       </p>
                     </div>
-                  )}
+                  ) : null}
                 </>
               ) : null}
-            </StatePanel>
+              </StatePanel>
+            ) : null}
           </section>
         ) : null}
 
@@ -4881,6 +5110,10 @@ export function AdminClient() {
               <div>
                 <p className="section-kicker">UPSTREAM CATALOG CONTROL</p>
                 <h2 id="catalog-admin-title">路由与定价</h2>
+                <p>
+                  从上游同步候选服务，补齐调用契约，再审核成本、客户价和发布状态。
+                  市场展示与 /v1 实际可调用目录共同读取这里的已发布结果。
+                </p>
               </div>
               <div className="admin-section-actions">
                 <button
@@ -4902,10 +5135,134 @@ export function AdminClient() {
                 </button>
               </div>
             </div>
-            <section
-              className="admin-pending-catalog"
-              aria-labelledby="pending-catalog-title"
-            >
+            <div className="admin-module-summary" aria-label="路由目录摘要">
+              <article className="is-success">
+                <span>已上架路由</span>
+                <strong>{publishedRouteCount.toLocaleString()}</strong>
+                <small>市场可见且 /v1 可调用</small>
+              </article>
+              <article>
+                <span>待审核 / 已下架</span>
+                <strong>{reviewRouteCount.toLocaleString()}</strong>
+                <small>仅后台可见，不进入公开运行目录</small>
+              </article>
+              <article className={pendingCatalogCount ? "is-warning" : ""}>
+                <span>文档待同步</span>
+                <strong>{pendingCatalogCount.toLocaleString()}</strong>
+                <small>缺少方法或契约，严格不可调用</small>
+              </article>
+              <article>
+                <span>当前目录代次</span>
+                <strong>
+                  {catalogData?.sync
+                    ? catalogData.sync.generation.slice(0, 12)
+                    : "未生成"}
+                </strong>
+                <small>
+                  {catalogData?.sync
+                    ? `同步于 ${formatDate(catalogData.sync.syncedAt)}`
+                    : "需要先同步上游"}
+                </small>
+              </article>
+            </div>
+            <nav className="admin-subtabs" aria-label="路由与定价视图">
+              {(
+                [
+                  ["routes", "当前路由", "查看运行目录与发布状态"],
+                  ["add", "添加 / 同步", "发现并补齐新的候选服务"],
+                  ["pricing", "定价发布", "批量定价、审核与上下架"],
+                  ["consistency", "一致性证明", "核对快照、覆盖率与代次"],
+                ] as const
+              ).map(([id, label, description]) => (
+                <button
+                  type="button"
+                  key={id}
+                  className={catalogView === id ? "is-active" : ""}
+                  aria-current={catalogView === id ? "page" : undefined}
+                  onClick={() => setCatalogView(id)}
+                >
+                  <strong>{label}</strong>
+                  <small>{description}</small>
+                </button>
+              ))}
+            </nav>
+            <div className="admin-source-truth">
+              <div>
+                <span className="admin-source-truth-mark" aria-hidden="true">
+                  ✓
+                </span>
+                <div>
+                  <strong>一个发布状态，三处同时生效</strong>
+                  <p>
+                    “已上架”同时代表数据市场可见、公开目录存在且 /v1 可调用；
+                    待同步、待复核和已下架记录只留在运营后台。
+                  </p>
+                </div>
+              </div>
+              <dl>
+                <div>
+                  <dt>市场展示</dt>
+                  <dd>{publishedRouteCount.toLocaleString()} 条</dd>
+                </div>
+                <div>
+                  <dt>/v1 运行目录</dt>
+                  <dd>{publishedRouteCount.toLocaleString()} 条</dd>
+                </div>
+                <div>
+                  <dt>阻断状态</dt>
+                  <dd>{(reviewRouteCount + pendingCatalogCount).toLocaleString()} 条</dd>
+                </div>
+              </dl>
+            </div>
+            {catalogView === "add" ? (
+              <>
+                <div className="admin-view-intro">
+                  <div>
+                    <p className="section-kicker">ADD ROUTE FLOW</p>
+                    <h3>添加新的数据服务</h3>
+                    <p>
+                      路由不允许直接手工写入运行目录。每条新服务都必须经过上游同步、
+                      调用契约补齐、定价与安全审核后才能上架。
+                    </p>
+                  </div>
+                  <button
+                    className="button button-dark button-small"
+                    type="button"
+                    onClick={() => setConfirmAction({ kind: "sync" })}
+                  >
+                    立即同步上游
+                  </button>
+                </div>
+                <ol className="admin-flow-steps">
+                  <li className="is-current">
+                    <span>01</span>
+                    <div>
+                      <strong>同步上游目录</strong>
+                      <small>读取 OpenAPI、价格目录和凭据授权范围</small>
+                    </div>
+                  </li>
+                  <li>
+                    <span>02</span>
+                    <div>
+                      <strong>补齐调用契约</strong>
+                      <small>HTTP 方法、参数结构与数据分类必须完整</small>
+                    </div>
+                  </li>
+                  <li>
+                    <span>03</span>
+                    <div>
+                      <strong>审核价格并发布</strong>
+                      <small>成本、安全策略和客户价通过后才进入市场</small>
+                    </div>
+                  </li>
+                </ol>
+              </>
+            ) : null}
+            {catalogView === "add" ? (
+              <section
+                className="admin-pending-catalog"
+                aria-labelledby="pending-catalog-title"
+              >
               <div className="admin-pending-catalog-head">
                 <div>
                   <p className="section-kicker">
@@ -5165,15 +5522,18 @@ export function AdminClient() {
                   </>
                 ) : null}
               </StatePanel>
-            </section>
-            <StatePanel
-              state={catalog}
-              label="接口目录"
-              onRetry={() => void loadCatalog()}
-            >
+              </section>
+            ) : null}
+            {catalogView !== "add" ? (
+              <StatePanel
+                state={catalog}
+                label="接口目录"
+                onRetry={() => void loadCatalog()}
+              >
               {catalog.status === "ready" ? (
                 <>
-                  <div className="admin-catalog-proof">
+                  {catalogView === "consistency" ? (
+                    <div className="admin-catalog-proof">
                     <div>
                       <p className="section-kicker">
                         SYNC COVERAGE / EVIDENCE
@@ -5287,22 +5647,30 @@ export function AdminClient() {
                         </p>
                       </div>
                     )}
-                  </div>
-                  <section
+                    </div>
+                  ) : null}
+                  {catalogView === "routes" ||
+                  catalogView === "pricing" ? (
+                    <section
                     className="admin-catalog-batch"
                     aria-labelledby="catalog-batch-title"
                   >
                     <div className="admin-catalog-batch-head">
                       <div>
                         <p className="section-kicker">
-                          ATOMIC BATCH CONTROL
+                          {catalogView === "pricing"
+                            ? "PRICING / PUBLISH CONTROL"
+                            : "CURRENT RUNTIME CATALOG"}
                         </p>
                         <h3 id="catalog-batch-title">
-                          服务端选择器与批量变更
+                          {catalogView === "pricing"
+                            ? "定价与批量发布"
+                            : "当前路由清单"}
                         </h3>
                         <p>
-                          当前筛选同时控制下方本地列表与服务端批量预览；
-                          最终匹配数、阻断项和金额只以冻结回执为准。
+                          {catalogView === "pricing"
+                            ? "当前筛选同时控制下方列表与服务端批量预览；最终匹配数、阻断项和金额只以冻结回执为准。"
+                            : "按平台、数据类型、入口、状态和安全分类核对当前目录；此视图不修改价格或发布状态。"}
                         </p>
                       </div>
                       <span>
@@ -5312,7 +5680,13 @@ export function AdminClient() {
                       </span>
                     </div>
 
-                    <form onSubmit={previewCatalogBatch}>
+                    <form
+                      onSubmit={
+                        catalogView === "pricing"
+                          ? previewCatalogBatch
+                          : (event) => event.preventDefault()
+                      }
+                    >
                       <div className="admin-toolbar admin-catalog-batch-selector">
                         <label>
                           <span>搜索路由</span>
@@ -5453,7 +5827,8 @@ export function AdminClient() {
                         </p>
                       </div>
 
-                      <div className="admin-catalog-batch-controls">
+                      {catalogView === "pricing" ? (
+                        <div className="admin-catalog-batch-controls">
                         <label>
                           <span>批量动作</span>
                           <select
@@ -5548,10 +5923,11 @@ export function AdminClient() {
                             ? "正在冻结预览…"
                             : "生成整批预览"}
                         </button>
-                      </div>
+                        </div>
+                      ) : null}
                     </form>
 
-                    {catalogBatchError ? (
+                    {catalogView === "pricing" && catalogBatchError ? (
                       <div
                         className="admin-catalog-batch-alert is-blocked"
                         role="alert"
@@ -5560,7 +5936,7 @@ export function AdminClient() {
                       </div>
                     ) : null}
 
-                    {catalogBatch ? (
+                    {catalogView === "pricing" && catalogBatch ? (
                       <CatalogBatchReceipt
                         key={`${catalogBatch.batch.id}:${catalogBatch.batch.expiresAt}`}
                         response={catalogBatch}
@@ -5577,7 +5953,7 @@ export function AdminClient() {
                         onRefresh={() => void refreshCatalogBatch()}
                         onApply={() => void applyCatalogBatch()}
                       />
-                    ) : (
+                    ) : catalogView === "pricing" ? (
                       <div className="admin-catalog-batch-empty">
                         <strong>尚未生成批量预览</strong>
                         <p>
@@ -5585,8 +5961,12 @@ export function AdminClient() {
                           再冻结一份有时效的服务端快照。预览最多返回前 100 条明细。
                         </p>
                       </div>
-                    )}
-                  </section>
+                    ) : null}
+                    </section>
+                  ) : null}
+                  {catalogView === "routes" ||
+                  catalogView === "pricing" ? (
+                    <>
                   {visibleEndpoints.length ? (
                     <div className="admin-catalog-list">
                       {visibleEndpoints.map((endpoint) => {
@@ -5732,8 +6112,63 @@ export function AdminClient() {
                                 )}
                               </details>
                             ) : null}
-                            <div className="admin-price-editor">
-                              <dl>
+                            {catalogView === "pricing" ? (
+                              <div className="admin-price-editor">
+                                <dl>
+                                  <div>
+                                    <dt>上游成本 / 次</dt>
+                                    <dd>
+                                      {formatUsd(
+                                        endpoint.upstreamPriceUsdMicros,
+                                        6,
+                                      )}
+                                    </dd>
+                                  </div>
+                                  <div>
+                                    <dt>当前毛利 / 次</dt>
+                                    <dd>{formatUsd(margin, 6)}</dd>
+                                  </div>
+                                </dl>
+                                <label>
+                                  <span>客户价 / 次（USD）</span>
+                                  <div>
+                                    <b>$</b>
+                                    <input
+                                      inputMode="decimal"
+                                      value={draft}
+                                      aria-invalid={invalidPrice}
+                                      onChange={(event) =>
+                                        setPriceDrafts((current) => ({
+                                          ...current,
+                                          [endpoint.path]: event.target.value,
+                                        }))
+                                      }
+                                    />
+                                    <button
+                                      className="button button-blue button-small"
+                                      disabled={
+                                        savingPath === endpoint.path ||
+                                        invalidPrice ||
+                                        !priceChanged
+                                      }
+                                      onClick={() =>
+                                        void saveEndpointPrice(endpoint)
+                                      }
+                                    >
+                                      {savingPath === endpoint.path
+                                        ? "保存中"
+                                        : "保存价格"}
+                                    </button>
+                                  </div>
+                                  {invalidPrice ? (
+                                    <small>
+                                      最多 6 位小数，且不得低于上游成本。
+                                    </small>
+                                  ) : null}
+                                </label>
+                              </div>
+                            ) : (
+                              <dl className="admin-route-price-summary">
                                 <div>
                                   <dt>上游成本 / 次</dt>
                                   <dd>
@@ -5744,48 +6179,20 @@ export function AdminClient() {
                                   </dd>
                                 </div>
                                 <div>
+                                  <dt>客户价 / 次</dt>
+                                  <dd>
+                                    {formatUsd(
+                                      endpoint.customerPriceUsdMicros,
+                                      6,
+                                    )}
+                                  </dd>
+                                </div>
+                                <div>
                                   <dt>当前毛利 / 次</dt>
                                   <dd>{formatUsd(margin, 6)}</dd>
                                 </div>
                               </dl>
-                              <label>
-                                <span>客户价 / 次（USD）</span>
-                                <div>
-                                  <b>$</b>
-                                  <input
-                                    inputMode="decimal"
-                                    value={draft}
-                                    aria-invalid={invalidPrice}
-                                    onChange={(event) =>
-                                      setPriceDrafts((current) => ({
-                                        ...current,
-                                        [endpoint.path]: event.target.value,
-                                      }))
-                                    }
-                                  />
-                                  <button
-                                    className="button button-blue button-small"
-                                    disabled={
-                                      savingPath === endpoint.path ||
-                                      invalidPrice ||
-                                      !priceChanged
-                                    }
-                                    onClick={() =>
-                                      void saveEndpointPrice(endpoint)
-                                    }
-                                  >
-                                    {savingPath === endpoint.path
-                                      ? "保存中"
-                                      : "保存价格"}
-                                  </button>
-                                </div>
-                                {invalidPrice ? (
-                                  <small>
-                                    最多 6 位小数，且不得低于上游成本。
-                                  </small>
-                                ) : null}
-                              </label>
-                            </div>
+                            )}
                             <footer>
                               <div>
                                 <span
@@ -5801,32 +6208,44 @@ export function AdminClient() {
                                   审核：{formatDate(endpoint.reviewedAt)}
                                 </small>
                               </div>
-                              <button
-                                className={`button button-small ${
-                                  endpoint.enabled
-                                    ? "admin-button-danger-ghost"
-                                    : "button-dark"
-                                }`}
-                                disabled={
-                                  !endpoint.enabled &&
-                                  (!endpoint.presentInLatestSync ||
-                                    !endpoint.priceVerified ||
-                                    endpoint.safetyClassification !==
-                                      "safe_data_read" ||
-                                    endpoint.safetyPolicyVersion !==
-                                      CATALOG_SAFETY_POLICY_VERSION ||
-                                    invalidPrice)
-                                }
-                                onClick={() =>
-                                  setConfirmAction({
-                                    kind: "endpoint",
-                                    endpoint,
-                                    nextEnabled: !endpoint.enabled,
-                                  })
-                                }
-                              >
-                                {endpoint.enabled ? "下架接口" : "审核并上架"}
-                              </button>
+                              {catalogView === "pricing" ? (
+                                <button
+                                  className={`button button-small ${
+                                    endpoint.enabled
+                                      ? "admin-button-danger-ghost"
+                                      : "button-dark"
+                                  }`}
+                                  disabled={
+                                    !endpoint.enabled &&
+                                    (!endpoint.presentInLatestSync ||
+                                      !endpoint.priceVerified ||
+                                      endpoint.safetyClassification !==
+                                        "safe_data_read" ||
+                                      endpoint.safetyPolicyVersion !==
+                                        CATALOG_SAFETY_POLICY_VERSION ||
+                                      invalidPrice)
+                                  }
+                                  onClick={() =>
+                                    setConfirmAction({
+                                      kind: "endpoint",
+                                      endpoint,
+                                      nextEnabled: !endpoint.enabled,
+                                    })
+                                  }
+                                >
+                                  {endpoint.enabled
+                                    ? "下架接口"
+                                    : "审核并上架"}
+                                </button>
+                              ) : (
+                                <button
+                                  className="button button-ghost button-small"
+                                  type="button"
+                                  onClick={() => setCatalogView("pricing")}
+                                >
+                                  进入定价发布
+                                </button>
+                              )}
                             </footer>
                           </article>
                         );
@@ -5842,7 +6261,10 @@ export function AdminClient() {
                   )}
                 </>
               ) : null}
-            </StatePanel>
+                </>
+              ) : null}
+              </StatePanel>
+            ) : null}
           </section>
         ) : null}
 
