@@ -514,6 +514,14 @@ export async function handlePlatformRequest(
   const requestId = crypto.randomUUID();
 
   try {
+    if (
+      url.pathname === "/console" &&
+      (request.method === "GET" || request.method === "HEAD")
+    ) {
+      const redirectResponse = await handleConsolePageGate(request, env);
+      if (redirectResponse) return redirectResponse;
+    }
+
     if (url.pathname === "/api/health" && request.method === "GET") {
       const readiness = await operationalReadiness(env);
       return jsonResponse(
@@ -841,6 +849,68 @@ function handleAuthProviders(
     200,
     requestId,
   );
+}
+
+async function handleConsolePageGate(
+  request: Request,
+  env: PlatformEnv,
+): Promise<Response | null> {
+  const sessionToken = cookieValue(request, SESSION_COOKIE);
+  const hasSessionCookie = Boolean(
+    sessionToken && /^[A-Za-z0-9_-]{32,160}$/.test(sessionToken),
+  );
+  const identityEmail = request.headers
+    .get(USER_EMAIL_HEADER)
+    ?.trim()
+    .toLowerCase();
+  const hasTrustedIdentity = Boolean(
+    env.TRUST_SITES_IDENTITY_HEADERS === "true" &&
+      identityEmail &&
+      /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(identityEmail),
+  );
+
+  if (!hasSessionCookie && !hasTrustedIdentity) {
+    return consoleLoginRedirect(request);
+  }
+
+  try {
+    await requireAuthenticatedUser(request, requireDb(env), env);
+    return null;
+  } catch (error) {
+    if (
+      error instanceof PlatformError &&
+      (error.status === 401 || error.status === 403)
+    ) {
+      return consoleLoginRedirect(
+        request,
+        error.status === 403 ? "account_suspended" : null,
+      );
+    }
+    throw error;
+  }
+}
+
+function consoleLoginRedirect(
+  request: Request,
+  errorCode: string | null = null,
+): Response {
+  const location = new URL("/login", request.url);
+  location.searchParams.set("return_to", "/console");
+  if (errorCode) location.searchParams.set("error", errorCode);
+
+  return new Response(null, {
+    status: 307,
+    headers: {
+      location: location.toString(),
+      "cache-control": "private, no-store",
+      vary: [
+        "cookie",
+        USER_EMAIL_HEADER,
+        USER_NAME_HEADER,
+        USER_NAME_ENCODING_HEADER,
+      ].join(", "),
+    },
+  });
 }
 
 async function handleAuthMe(

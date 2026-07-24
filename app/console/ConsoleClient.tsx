@@ -737,9 +737,8 @@ export function ConsoleClient({
     } catch (requestError) {
       if (requestError instanceof ApiRequestError && requestError.status === 401) {
         setDashboard(null);
-        if (user?.provider !== "chatgpt") {
-          setSessionUser(null);
-        }
+        window.location.replace(loginPath);
+        return;
       }
       setError(
         requestError instanceof Error
@@ -765,7 +764,7 @@ export function ConsoleClient({
         });
         const payload: unknown = await response.json().catch(() => null);
         if (response.status === 401) {
-          setSessionUser(null);
+          window.location.replace(loginPath);
           return;
         }
         if (!response.ok) {
@@ -777,7 +776,6 @@ export function ConsoleClient({
         setSessionUser(payload.user);
       } catch (requestError) {
         if (controller.signal.aborted) return;
-        setSessionUser(null);
         setError(
           requestError instanceof Error
             ? requestError.message
@@ -1022,23 +1020,6 @@ export function ConsoleClient({
             <h2>{c.checkingSessionTitle}</h2>
             <p>{c.checkingSessionBody}</p>
           </div>
-        </section>
-      ) : null}
-
-      {!user && !authChecking ? (
-        <section className="console-auth-banner">
-          <div className="auth-banner-mark" aria-hidden="true">
-            ↗
-          </div>
-          <div>
-            <span>IDENTITY REQUIRED</span>
-            <h2>{c.loginTitle}</h2>
-            <p>{c.loginBody}</p>
-          </div>
-          <a className="button button-lime" href={loginPath}>
-            {c.chooseLogin}
-            <span aria-hidden="true">→</span>
-          </a>
         </section>
       ) : null}
 

@@ -384,7 +384,6 @@ test("renders the finished product routes without starter metadata", async () =>
     ["/docs", "Build your first request"],
     ["/catalog", "Multi-platform data market"],
     ["/pricing", "Pay only for real requests"],
-    ["/console", "Console"],
     ["/login", "Enter your"],
   ]) {
     const response = await fetchWorker(path, {
@@ -416,7 +415,6 @@ test("renders the Chinese public experience when the locale cookie is set", asyn
     ["/docs", "把第一条请求跑起来"],
     ["/catalog", "多平台数据市场"],
     ["/pricing", "只为真实请求付费"],
-    ["/console", "控制台"],
     ["/login", "进入你的"],
   ]) {
     const response = await fetchWorker(path, {
@@ -429,6 +427,71 @@ test("renders the Chinese public experience when the locale cookie is set", asyn
     const html = await response.text();
     assert.match(html, new RegExp(expected));
     assert.doesNotMatch(html, /安全沙盒/i);
+  }
+});
+
+test("redirects signed-out console visits before rendering private UI", async () => {
+  for (const path of ["/console", "/console?_rsc=internal-navigation"]) {
+    const response = await fetchWorker(path, {
+      headers: { accept: "text/html" },
+      redirect: "manual",
+    });
+    assert.equal(response.status, 307, path);
+    assert.equal(
+      response.headers.get("location"),
+      "http://localhost/login?return_to=%2Fconsole",
+    );
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    assert.equal(await response.text(), "");
+  }
+});
+
+test("renders the console only after server-side authentication", async () => {
+  const db = new TestD1();
+  await migrate(db);
+  const env = baseEnv({ DB: db });
+
+  try {
+    const staleSession = await fetchWorker(
+      "/console",
+      {
+        headers: {
+          accept: "text/html",
+          cookie: `rb_session=${"x".repeat(32)}`,
+        },
+        redirect: "manual",
+      },
+      env,
+    );
+    assert.equal(staleSession.status, 307);
+    assert.equal(
+      staleSession.headers.get("location"),
+      "http://localhost/login?return_to=%2Fconsole",
+    );
+
+    for (const [headers, expected] of [
+      [
+        signedInHeaders({ accept: "text/html" }),
+        "Console",
+      ],
+      [
+        signedInHeaders({
+          accept: "text/html",
+          cookie: "relaybase_locale=zh",
+        }),
+        "控制台",
+      ],
+    ]) {
+      const response = await fetchWorker("/console", { headers }, env);
+      assert.equal(response.status, 200);
+      assert.match(
+        response.headers.get("content-type") ?? "",
+        /^text\/html\b/i,
+      );
+      assert.match(await response.text(), new RegExp(expected));
+    }
+  } finally {
+    db.close();
   }
 });
 
