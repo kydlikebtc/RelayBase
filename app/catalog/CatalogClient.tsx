@@ -561,22 +561,6 @@ function formatPrice(micros: number | null): string {
   return `$${value || "0"}`;
 }
 
-function formatCatalogDate(value: string | null): string {
-  if (!value) return "等待运行时同步";
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "更新时间不可用";
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZoneName: "short",
-  }).format(date);
-}
-
 function formatMarketplaceTotal(total: number | undefined): string {
   if (total === undefined) return "—";
   return total.toLocaleString("zh-CN");
@@ -882,37 +866,42 @@ function DetailPanel({
             />
           </section>
 
-          <section aria-labelledby="marketplace-body-title">
-            <h3 id="marketplace-body-title">请求体</h3>
-            <SchemaDocument
-              value={state.data.endpoint.input.requestBody}
-              emptyLabel={
-                endpoint.documentationStatus === "pending"
-                  ? "请求体规范待补齐。"
-                  : endpoint.method === "GET"
-                  ? "GET 数据产品不需要请求体。"
-                  : "此数据产品没有声明请求体结构。"
-              }
-            />
-          </section>
+          {endpoint.method !== "GET" ? (
+            <section aria-labelledby="marketplace-body-title">
+              <h3 id="marketplace-body-title">请求体</h3>
+              <SchemaDocument
+                value={state.data.endpoint.input.requestBody}
+                emptyLabel={
+                  endpoint.documentationStatus === "pending"
+                    ? "请求体规范待补齐。"
+                    : "此数据产品没有声明请求体结构。"
+                }
+              />
+            </section>
+          ) : null}
 
-          <section aria-labelledby="marketplace-response-title">
+          <section
+            className="marketplace-response-section"
+            aria-labelledby="marketplace-response-title"
+          >
             <h3 id="marketplace-response-title">响应格式</h3>
-            <dl className="marketplace-detail-taxonomy">
-              <div>
-                <dt>内容类型</dt>
-                <dd>
-                  <code>{state.data.endpoint.response.contentType}</code>
-                </dd>
-              </div>
-              <div>
-                <dt>响应模式</dt>
-                <dd>RelayBase JSON 包装</dd>
-              </div>
-            </dl>
-            <p className="marketplace-description">
-              {state.data.endpoint.response.description}
-            </p>
+            <div className="marketplace-response-card">
+              <dl>
+                <div>
+                  <dt>内容类型</dt>
+                  <dd>
+                    <code>{state.data.endpoint.response.contentType}</code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>响应模式</dt>
+                  <dd>RelayBase JSON 包装</dd>
+                </div>
+              </dl>
+              <p>
+                {state.data.endpoint.response.description}
+              </p>
+            </div>
           </section>
 
           <section
@@ -979,7 +968,7 @@ function DetailPanel({
           </section>
 
           <Link className="marketplace-detail-cta" href="/console">
-            获取数据市场访问 Key
+            创建访问 Key
             <span aria-hidden="true">→</span>
           </Link>
         </div>
@@ -1182,6 +1171,9 @@ export default function CatalogClient() {
   const filtersActive =
     query.length > 0 ||
     Object.values(filters).some((value) => value.length > 0);
+  const advancedFilterCount = Object.values(filters).filter(
+    (value) => value.length > 0,
+  ).length;
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
   const totalPages = marketplace
     ? Math.max(1, Math.ceil(marketplace.total / PAGE_SIZE))
@@ -1192,14 +1184,6 @@ export default function CatalogClient() {
     ) ?? null;
   const platformCatalogTotal =
     facets?.platforms.reduce((sum, option) => sum + option.count, 0) ?? 0;
-
-  const catalogSummary = marketplace
-    ? {
-        revision: marketplace.catalog.revision,
-        completeness: marketplace.catalog.complete ? "目录完整" : "同步进行中",
-        updatedAt: formatCatalogDate(marketplace.catalog.updatedAt),
-      }
-    : null;
 
   function updateFilter<Key extends keyof Filters>(
     key: Key,
@@ -1352,75 +1336,58 @@ export default function CatalogClient() {
       >
         <div className="marketplace-masthead-copy">
           <p className="section-kicker">RELAYBASE / DATA MARKETPLACE</p>
-          <h1 id="marketplace-title">
-            发现、比较并调用
-            <span>多平台数据产品。</span>
-          </h1>
+          <h1 id="marketplace-title">多平台数据市场</h1>
           <p>
-            RelayBase 把分散在各平台的公开数据能力组织成统一商品目录。你可以按
-            来源、数据类型、调用方式、价格与可用状态筛选，找到适合产品、Agent
-            与研究流程的数据供给。
+            按平台发现、比较并调用经过审核的数据产品。先选择数据来源，再进入平台
+            查看类型、价格与可用能力。
           </p>
-          <div className="marketplace-masthead-actions">
-            <Link className="button button-blue button-large" href="/console">
-              开始使用数据
-              <span aria-hidden="true">→</span>
-            </Link>
-            <Link className="button button-ghost button-large" href="/docs">
-              了解接入规范
-            </Link>
-          </div>
-        </div>
-
-        <aside className="marketplace-source-card" aria-label="数据市场目录状态">
-          <span>MARKET DATA CATALOG</span>
-          <strong>RelayBase Curated Data Market</strong>
-          <dl>
+          <dl className="marketplace-market-facts" aria-label="市场概览">
             <div>
-              <dt>目录版本</dt>
-              <dd>{catalogSummary?.revision ?? "读取中"}</dd>
+              <dt>数据产品</dt>
+              <dd>
+                {formatMarketplaceTotal(marketplace?.catalog.serviceCount)}
+              </dd>
             </div>
             <div>
-              <dt>完整性</dt>
-              <dd>{catalogSummary?.completeness ?? "读取中"}</dd>
+              <dt>来源平台</dt>
+              <dd>{marketplace?.stats.platforms ?? "—"}</dd>
             </div>
             <div>
-              <dt>最近更新</dt>
-              <dd>{catalogSummary?.updatedAt ?? "读取中"}</dd>
+              <dt>当前结果</dt>
+              <dd>{marketplace?.total.toLocaleString() ?? "—"}</dd>
             </div>
           </dl>
-        </aside>
-      </section>
-
-      <section className="marketplace-stat-strip" aria-label="数据市场统计">
-        <article>
-          <span>数据产品</span>
-          <strong>
-            {formatMarketplaceTotal(marketplace?.catalog.serviceCount)}
-          </strong>
-          <small>当前市场供给</small>
-        </article>
-        <article>
-          <span>数据平台</span>
-          <strong>{marketplace?.stats.platforms ?? "—"}</strong>
-          <small>统一接入</small>
-        </article>
-        <article>
-          <span>数据分类</span>
-          <strong>{marketplace?.stats.categories ?? "—"}</strong>
-          <small>标准化商品标签</small>
-        </article>
-        <article>
-          <span>可用产品</span>
-          <strong>{marketplace?.stats.available ?? "—"}</strong>
-          <small>已审核并核价</small>
-        </article>
+        </div>
       </section>
 
       <section
         className="marketplace-browser"
         aria-labelledby="marketplace-results-title"
       >
+        <header className="marketplace-results-head">
+          <div>
+            <div>
+              <p className="section-kicker">DISCOVER / PLATFORMS</p>
+              <h2 id="marketplace-results-title">
+                按平台浏览数据产品
+              </h2>
+              <p className="marketplace-results-intro">
+                平台是数据供给的一级入口；进入平台后，再按数据类型继续筛选。
+              </p>
+            </div>
+          </div>
+          <p aria-live="polite">
+            {marketplace ? (
+              <>
+                <strong>{marketplace.total.toLocaleString()}</strong> 项 · 第{" "}
+                {currentPage} / {totalPages} 页
+              </>
+            ) : (
+              "正在统计结果"
+            )}
+          </p>
+        </header>
+
         <div className="marketplace-filter-shell">
           <form
             className="marketplace-search"
@@ -1443,116 +1410,101 @@ export default function CatalogClient() {
             </div>
           </form>
 
-          <div className="marketplace-filters">
-            <label>
-              <span>数据分类</span>
-              <select
-                value={filters.category}
-                onChange={(event) =>
-                  updateFilter("category", event.target.value)
-                }
+          <details className="marketplace-filter-disclosure">
+            <summary>
+              <span>
+                更多筛选
+                {advancedFilterCount > 0 ? (
+                  <b>{advancedFilterCount}</b>
+                ) : null}
+              </span>
+              <i aria-hidden="true">＋</i>
+            </summary>
+            <div className="marketplace-filters">
+              <label>
+                <span>数据分类</span>
+                <select
+                  value={filters.category}
+                  onChange={(event) =>
+                    updateFilter("category", event.target.value)
+                  }
+                >
+                  <option value="">全部数据分类</option>
+                  {facets?.categories.map((option) => (
+                    <option value={option.value} key={option.value}>
+                      {option.label} · {option.count}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>方法</span>
+                <select
+                  value={filters.method}
+                  onChange={(event) =>
+                    updateFilter(
+                      "method",
+                      event.target.value as Filters["method"],
+                    )
+                  }
+                >
+                  <option value="">GET + POST</option>
+                  {facets?.methods.map((option) => (
+                    <option value={option.value} key={option.value}>
+                      {option.label} · {option.count}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>调用表面</span>
+                <select
+                  value={filters.surface}
+                  onChange={(event) =>
+                    updateFilter(
+                      "surface",
+                      event.target.value as Filters["surface"],
+                    )
+                  }
+                >
+                  <option value="">APP + WEB</option>
+                  {facets?.surfaces.map((option) => (
+                    <option value={option.value} key={option.value}>
+                      {option.label} · {option.count}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>可用状态</span>
+                <select
+                  value={filters.availability}
+                  onChange={(event) =>
+                    updateFilter(
+                      "availability",
+                      event.target.value as Filters["availability"],
+                    )
+                  }
+                >
+                  <option value="">全部状态</option>
+                  {facets?.availability.map((option) => (
+                    <option value={option.value} key={option.value}>
+                      {option.label} · {option.count}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className="marketplace-clear"
+                type="button"
+                onClick={clearFilters}
+                disabled={!filtersActive}
               >
-                <option value="">全部数据分类</option>
-                {facets?.categories.map((option) => (
-                  <option value={option.value} key={option.value}>
-                    {option.label} · {option.count}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>方法</span>
-              <select
-                value={filters.method}
-                onChange={(event) =>
-                  updateFilter(
-                    "method",
-                    event.target.value as Filters["method"],
-                  )
-                }
-              >
-                <option value="">GET + POST</option>
-                {facets?.methods.map((option) => (
-                  <option value={option.value} key={option.value}>
-                    {option.label} · {option.count}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>调用表面</span>
-              <select
-                value={filters.surface}
-                onChange={(event) =>
-                  updateFilter(
-                    "surface",
-                    event.target.value as Filters["surface"],
-                  )
-                }
-              >
-                <option value="">APP + WEB</option>
-                {facets?.surfaces.map((option) => (
-                  <option value={option.value} key={option.value}>
-                    {option.label} · {option.count}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>可用状态</span>
-              <select
-                value={filters.availability}
-                onChange={(event) =>
-                  updateFilter(
-                    "availability",
-                    event.target.value as Filters["availability"],
-                  )
-                }
-              >
-                <option value="">全部状态</option>
-                {facets?.availability.map((option) => (
-                  <option value={option.value} key={option.value}>
-                    {option.label} · {option.count}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              className="marketplace-clear"
-              type="button"
-              onClick={clearFilters}
-              disabled={!filtersActive}
-            >
-              清除筛选
-            </button>
-          </div>
-        </div>
-
-        <header className="marketplace-results-head">
-          <div>
-            <span className="catalog-index">01</span>
-            <div>
-              <p className="section-kicker">DISCOVER / PLATFORMS</p>
-              <h2 id="marketplace-results-title">
-                按平台浏览数据产品
-              </h2>
-              <p className="marketplace-results-intro">
-                平台是数据供给的一级入口；进入平台后，再按数据类型、调用能力和
-                价格快速筛选。
-              </p>
+                清除筛选
+              </button>
             </div>
-          </div>
-          <p aria-live="polite">
-            {marketplace ? (
-              <>
-                找到 <strong>{marketplace.total.toLocaleString()}</strong>{" "}
-                项 · 第 {currentPage} / {totalPages} 页
-              </>
-            ) : (
-              "正在统计结果"
-            )}
-          </p>
-        </header>
+          </details>
+        </div>
 
         {state.status === "error" ? (
           <div className="marketplace-error" role="alert">
