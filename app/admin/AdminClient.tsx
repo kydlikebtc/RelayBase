@@ -64,6 +64,10 @@ type AdminUser = {
   calls30d: number;
   spend30dUsdMicros: number;
   lastCallAt: string | null;
+  providers: string[];
+  walletAddress: string | null;
+  activeKeyCount: number;
+  activeSessionCount: number;
   createdAt: string;
 };
 
@@ -79,6 +83,28 @@ type CatalogSafetyClassification =
   | "safe_data_read"
   | "ambiguous"
   | "prohibited";
+const CATALOG_DATA_TYPES = [
+  "account",
+  "analytics_trends",
+  "comments",
+  "commerce_marketing",
+  "content",
+  "email",
+  "live",
+  "media_download",
+  "profile_creator",
+  "search_discovery",
+  "social_graph",
+  "system",
+  "taxonomy",
+  "utility",
+  "other",
+] as const;
+type CatalogDataType = (typeof CATALOG_DATA_TYPES)[number];
+const CATALOG_SURFACES = ["app", "web", "app_web", "other"] as const;
+type CatalogSurface = (typeof CATALOG_SURFACES)[number];
+type CatalogDataTypeFilter = "all" | CatalogDataType;
+type CatalogSurfaceFilter = "all" | CatalogSurface;
 type CatalogFilterStatus = "all" | "enabled" | "disabled" | "review";
 type CatalogSafetyFilter = "all" | CatalogSafetyClassification;
 type CatalogBatchAction = "publish" | "reprice" | "disable";
@@ -100,6 +126,10 @@ type CatalogEndpoint = {
   path: string;
   platform: string;
   method: string;
+  dataType: CatalogDataType;
+  tags: string[];
+  surface: CatalogSurface;
+  operationId: string | null;
   summary: string | null;
   description: string | null;
   parameterSchema: JsonValue | null;
@@ -153,6 +183,9 @@ type CatalogSyncInfo = {
 
 type CatalogBatchSelection = {
   platform: string | null;
+  dataType: CatalogDataType | null;
+  tag: string | null;
+  surface: CatalogSurface | null;
   query: string;
   status: CatalogFilterStatus;
   safety: CatalogSafetyFilter;
@@ -172,6 +205,10 @@ type CatalogBatchItem = {
   path: string;
   platform: string;
   method: string;
+  dataType: CatalogDataType;
+  tags: string[];
+  surface: CatalogSurface;
+  operationId: string | null;
   summary: string | null;
   expectedRevision: number;
   before: {
@@ -280,6 +317,14 @@ type PaymentsResponse = {
   nextOffset: number | null;
 };
 
+type PaymentRecoveryResponse = {
+  payment: {
+    id: string;
+    providerPaymentId: string | null;
+    status: string;
+  };
+};
+
 type PaymentReview = {
   id: string;
   orderId: string;
@@ -339,6 +384,26 @@ const SESSION_SECRET_KEY = "relaybase.admin.master-secret.v1";
 const CATALOG_SAFETY_POLICY_VERSION = 1;
 const validPaymentStatus = /^[a-z][a-z0-9_]{0,63}$/;
 const validSha256Digest = /^[a-f0-9]{64}$/;
+const readinessMissingLabels: Record<string, string> = {
+  database: "数据库绑定",
+  configuration: "运行配置",
+  legal_review: "适用地区法律审查",
+  reseller_authorization: "上游 转售 / 白标授权",
+  upstream_credentials: "上游 活动数据源",
+  admin_credentials: "管理与调度密钥",
+  crypto_payments: "稳定币生产支付开关",
+  commercial_clearance: "上游 稳定币付款书面澄清",
+  payment_provider: "支付服务商生产配置",
+  authentication: "客户登录方式",
+  database_migrations: "数据库迁移",
+  catalog_taxonomy: "实时目录分类完整性",
+  enabled_catalog: "已审核并上架的接口目录",
+  scheduled_reconciliation: "五分钟内成功的自动对账",
+};
+
+function readinessMissingLabel(value: string): string {
+  return readinessMissingLabels[value] ?? value;
+}
 
 class AdminApiError extends Error {
   constructor(
@@ -513,6 +578,17 @@ function isAdminUser(value: unknown): value is AdminUser {
     isSafeNonNegativeInteger(value.calls30d) &&
     isSafeNonNegativeInteger(value.spend30dUsdMicros) &&
     isNullableDateString(value.lastCallAt) &&
+    Array.isArray(value.providers) &&
+    value.providers.length >= 1 &&
+    value.providers.length <= 8 &&
+    value.providers.every(
+      (provider) =>
+        isNonEmptyString(provider, 32) &&
+        /^(google|wallet|sites)$/.test(provider),
+    ) &&
+    isNullableString(value.walletAddress, 128) &&
+    isSafeNonNegativeInteger(value.activeKeyCount) &&
+    isSafeNonNegativeInteger(value.activeSessionCount) &&
     isDateString(value.createdAt)
   );
 }
@@ -546,6 +622,51 @@ function isCatalogSafetyClassification(
   );
 }
 
+function isCatalogDataType(value: unknown): value is CatalogDataType {
+  return (
+    typeof value === "string" &&
+    CATALOG_DATA_TYPES.includes(value as CatalogDataType)
+  );
+}
+
+function isCatalogSurface(value: unknown): value is CatalogSurface {
+  return (
+    typeof value === "string" &&
+    CATALOG_SURFACES.includes(value as CatalogSurface)
+  );
+}
+
+function isCatalogTag(value: unknown): value is string {
+  return (
+    isNonEmptyString(value, 160) &&
+    value.trim() === value &&
+    !/[?&#=\u0000-\u001F\u007F]/.test(value)
+  );
+}
+
+function isCatalogTags(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 100 &&
+    value.every(
+      (tag, index) =>
+        isCatalogTag(tag) &&
+        (index === 0 ||
+          (typeof value[index - 1] === "string" &&
+            (value[index - 1] as string) < tag)),
+    )
+  );
+}
+
+function isCatalogOperationId(value: unknown): value is string | null {
+  return (
+    value === null ||
+    (isNonEmptyString(value, 500) &&
+      value.trim() === value &&
+      !/[\u0000-\u001F\u007F]/.test(value))
+  );
+}
+
 function isCatalogFilterStatus(
   value: unknown,
 ): value is CatalogFilterStatus {
@@ -563,6 +684,28 @@ function isCatalogSafetyFilter(
   return value === "all" || isCatalogSafetyClassification(value);
 }
 
+function isCatalogBatchSelection(
+  value: unknown,
+): value is CatalogBatchSelection {
+  if (!isObject(value)) return false;
+  return (
+    (value.platform === null ||
+      (isNonEmptyString(value.platform, 80) &&
+        value.platform.trim() === value.platform &&
+        value.platform.toLowerCase() === value.platform)) &&
+    (value.dataType === null || isCatalogDataType(value.dataType)) &&
+    (value.tag === null ||
+      (isCatalogTag(value.tag) &&
+        normalizeCatalogTagKey(value.tag) === value.tag)) &&
+    (value.surface === null || isCatalogSurface(value.surface)) &&
+    typeof value.query === "string" &&
+    value.query.length <= 120 &&
+    !/[\u0000-\u001F\u007F]/.test(value.query) &&
+    isCatalogFilterStatus(value.status) &&
+    isCatalogSafetyFilter(value.safety)
+  );
+}
+
 function isCatalogEndpoint(value: unknown): value is CatalogEndpoint {
   if (!isObject(value)) return false;
   return (
@@ -570,6 +713,10 @@ function isCatalogEndpoint(value: unknown): value is CatalogEndpoint {
     isNonEmptyString(value.platform, 80) &&
     isNonEmptyString(value.method, 16) &&
     /^[A-Z]+$/.test(value.method) &&
+    isCatalogDataType(value.dataType) &&
+    isCatalogTags(value.tags) &&
+    isCatalogSurface(value.surface) &&
+    isCatalogOperationId(value.operationId) &&
     isNullableString(value.summary, 1_000) &&
     isNullableString(value.description, 10_000) &&
     (value.parameterSchema === null || isJsonValue(value.parameterSchema)) &&
@@ -709,6 +856,10 @@ function isCatalogBatchItem(value: unknown): value is CatalogBatchItem {
     isNonEmptyString(value.platform, 80) &&
     isNonEmptyString(value.method, 16) &&
     /^[A-Z]+$/.test(value.method) &&
+    isCatalogDataType(value.dataType) &&
+    isCatalogTags(value.tags) &&
+    isCatalogSurface(value.surface) &&
+    isCatalogOperationId(value.operationId) &&
     isNullableString(value.summary, 1_000) &&
     isSafeNonNegativeInteger(value.expectedRevision) &&
     value.expectedRevision <= 2_147_483_647 &&
@@ -946,6 +1097,18 @@ function isPaymentsResponse(value: unknown): value is PaymentsResponse {
         value.nextOffset <= 100_000)) &&
     value.payments.length <= 200 &&
     value.payments.every(isAdminPayment)
+  );
+}
+
+function isPaymentRecoveryResponse(
+  value: unknown,
+): value is PaymentRecoveryResponse {
+  if (!isObject(value) || !isObject(value.payment)) return false;
+  return (
+    isNonEmptyString(value.payment.id, 180) &&
+    isNullableString(value.payment.providerPaymentId, 160) &&
+    isNonEmptyString(value.payment.status, 64) &&
+    validPaymentStatus.test(value.payment.status)
   );
 }
 
@@ -1211,6 +1374,41 @@ function catalogSafetyFilterLabel(value: CatalogSafetyFilter) {
   return value === "all" ? "全部安全分类" : catalogSafetyLabel(value);
 }
 
+function normalizeCatalogTagKey(value: string) {
+  return value.normalize("NFKC").toLocaleLowerCase("en-US");
+}
+
+function catalogDataTypeLabel(value: CatalogDataType) {
+  const labels: Record<CatalogDataType, string> = {
+    account: "账户",
+    analytics_trends: "分析与趋势",
+    comments: "评论",
+    commerce_marketing: "商业与营销",
+    content: "内容",
+    email: "邮箱",
+    live: "直播",
+    media_download: "媒体下载",
+    profile_creator: "账号与创作者",
+    search_discovery: "搜索与发现",
+    social_graph: "社交关系",
+    system: "系统",
+    taxonomy: "标签与分类",
+    utility: "工具",
+    other: "其他",
+  };
+  return labels[value];
+}
+
+function catalogSurfaceLabel(value: CatalogSurface) {
+  const labels: Record<CatalogSurface, string> = {
+    app: "App",
+    web: "Web",
+    app_web: "App + Web",
+    other: "其他入口",
+  };
+  return labels[value];
+}
+
 function catalogStatusFilterLabel(value: CatalogFilterStatus) {
   const labels: Record<CatalogFilterStatus, string> = {
     all: "全部状态",
@@ -1288,6 +1486,15 @@ function paymentStatusLabel(status: string) {
 
 function paymentStatusClass(status: string) {
   return status.replace(/[^a-z0-9_]/g, "") || "unknown";
+}
+
+function authProviderLabel(provider: string) {
+  const labels: Record<string, string> = {
+    google: "Google",
+    wallet: "钱包",
+    sites: "Sites",
+  };
+  return labels[provider] ?? provider;
 }
 
 function reviewReasonLabel(reason: string) {
@@ -1484,6 +1691,15 @@ function CatalogBatchReceipt({
         {request ? (
           <span>
             选择器：{request.selection.platform ?? "全部平台"} ·{" "}
+            {request.selection.dataType
+              ? catalogDataTypeLabel(request.selection.dataType)
+              : "全部数据类型"}{" "}
+            · {request.selection.tag ? `标签 ${request.selection.tag}` : "全部标签"}{" "}
+            ·{" "}
+            {request.selection.surface
+              ? catalogSurfaceLabel(request.selection.surface)
+              : "全部入口"}{" "}
+            ·{" "}
             {catalogStatusFilterLabel(request.selection.status)} ·{" "}
             {catalogSafetyFilterLabel(request.selection.safety)}
             {request.selection.query
@@ -1656,6 +1872,20 @@ function CatalogBatchReceipt({
                     <span className="admin-platform">{item.platform}</span>
                     <span className="admin-method">{item.method}</span>
                     <code title={item.path}>{item.path}</code>
+                    <small>
+                      {catalogDataTypeLabel(item.dataType)} ({item.dataType}) ·{" "}
+                      {catalogSurfaceLabel(item.surface)}
+                    </small>
+                    {item.tags.length ? (
+                      <small title={item.tags.join(" · ")}>
+                        标签 {item.tags.join(" · ")}
+                      </small>
+                    ) : null}
+                    {item.operationId ? (
+                      <small title={item.operationId}>
+                        operationId {item.operationId}
+                      </small>
+                    ) : null}
                     <small>
                       revision {item.expectedRevision} ·{" "}
                       {item.itemDigest.slice(0, 12)}
@@ -1893,6 +2123,11 @@ export function AdminClient() {
   const [userStatus, setUserStatus] = useState("all");
   const [catalogQuery, setCatalogQuery] = useState("");
   const [catalogPlatform, setCatalogPlatform] = useState("all");
+  const [catalogDataType, setCatalogDataType] =
+    useState<CatalogDataTypeFilter>("all");
+  const [catalogTag, setCatalogTag] = useState<string | null>(null);
+  const [catalogSurface, setCatalogSurface] =
+    useState<CatalogSurfaceFilter>("all");
   const [catalogStatus, setCatalogStatus] =
     useState<CatalogFilterStatus>("all");
   const [catalogSafety, setCatalogSafety] =
@@ -1912,7 +2147,7 @@ export function AdminClient() {
   const [previewingCatalogBatch, setPreviewingCatalogBatch] = useState(false);
   const [refreshingCatalogBatch, setRefreshingCatalogBatch] = useState(false);
   const [applyingCatalogBatch, setApplyingCatalogBatch] = useState(false);
-  const [upstreamLabel, setUpstreamLabel] = useState("TikHub Production");
+  const [upstreamLabel, setUpstreamLabel] = useState("Primary Provider");
   const [upstreamApiKey, setUpstreamApiKey] = useState("");
   const [activateUpstreamAfterSave, setActivateUpstreamAfterSave] =
     useState(true);
@@ -1921,6 +2156,9 @@ export function AdminClient() {
   const [priceDrafts, setPriceDrafts] = useState<Record<string, string>>({});
   const [savingPath, setSavingPath] = useState("");
   const [paymentFilter, setPaymentFilter] = useState("manual_review");
+  const [recoveryOrderId, setRecoveryOrderId] = useState("");
+  const [recoveryPaymentId, setRecoveryPaymentId] = useState("");
+  const [recoveringPayment, setRecoveringPayment] = useState(false);
   const [reviewResolution, setReviewResolution] = useState<{
     review: PaymentReview;
     action: ReviewAction;
@@ -2085,7 +2323,7 @@ export function AdminClient() {
           message:
             error instanceof Error
               ? error.message
-              : "无法读取 TikHub 凭据。",
+              : "无法读取 上游 凭据。",
         });
       }
     },
@@ -2252,6 +2490,39 @@ export function AdminClient() {
     ).sort((left, right) => left.localeCompare(right, "zh-CN"));
   }, [catalog]);
 
+  const catalogDataTypes = useMemo(() => {
+    if (catalog.status !== "ready") return [];
+    const available = new Set(
+      catalog.data.endpoints.map((endpoint) => endpoint.dataType),
+    );
+    return CATALOG_DATA_TYPES.filter((dataType) => available.has(dataType));
+  }, [catalog]);
+
+  const catalogTags = useMemo(() => {
+    if (catalog.status !== "ready") return [];
+    const tagsByKey = new Map<string, string>();
+    for (const endpoint of catalog.data.endpoints) {
+      for (const tag of endpoint.tags) {
+        const key = normalizeCatalogTagKey(tag);
+        const current = tagsByKey.get(key);
+        if (!current || tag.localeCompare(current, "zh-CN") < 0) {
+          tagsByKey.set(key, tag);
+        }
+      }
+    }
+    return Array.from(tagsByKey.values()).sort((left, right) =>
+      left.localeCompare(right, "zh-CN"),
+    );
+  }, [catalog]);
+
+  const catalogSurfaces = useMemo(() => {
+    if (catalog.status !== "ready") return [];
+    const available = new Set(
+      catalog.data.endpoints.map((endpoint) => endpoint.surface),
+    );
+    return CATALOG_SURFACES.filter((surface) => available.has(surface));
+  }, [catalog]);
+
   const currentCatalogBatchRequest = useMemo<CatalogBatchPreviewRequest | null>(
     () => {
       if (catalog.status !== "ready" || !catalog.data.sync) return null;
@@ -2259,27 +2530,35 @@ export function AdminClient() {
       const minimumCustomerPriceUsdMicros = parseUsdInput(
         catalogBatchMinimumPrice,
       );
+      const normalizedTag =
+        catalogTag === null ? null : normalizeCatalogTagKey(catalogTag);
       if (
+        (normalizedTag !== null && !isCatalogTag(normalizedTag)) ||
         catalogBatchAction !== "disable" &&
         (markupBps === null || minimumCustomerPriceUsdMicros === null)
       ) {
         return null;
       }
+      const selection: CatalogBatchSelection = {
+        platform:
+          catalogPlatform === "all"
+            ? null
+            : catalogPlatform.trim().toLowerCase(),
+        dataType: catalogDataType === "all" ? null : catalogDataType,
+        tag: normalizedTag,
+        surface: catalogSurface === "all" ? null : catalogSurface,
+        query: catalogQuery
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLocaleLowerCase("zh-CN"),
+        status: catalogStatus,
+        safety: catalogSafety,
+      };
+      if (!isCatalogBatchSelection(selection)) return null;
       const request: CatalogBatchPreviewRequest = {
         action: catalogBatchAction,
         expectedCatalogGeneration: catalog.data.sync.generation,
-        selection: {
-          platform:
-            catalogPlatform === "all"
-              ? null
-              : catalogPlatform.trim().toLowerCase(),
-          query: catalogQuery
-            .replace(/\s+/g, " ")
-            .trim()
-            .toLocaleLowerCase("zh-CN"),
-          status: catalogStatus,
-          safety: catalogSafety,
-        },
+        selection,
       };
       if (
         catalogBatchAction !== "disable" &&
@@ -2298,10 +2577,13 @@ export function AdminClient() {
       catalogBatchAction,
       catalogBatchMarkupPercent,
       catalogBatchMinimumPrice,
+      catalogDataType,
       catalogPlatform,
       catalogQuery,
       catalogSafety,
       catalogStatus,
+      catalogSurface,
+      catalogTag,
     ],
   );
 
@@ -2314,14 +2596,31 @@ export function AdminClient() {
   const visibleEndpoints = useMemo(() => {
     if (catalog.status !== "ready") return [];
     const query = catalogQuery.trim().toLocaleLowerCase("zh-CN");
+    const selectedTagKey =
+      catalogTag === null ? null : normalizeCatalogTagKey(catalogTag);
     return catalog.data.endpoints.filter((endpoint) => {
       const matchesQuery =
         !query ||
         endpoint.path.toLocaleLowerCase("zh-CN").includes(query) ||
         endpoint.platform.toLocaleLowerCase("zh-CN").includes(query) ||
+        endpoint.dataType.toLocaleLowerCase("zh-CN").includes(query) ||
+        endpoint.surface.toLocaleLowerCase("zh-CN").includes(query) ||
+        endpoint.operationId?.toLocaleLowerCase("zh-CN").includes(query) ||
+        endpoint.tags.some((tag) =>
+          tag.toLocaleLowerCase("zh-CN").includes(query),
+        ) ||
         endpoint.summary?.toLocaleLowerCase("zh-CN").includes(query);
       const matchesPlatform =
         catalogPlatform === "all" || endpoint.platform === catalogPlatform;
+      const matchesDataType =
+        catalogDataType === "all" || endpoint.dataType === catalogDataType;
+      const matchesTag =
+        selectedTagKey === null ||
+        endpoint.tags.some(
+          (tag) => normalizeCatalogTagKey(tag) === selectedTagKey,
+        );
+      const matchesSurface =
+        catalogSurface === "all" || endpoint.surface === catalogSurface;
       const matchesStatus =
         catalogStatus === "all" ||
         (catalogStatus === "enabled" && endpoint.enabled) ||
@@ -2335,14 +2634,25 @@ export function AdminClient() {
       const matchesSafety =
         catalogSafety === "all" ||
         endpoint.safetyClassification === catalogSafety;
-      return matchesQuery && matchesPlatform && matchesStatus && matchesSafety;
+      return (
+        matchesQuery &&
+        matchesPlatform &&
+        matchesDataType &&
+        matchesTag &&
+        matchesSurface &&
+        matchesStatus &&
+        matchesSafety
+      );
     });
   }, [
     catalog,
+    catalogDataType,
     catalogPlatform,
     catalogQuery,
     catalogSafety,
     catalogStatus,
+    catalogSurface,
+    catalogTag,
   ]);
 
   const visiblePayments = useMemo(() => {
@@ -2398,23 +2708,23 @@ export function AdminClient() {
   ) {
     event.preventDefault();
     if (upstreamCredentials.status !== "ready") {
-      setNotice("请先刷新 TikHub 凭据状态。");
+      setNotice("请先刷新 上游 凭据状态。");
       return;
     }
     const label = upstreamLabel.replace(/\s+/g, " ").trim();
     if (label.length < 2 || label.length > 80) {
-      setNotice("TikHub 凭据名称必须是 2–80 个字符。");
+      setNotice("上游 凭据名称必须是 2–80 个字符。");
       return;
     }
     if (
       !/^[\x21-\x7E]{16,512}$/.test(upstreamApiKey)
     ) {
-      setNotice("请输入 16–512 个 ASCII 可见字符组成的 TikHub API Key。");
+      setNotice("请输入 16–512 个 ASCII 可见字符组成的 上游 API Key。");
       return;
     }
     if (!upstreamCredentials.data.encryptionConfigured) {
       setNotice(
-        "服务端尚未配置 TIKHUB_CREDENTIALS_ENCRYPTION_KEY，不能保存上游密钥。",
+        "服务端尚未配置 UPSTREAM_CREDENTIALS_ENCRYPTION_KEY，不能保存上游密钥。",
       );
       return;
     }
@@ -2442,7 +2752,7 @@ export function AdminClient() {
         result.activationConflict
           ? `已加密保存 ${result.credential.label} 为备用；活动数据源在提交期间发生变化，请从列表重新确认切换。`
           : result.credential.status === "active"
-          ? `已验证并启用 ${result.credential.label}；下一步请到“路由与定价”同步 TikHub 目录。`
+          ? `已验证并启用 ${result.credential.label}；下一步请到“路由与定价”同步 上游 目录。`
           : `已加密保存 ${result.credential.label}，当前为备用状态。`,
       );
       await Promise.all([
@@ -2453,7 +2763,7 @@ export function AdminClient() {
       setNotice(
         error instanceof Error
           ? error.message
-          : "TikHub 凭据保存失败。",
+          : "上游 凭据保存失败。",
       );
       await loadUpstreamCredentials();
     } finally {
@@ -2470,7 +2780,7 @@ export function AdminClient() {
       !catalog.data.sync.coverage
     ) {
       setCatalogBatchError(
-        "当前目录没有完整覆盖证明，请先成功同步 TikHub 后再生成批量预览。",
+        "当前目录没有完整覆盖证明，请先成功同步 上游 后再生成批量预览。",
       );
       return;
     }
@@ -2684,6 +2994,51 @@ export function AdminClient() {
     setNotice("");
   }
 
+  async function recoverPayment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (recoveringPayment) return;
+    const orderId = recoveryOrderId.trim();
+    const paymentId = recoveryPaymentId.trim();
+    if (
+      !/^pay_[A-Za-z0-9_-]+$/.test(orderId) ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(paymentId)
+    ) {
+      setNotice("请输入有效的 RelayBase 订单编号和支付服务商编号。");
+      return;
+    }
+    setRecoveringPayment(true);
+    setNotice("");
+    try {
+      const result = await adminRequest(
+        "/api/admin/payments/recover",
+        adminSecret,
+        isPaymentRecoveryResponse,
+        {
+          method: "POST",
+          body: JSON.stringify({ orderId, paymentId }),
+        },
+      );
+      setNotice(
+        `已核验并恢复 ${result.payment.id}，当前状态：${paymentStatusLabel(
+          result.payment.status,
+        )}。`,
+      );
+      setRecoveryOrderId("");
+      setRecoveryPaymentId("");
+      await Promise.all([
+        loadPayments(),
+        loadPaymentReviews(),
+        loadOverview(),
+      ]);
+    } catch (error) {
+      setNotice(
+        error instanceof Error ? error.message : "支付订单恢复失败。",
+      );
+    } finally {
+      setRecoveringPayment(false);
+    }
+  }
+
   async function resolvePaymentReview() {
     if (!reviewResolution || resolvingReview) return;
     const note = reviewNote.trim();
@@ -2757,6 +3112,7 @@ export function AdminClient() {
             body: JSON.stringify({
               userId: confirmAction.user.id,
               status: confirmAction.nextStatus,
+              expectedStatus: confirmAction.user.status,
             }),
           },
         );
@@ -2795,7 +3151,7 @@ export function AdminClient() {
       } else if (confirmAction.kind === "credential") {
         if (upstreamCredentials.status !== "ready") {
           throw new AdminApiError(
-            "TikHub 凭据状态尚未加载，请刷新后重试。",
+            "上游 凭据状态尚未加载，请刷新后重试。",
             409,
           );
         }
@@ -2814,7 +3170,7 @@ export function AdminClient() {
         );
         setNotice(
           confirmAction.action === "activate"
-            ? `已验证并切换到 ${result.credential.label}；下一步请到“路由与定价”重新同步 TikHub 目录。`
+            ? `已验证并切换到 ${result.credential.label}；下一步请到“路由与定价”重新同步 上游 目录。`
             : `已撤销 ${result.credential.label}；密文不会再被运行时使用。`,
         );
         await Promise.all([
@@ -2842,7 +3198,7 @@ export function AdminClient() {
       ) {
         setConfirmAction(null);
         await loadUpstreamCredentials();
-        setNotice("TikHub 活动凭据状态已变化，请重新确认本次操作。");
+        setNotice("上游 活动凭据状态已变化，请重新确认本次操作。");
       } else {
         setNotice(error instanceof Error ? error.message : "管理操作失败。");
       }
@@ -2861,7 +3217,7 @@ export function AdminClient() {
           <p className="section-kicker">RELAYBASE / OPERATIONS</p>
           <h1 id="admin-login-title">运营管理后台</h1>
           <p className="admin-login-intro">
-            查看实际用户与调用数据，维护 TikHub 路由、成本、客户价和支付复核队列。
+            查看实际用户与调用数据，维护 上游 路由、成本、客户价和支付复核队列。
           </p>
           <form onSubmit={submitSecret}>
             <label htmlFor="admin-secret">管理员主密钥</label>
@@ -2954,7 +3310,7 @@ export function AdminClient() {
             [
               ["overview", "运营总览"],
               ["users", "用户管理"],
-              ["upstream", "TikHub 数据源"],
+              ["upstream", "上游 数据源"],
               ["catalog", "路由与定价"],
               ["payments", "支付复核"],
             ] as const
@@ -3017,7 +3373,9 @@ export function AdminClient() {
                       <ul>
                         {overviewData.readiness.missing.length ? (
                           overviewData.readiness.missing.map((item) => (
-                            <li key={item}>{item}</li>
+                            <li key={item}>
+                              {readinessMissingLabel(item)}
+                            </li>
                           ))
                         ) : (
                           <li>服务端未提供具体缺失项</li>
@@ -3036,7 +3394,7 @@ export function AdminClient() {
                         aria-hidden="true"
                       />
                       <div>
-                        <strong>TikHub 上游连接</strong>
+                        <strong>上游连接</strong>
                         <p>
                           {overviewData.upstream.baseUrl ?? "上游地址尚未配置"}
                         </p>
@@ -3264,6 +3622,18 @@ export function AdminClient() {
                             <div>
                               <strong>{user.displayName}</strong>
                               <p>{user.email}</p>
+                              <p>
+                                {user.providers
+                                  .map(authProviderLabel)
+                                  .join(" / ")}
+                                {" · "}
+                                {user.activeKeyCount} Key
+                                {" · "}
+                                {user.activeSessionCount} 会话
+                              </p>
+                              {user.walletAddress ? (
+                                <code>{user.walletAddress}</code>
+                              ) : null}
                               <code>{user.id}</code>
                             </div>
                           </div>
@@ -3344,8 +3714,8 @@ export function AdminClient() {
           >
             <div className="admin-section-head">
               <div>
-                <p className="section-kicker">TIKHUB / DATA SOURCE</p>
-                <h2 id="upstream-credentials-title">TikHub 数据源</h2>
+                <p className="section-kicker">UPSTREAM / DATA SOURCE</p>
+                <h2 id="upstream-credentials-title">上游 数据源</h2>
               </div>
               <button
                 className="button button-ghost button-small"
@@ -3356,7 +3726,7 @@ export function AdminClient() {
             </div>
             <StatePanel
               state={upstreamCredentials}
-              label="TikHub 凭据"
+              label="上游 凭据"
               onRetry={() => void loadUpstreamCredentials()}
             >
               {upstreamCredentials.status === "ready" ? (
@@ -3368,8 +3738,8 @@ export function AdminClient() {
                         <p>
                           先在 Sites 环境中设置 32 字节、无 padding、
                           43 字符 base64url 格式的
-                          TIKHUB_CREDENTIALS_ENCRYPTION_KEY，再保存
-                          TikHub API Key。
+                          UPSTREAM_CREDENTIALS_ENCRYPTION_KEY，再保存
+                          上游 API Key。
                         </p>
                       </div>
                     </div>
@@ -3392,7 +3762,7 @@ export function AdminClient() {
                       <div>
                         <strong>旧环境变量 Key 已被安全忽略</strong>
                         <p>
-                          托管模式启用后不会回退 TIKHUB_API_KEY；
+                          托管模式启用后不会回退 UPSTREAM_API_KEY；
                           请在此处切换活动凭据，避免意外使用旧 Key。
                         </p>
                       </div>
@@ -3441,7 +3811,7 @@ export function AdminClient() {
                   >
                     <div>
                       <p className="section-kicker">ADD CREDENTIAL</p>
-                      <h3>新增 TikHub API Key</h3>
+                      <h3>新增 上游 API Key</h3>
                       <p>
                         Key 经同源 HTTPS 提交后立即使用 AES-256-GCM
                         加密；D1 保存密文、完整哈希、已验证 scope
@@ -3458,11 +3828,11 @@ export function AdminClient() {
                         onChange={(event) =>
                           setUpstreamLabel(event.target.value)
                         }
-                        placeholder="例如：TikHub Production"
+                        placeholder="例如：Primary Provider"
                       />
                     </label>
                     <label>
-                      <span>TikHub API Key</span>
+                      <span>上游 API Key</span>
                       <input
                         type="password"
                         autoComplete="off"
@@ -3486,7 +3856,7 @@ export function AdminClient() {
                         }
                       />
                       <span>
-                        保存后向 TikHub 验证并设为活动数据源
+                        保存后向 上游 验证并设为活动数据源
                         <small>
                           关闭时仅加密保存为备用，不会用于任何客户请求
                         </small>
@@ -3600,9 +3970,9 @@ export function AdminClient() {
                     </div>
                   ) : (
                     <div className="admin-empty">
-                      <strong>尚未保存 TikHub 凭据</strong>
+                      <strong>尚未保存 上游 凭据</strong>
                       <p>
-                        配置加密主密钥后，在上方添加第一个 TikHub API Key。
+                        配置加密主密钥后，在上方添加第一个 上游 API Key。
                       </p>
                     </div>
                   )}
@@ -3616,7 +3986,7 @@ export function AdminClient() {
           <section className="admin-section" aria-labelledby="catalog-admin-title">
             <div className="admin-section-head">
               <div>
-                <p className="section-kicker">TIKHUB CATALOG CONTROL</p>
+                <p className="section-kicker">UPSTREAM CATALOG CONTROL</p>
                 <h2 id="catalog-admin-title">路由与定价</h2>
               </div>
               <div className="admin-section-actions">
@@ -3630,7 +4000,7 @@ export function AdminClient() {
                   className="button button-dark button-small"
                   onClick={() => setConfirmAction({ kind: "sync" })}
                 >
-                  同步 TikHub
+                  同步 上游
                 </button>
               </div>
             </div>
@@ -3751,7 +4121,7 @@ export function AdminClient() {
                       <div className="admin-catalog-proof-missing">
                         <strong>当前记录缺少覆盖证明</strong>
                         <p>
-                          请重新同步 TikHub；在新快照成功发布前，系统不会伪造覆盖数量。
+                          请重新同步 上游；在新快照成功发布前，系统不会伪造覆盖数量。
                         </p>
                       </div>
                     )}
@@ -3791,7 +4161,7 @@ export function AdminClient() {
                             onChange={(event) =>
                               setCatalogQuery(event.target.value)
                             }
-                            placeholder="平台、摘要或 /v1/ 路径"
+                            placeholder="平台、标签、operationId、摘要或 /v1/ 路径"
                           />
                         </label>
                         <label>
@@ -3806,6 +4176,74 @@ export function AdminClient() {
                             {catalogPlatforms.map((platform) => (
                               <option value={platform} key={platform}>
                                 {platform}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          <span>数据类型</span>
+                          <select
+                            value={catalogDataType}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              if (
+                                value === "all" ||
+                                isCatalogDataType(value)
+                              ) {
+                                setCatalogDataType(value);
+                              }
+                            }}
+                          >
+                            <option value="all">全部数据类型</option>
+                            {catalogDataTypes.map((dataType) => (
+                              <option value={dataType} key={dataType}>
+                                {catalogDataTypeLabel(dataType)} · {dataType}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          <span>标签（精确匹配）</span>
+                          <select
+                            value={catalogTag ?? ""}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              if (value === "") {
+                                setCatalogTag(null);
+                              } else if (isCatalogTag(value)) {
+                                setCatalogTag(value);
+                              }
+                            }}
+                          >
+                            <option value="">全部标签</option>
+                            {catalogTags.map((tag) => (
+                              <option
+                                value={tag}
+                                key={normalizeCatalogTagKey(tag)}
+                              >
+                                {tag}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          <span>调用入口</span>
+                          <select
+                            value={catalogSurface}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              if (
+                                value === "all" ||
+                                isCatalogSurface(value)
+                              ) {
+                                setCatalogSurface(value);
+                              }
+                            }}
+                          >
+                            <option value="all">全部入口</option>
+                            {catalogSurfaces.map((surface) => (
+                              <option value={surface} key={surface}>
+                                {catalogSurfaceLabel(surface)} · {surface}
                               </option>
                             ))}
                           </select>
@@ -3981,8 +4419,8 @@ export function AdminClient() {
                       <div className="admin-catalog-batch-empty">
                         <strong>尚未生成批量预览</strong>
                         <p>
-                          选择平台、状态与安全分类，再冻结一份有时效的服务端快照。
-                          预览最多返回前 100 条明细。
+                          选择平台、数据类型、标签、入口、状态与安全分类，
+                          再冻结一份有时效的服务端快照。预览最多返回前 100 条明细。
                         </p>
                       </div>
                     )}
@@ -4060,6 +4498,34 @@ export function AdminClient() {
                                     : "等待成本"}
                                 </span>
                               </div>
+                            </div>
+                            <div className="admin-endpoint-taxonomy">
+                              <span>
+                                数据类型{" "}
+                                <strong>
+                                  {catalogDataTypeLabel(endpoint.dataType)}
+                                </strong>{" "}
+                                <code>{endpoint.dataType}</code>
+                              </span>
+                              <span>
+                                入口{" "}
+                                <strong>
+                                  {catalogSurfaceLabel(endpoint.surface)}
+                                </strong>{" "}
+                                <code>{endpoint.surface}</code>
+                              </span>
+                              <span title={endpoint.tags.join(" · ")}>
+                                标签{" "}
+                                <strong>
+                                  {endpoint.tags.length
+                                    ? endpoint.tags.join(" · ")
+                                    : "无"}
+                                </strong>
+                              </span>
+                              <span title={endpoint.operationId ?? undefined}>
+                                operationId{" "}
+                                <code>{endpoint.operationId ?? "未提供"}</code>
+                              </span>
                             </div>
                             {endpoint.safetyReasons.length ? (
                               <div className="admin-endpoint-safety-reasons">
@@ -4208,7 +4674,7 @@ export function AdminClient() {
                     <div className="admin-empty">
                       <strong>没有符合条件的接口</strong>
                       <p>
-                        调整筛选条件，或从 TikHub 同步最新端点目录。
+                        调整筛选条件，或从 上游 同步最新端点目录。
                       </p>
                     </div>
                   )}
@@ -4387,6 +4853,49 @@ export function AdminClient() {
                 <p>用于对照充值单金额、链上地址、服务商编号与当前状态。</p>
               </div>
             </div>
+            <form
+              className="admin-toolbar admin-toolbar-wide admin-payment-recovery"
+              onSubmit={recoverPayment}
+            >
+              <label>
+                <span>RelayBase 订单编号</span>
+                <input
+                  value={recoveryOrderId}
+                  onChange={(event) =>
+                    setRecoveryOrderId(event.target.value)
+                  }
+                  placeholder="pay_..."
+                  maxLength={180}
+                  autoComplete="off"
+                />
+              </label>
+              <label>
+                <span>支付服务商编号</span>
+                <input
+                  value={recoveryPaymentId}
+                  onChange={(event) =>
+                    setRecoveryPaymentId(event.target.value)
+                  }
+                  placeholder="NOWPayments payment_id"
+                  maxLength={128}
+                  autoComplete="off"
+                />
+              </label>
+              <p>
+                仅用于服务商已创建、但本地尚未绑定的订单；服务端会重新查询并核验全部金额与币种。
+              </p>
+              <button
+                className="button button-blue button-small"
+                type="submit"
+                disabled={
+                  recoveringPayment ||
+                  !recoveryOrderId.trim() ||
+                  !recoveryPaymentId.trim()
+                }
+              >
+                {recoveringPayment ? "核验中…" : "核验并恢复"}
+              </button>
+            </form>
             <StatePanel
               state={payments}
               label="原始支付单"
@@ -4531,9 +5040,9 @@ export function AdminClient() {
                   : "下架此接口？"
                 : confirmAction.kind === "credential"
                   ? confirmAction.action === "activate"
-                    ? "验证并切换 TikHub 数据源？"
-                    : "撤销这个 TikHub API Key？"
-                  : "从 TikHub 同步全部接口？"
+                    ? "验证并切换 上游 数据源？"
+                    : "撤销这个 上游 API Key？"
+                  : "从 上游 同步全部接口？"
           }
           description={
             confirmAction.kind === "user"
@@ -4546,11 +5055,11 @@ export function AdminClient() {
                   : `${confirmAction.endpoint.path} 将立即停止接受新调用，历史账单不受影响。`
                 : confirmAction.kind === "credential"
                   ? confirmAction.action === "activate"
-                    ? `服务端会先向 TikHub 验证 ${confirmAction.credential.label}，成功后用版本比较切换唯一活动凭据。`
+                    ? `服务端会先向 上游 验证 ${confirmAction.credential.label}，成功后用版本比较切换唯一活动凭据。`
                     : confirmAction.credential.status === "active"
                       ? `撤销 ${confirmAction.credential.label} 后托管模式会保持开启，但数据调用和目录同步将安全关闭，直到启用另一个 Key。`
                       : `${confirmAction.credential.label} 将永久标记为已撤销，不能再次启用。`
-                  : "同步会读取 TikHub 当前目录。新接口默认下架，价格变化的已上架接口会自动下架等待复核，客户价不会被静默覆盖。"
+                  : "同步会读取 上游 当前目录。新接口默认下架，价格变化的已上架接口会自动下架等待复核，客户价不会被静默覆盖。"
           }
           confirmLabel={
             confirmAction.kind === "user"

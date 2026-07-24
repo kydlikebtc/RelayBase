@@ -110,12 +110,12 @@ export default async function Home() {
                 <span className="code-blue">curl</span> --request GET \{"\n"}
                 <span className="code-muted">02</span> &nbsp;
                 <span className="code-lime">
-                  &apos;{origin}/v1/tiktok/
+                  &apos;{origin}/v1/example/
                   {"\n"}
                 </span>
                 <span className="code-muted">03</span> &nbsp;
                 <span className="code-lime">
-                  web/fetch_user_profile?uniqueId=mrbeast&apos;
+                  profile/read?profile_id=demo-123&apos;
                 </span>{" "}
                 \{"\n"}
                 <span className="code-muted">04</span> &nbsp;--header{" "}
@@ -241,7 +241,7 @@ export default async function Home() {
         </div>
         <div className="workflow-endpoint">
           <span className="endpoint-method">GET</span>
-          <code>/v1/tiktok/web/fetch_user_profile</code>
+          <code>/v1/example/profile/read</code>
           <span className="endpoint-latency">200 · 482 ms</span>
         </div>
       </section>

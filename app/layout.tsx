@@ -19,7 +19,7 @@ export async function generateMetadata(): Promise<Metadata> {
     description:
       "统一调用分散的平台数据接口，使用稳定币充值，只为上游成功请求扣费。",
     applicationName: "RelayBase API",
-    keywords: ["数据 API", "开发者 API", "稳定币支付", "TikTok API"],
+    keywords: ["数据 API", "开发者 API", "稳定币支付", "多平台数据 API"],
     icons: {
       icon: [{ url: "/favicon.svg", type: "image/svg+xml" }],
       shortcut: "/favicon.svg",

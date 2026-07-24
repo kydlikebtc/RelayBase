@@ -1,5 +1,11 @@
 import { recoverMessageAddress } from "viem";
 import packageJson from "../package.json";
+import {
+  PROVIDER_DATA_TYPES,
+  PROVIDER_SURFACES,
+  providerDataTypeFor,
+  providerSurfaceForPath,
+} from "../shared/provider-taxonomy.mjs";
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -19,6 +25,13 @@ const MAX_UPSTREAM_ERROR_BODY_BYTES = 32 * 1024;
 const MAX_PROVIDER_RESPONSE_BYTES = 256 * 1024;
 const MAX_CATALOG_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_OPENAPI_RESPONSE_BYTES = 16 * 1024 * 1024;
+const MAX_OPENAPI_INPUT_SCHEMA_BYTES = 16 * 1024;
+const MAX_OPENAPI_REFERENCE_DEPTH = 16;
+const MAX_OPENAPI_REFERENCE_NODES = 4_000;
+const MAX_OPENAPI_REFERENCE_BYTES = 64 * 1024;
+const MAX_OPENAPI_REFERENCE_STRING_BYTES = 16 * 1024;
+const MAX_OPENAPI_REFERENCE_ITEMS = 1_000;
+const MAX_OPENAPI_REFERENCES = 512;
 const MAX_PROXY_BODY_BYTES = 256 * 1024;
 const CATALOG_SAFETY_POLICY_VERSION = 1;
 const MAX_CATALOG_BATCH_TARGETS = 2_000;
@@ -72,20 +85,55 @@ const CATALOG_COVERAGE_WHERE = `
   AND length(price_snapshot_hash) = 64
   AND price_snapshot_hash NOT GLOB '*[^0-9a-f]*'
 `;
+const CATALOG_DATA_TYPE_SQL_VALUES =
+  "'account','analytics_trends','comments','commerce_marketing'," +
+  "'content','email','live','media_download','profile_creator'," +
+  "'search_discovery','social_graph','system','taxonomy','utility','other'";
+const CATALOG_SURFACE_SQL_VALUES = "'app','web','app_web','other'";
+
+function catalogTaxonomyValidWhere(alias: string): string {
+  const safeTags =
+    `CASE WHEN json_valid(${alias}.tags_json) ` +
+    `AND json_type(${alias}.tags_json) = 'array' ` +
+    `THEN ${alias}.tags_json ELSE '[]' END`;
+  return `
+    ${alias}.data_type IN (${CATALOG_DATA_TYPE_SQL_VALUES})
+    AND ${alias}.surface IN (${CATALOG_SURFACE_SQL_VALUES})
+    AND json_valid(${alias}.tags_json)
+    AND json_type(${alias}.tags_json) = 'array'
+    AND json_array_length(${alias}.tags_json) BETWEEN 0 AND 100
+    AND NOT EXISTS (
+      SELECT 1 FROM json_each(${safeTags}) AS taxonomy_tag
+      WHERE taxonomy_tag.type != 'text'
+        OR length(taxonomy_tag.value) NOT BETWEEN 1 AND 160
+        OR trim(taxonomy_tag.value) != taxonomy_tag.value
+    )
+    AND (
+      SELECT COUNT(*) FROM json_each(${safeTags})
+    ) = (
+      SELECT COUNT(DISTINCT taxonomy_tag.value)
+      FROM json_each(${safeTags}) AS taxonomy_tag
+    )
+    AND (
+      ${alias}.operation_id IS NULL
+      OR length(${alias}.operation_id) BETWEEN 1 AND 500
+    )
+  `;
+}
 
 export interface PlatformEnv {
   DB?: D1Database;
-  TIKHUB_API_KEY?: string;
-  TIKHUB_CREDENTIALS_ENCRYPTION_KEY?: string;
-  TIKHUB_BASE_URL?: string;
+  UPSTREAM_API_KEY?: string;
+  UPSTREAM_CREDENTIALS_ENCRYPTION_KEY?: string;
+  UPSTREAM_BASE_URL?: string;
   RESELLER_AUTHORIZED?: string;
   PAYMENT_PROVIDER?: string;
   NOWPAYMENTS_API_KEY?: string;
   NOWPAYMENTS_IPN_SECRET?: string;
   CRYPTO_PAYMENTS_ENABLED?: string;
+  UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED?: string;
   LEGAL_REVIEW_CONFIRMED?: string;
   PUBLIC_APP_URL?: string;
-  DEFAULT_REQUEST_COST_USD_MICROS?: string;
   API_RATE_LIMIT_RPM?: string;
   UPSTREAM_TIMEOUT_MS?: string;
   UPSTREAM_MAX_RESPONSE_BYTES?: string;
@@ -127,6 +175,10 @@ type CatalogRecord = {
   path: string;
   platform: string;
   http_method: string;
+  data_type: CatalogDataType;
+  tags_json: string;
+  surface: MarketplaceSurface;
+  operation_id: string | null;
   upstream_price_usd_micros: number;
   customer_price_usd_micros: number;
   price_verified: number;
@@ -139,6 +191,80 @@ type CatalogRecord = {
   safety_policy_version: number;
   sync_generation: string | null;
   coverage_verified: number;
+};
+
+type MarketplaceSurface = "app" | "web" | "app_web" | "other";
+type CatalogDataType =
+  | "account"
+  | "analytics_trends"
+  | "comments"
+  | "commerce_marketing"
+  | "content"
+  | "email"
+  | "live"
+  | "media_download"
+  | "profile_creator"
+  | "search_discovery"
+  | "social_graph"
+  | "system"
+  | "taxonomy"
+  | "utility"
+  | "other";
+type MarketplaceAvailability = "available" | "pending" | "restricted";
+
+type MarketplaceReferenceEndpoint = {
+  path: string;
+  platform: string;
+  dataType: string;
+  method: "GET" | "POST";
+  surface: MarketplaceSurface;
+  tags: string[];
+  summary: string | null;
+  description: string | null;
+  operationId: string | null;
+  parameters: Record<string, unknown>[];
+  requestBody: Record<string, unknown> | null;
+  response: Record<string, unknown> | null;
+};
+
+type MarketplaceReference = {
+  source: {
+    provider: string;
+    openApiVersion: string | null;
+    snapshotHash: string | null;
+    generatedAt: string | null;
+    operationCount: number;
+  };
+  stats: {
+    total: number;
+    get: number;
+    post: number;
+    platforms: number;
+    dataTypes: number;
+  };
+  endpoints: MarketplaceReferenceEndpoint[];
+};
+
+type MarketplaceCatalogOverlay = {
+  path: string;
+  platform: string;
+  http_method: string;
+  data_type: CatalogDataType;
+  tags_json: string;
+  surface: MarketplaceSurface;
+  operation_id: string | null;
+  summary: string | null;
+  description: string | null;
+  parameter_schema_json: string | null;
+  customer_price_usd_micros: number;
+  price_verified: number;
+  enabled: number;
+  read_only: number;
+  safety_classification: CatalogSafetyClassification;
+  safety_policy_version: number;
+  updated_at: string;
+  catalog_openapi_snapshot_hash: string | null;
+  catalog_openapi_operation_count: number | null;
 };
 
 type CatalogSafetyClassification =
@@ -218,6 +344,10 @@ type CatalogBatchItemRecord = {
   ordinal: number;
   platform: string;
   http_method: string;
+  data_type: CatalogDataType;
+  tags_json: string;
+  surface: MarketplaceSurface;
+  operation_id: string | null;
   summary: string | null;
   expected_revision: number;
   original_upstream_price_usd_micros: number;
@@ -266,7 +396,7 @@ type ManagedUpstreamCredentialRecord = {
   revoked_at: string | null;
 };
 
-type ResolvedTikHubCredential = {
+type ResolvedUpstreamProviderCredential = {
   secret: string;
   fingerprint: string;
   source: "managed" | "environment";
@@ -276,7 +406,7 @@ type ResolvedTikHubCredential = {
   stateVersion: number;
 };
 
-type TikHubCredentialVerification = {
+type UpstreamProviderCredentialVerification = {
   scopes: string[];
   expiresAt: string | null;
 };
@@ -352,6 +482,17 @@ export async function handlePlatformRequest(
 
     if (url.pathname === "/api/catalog" && request.method === "GET") {
       return await handlePublicCatalog(request, env, requestId);
+    }
+
+    if (url.pathname === "/api/marketplace" && request.method === "GET") {
+      return await handleMarketplace(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/marketplace/detail" &&
+      request.method === "GET"
+    ) {
+      return await handleMarketplaceDetail(request, env, requestId);
     }
 
     if (
@@ -1299,83 +1440,49 @@ async function upsertAuthIdentity(
   const candidateUserId = `usr_${(
     await sha256Hex(`${input.provider}:${input.subject}`)
   ).slice(0, 24)}`;
-  const insertedUser = await db
-    .prepare(
-      `INSERT OR IGNORE INTO users
-       (id, email, display_name, status, created_at, updated_at)
-       VALUES (?, ?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-    )
-    .bind(candidateUserId, syntheticEmail, input.displayName)
-    .run();
-  if (Number(insertedUser.meta?.changes ?? 0) !== 1) {
-    const racedIdentity = await db
-      .prepare(
-        `SELECT u.id, u.email, u.display_name, u.status,
-                ai.wallet_address
-         FROM auth_identities ai
-         JOIN users u ON u.id = ai.user_id
-         WHERE ai.provider = ? AND ai.subject = ?`,
-      )
-      .bind(input.provider, input.subject)
-      .first<{
-        id: string;
-        email: string;
-        display_name: string | null;
-        status: string;
-        wallet_address: string | null;
-      }>();
-    if (racedIdentity?.status === "active") {
-      return {
-        id: racedIdentity.id,
-        email: racedIdentity.email,
-        displayName:
-          racedIdentity.display_name ?? input.displayName,
-        provider: input.provider,
-        walletAddress: racedIdentity.wallet_address,
-      };
-    }
-    throw new PlatformError(
-      409,
-      "identity_link_required",
-      "该邮箱已有 RelayBase 账户；为保护余额与 API Key，请通过受控账户恢复完成关联。",
-    );
-  }
-  const user = await db
-    .prepare(
-      `SELECT id, email, display_name, status
-       FROM users
-       WHERE email = ?`,
-    )
-    .bind(syntheticEmail)
-    .first<{
-      id: string;
-      email: string;
-      display_name: string | null;
-      status: string;
-    }>();
-  if (!user || user.status !== "active") {
-    throw new PlatformError(403, "account_suspended", "账户当前不可用。");
-  }
-
   const identityId = `aid_${(
     await sha256Hex(`${input.provider}:${input.subject}`)
   ).slice(0, 28)}`;
-  await db
-    .prepare(
-      `INSERT OR IGNORE INTO auth_identities
-       (id, user_id, provider, subject, email, wallet_address,
-        created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-    )
-    .bind(
-      identityId,
-      user.id,
-      input.provider,
-      input.subject,
-      input.email,
-      input.walletAddress,
-    )
-    .run();
+  await db.batch([
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO users
+         (id, email, display_name, status, created_at, updated_at)
+         SELECT ?, ?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+         WHERE NOT EXISTS (
+           SELECT 1
+           FROM auth_identities
+           WHERE provider = ? AND subject = ?
+         )`,
+      )
+      .bind(
+        candidateUserId,
+        syntheticEmail,
+        input.displayName,
+        input.provider,
+        input.subject,
+      ),
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO auth_identities
+         (id, user_id, provider, subject, email, wallet_address,
+          created_at, updated_at)
+         SELECT ?, u.id, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+         FROM users u
+         WHERE u.id = ?
+           AND u.email = ?
+           AND u.status = 'active'`,
+      )
+      .bind(
+        identityId,
+        input.provider,
+        input.subject,
+        input.email,
+        input.walletAddress,
+        candidateUserId,
+        syntheticEmail,
+      ),
+  ]);
   const linked = await db
     .prepare(
       `SELECT u.id, u.email, u.display_name, u.status,
@@ -1392,20 +1499,30 @@ async function upsertAuthIdentity(
       status: string;
       wallet_address: string | null;
     }>();
-  if (!linked || linked.status !== "active") {
-    throw new PlatformError(
-      409,
-      "identity_link_conflict",
-      "该身份已关联到其他不可用账户。",
-    );
+  if (linked?.status === "active") {
+    return {
+      id: linked.id,
+      email: linked.email,
+      displayName: linked.display_name ?? input.displayName,
+      provider: input.provider,
+      walletAddress: linked.wallet_address,
+    };
   }
-  return {
-    id: linked.id,
-    email: linked.email,
-    displayName: linked.display_name ?? input.displayName,
-    provider: input.provider,
-    walletAddress: linked.wallet_address,
-  };
+  if (linked) {
+    throw new PlatformError(403, "account_suspended", "账户当前不可用。");
+  }
+  const candidate = await db
+    .prepare(`SELECT status FROM users WHERE id = ? AND email = ?`)
+    .bind(candidateUserId, syntheticEmail)
+    .first<{ status: string }>();
+  if (candidate && candidate.status !== "active") {
+    throw new PlatformError(403, "account_suspended", "账户当前不可用。");
+  }
+  throw new PlatformError(
+    409,
+    "identity_link_required",
+    "该邮箱已有 RelayBase 账户；为保护余额与 API Key，请通过受控账户恢复完成关联。",
+  );
 }
 
 async function createAuthSession(
@@ -1420,7 +1537,7 @@ async function createAuthSession(
   const expiresAt = new Date(
     Date.now() + ttlDays * 24 * 60 * 60_000,
   ).toISOString();
-  await db.batch([
+  const sessionResults = await db.batch([
     db
       .prepare(
         `DELETE FROM auth_sessions
@@ -1445,10 +1562,17 @@ async function createAuthSession(
       .prepare(
         `INSERT INTO auth_sessions
          (token_hash, user_id, provider, created_at, last_seen_at, expires_at)
-         VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)`,
+         SELECT ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?
+         WHERE EXISTS (
+           SELECT 1 FROM users
+           WHERE id = ? AND status = 'active'
+         )`,
       )
-      .bind(tokenHash, user.id, user.provider, expiresAt),
+      .bind(tokenHash, user.id, user.provider, expiresAt, user.id),
   ]);
+  if (Number(sessionResults[2]?.meta?.changes ?? 0) !== 1) {
+    throw new PlatformError(403, "account_suspended", "账户当前不可用。");
+  }
   return {
     cookie: authCookie(
       SESSION_COOKIE,
@@ -1718,11 +1842,46 @@ async function handleDashboard(
       .bind(user.id),
     db
       .prepare(
-        `SELECT id, amount_usd_micros, pay_currency, pay_amount,
-                pay_address, invoice_url, status, created_at, updated_at
-         FROM payment_orders
-         WHERE user_id = ?
-         ORDER BY created_at DESC
+        `SELECT p.id, p.amount_usd_micros, p.pay_currency, p.pay_amount,
+                p.pay_address, p.invoice_url, p.status,
+                p.credited_usd_micros,
+                COALESCE((
+                  SELECT -SUM(l.delta_usd_micros)
+                  FROM balance_ledger l
+                  WHERE l.user_id = p.user_id
+                    AND l.delta_usd_micros < 0
+                    AND (
+                      l.reference_id =
+                        'nowpayments:' || p.provider_payment_id || ':reversal'
+                      OR EXISTS (
+                        SELECT 1
+                        FROM payment_review_cases r
+                        WHERE r.order_id = p.id
+                          AND l.reference_id =
+                            'nowpayments-review:' || r.id || ':reversal'
+                      )
+                    )
+                ), 0) AS reversed_usd_micros,
+                (
+                  SELECT r.reason
+                  FROM payment_review_cases r
+                  WHERE r.order_id = p.id
+                  ORDER BY CASE r.status WHEN 'open' THEN 0 ELSE 1 END,
+                           r.created_at DESC
+                  LIMIT 1
+                ) AS review_reason,
+                (
+                  SELECT r.status
+                  FROM payment_review_cases r
+                  WHERE r.order_id = p.id
+                  ORDER BY CASE r.status WHEN 'open' THEN 0 ELSE 1 END,
+                           r.created_at DESC
+                  LIMIT 1
+                ) AS review_status,
+                p.created_at, p.updated_at
+         FROM payment_orders p
+         WHERE p.user_id = ?
+         ORDER BY p.created_at DESC
          LIMIT 10`,
       )
       .bind(user.id),
@@ -1786,6 +1945,10 @@ async function handleDashboard(
         pay_address: string | null;
         invoice_url: string | null;
         status: string;
+        credited_usd_micros: number;
+        reversed_usd_micros: number;
+        review_reason: string | null;
+        review_status: string | null;
         created_at: string;
         updated_at: string;
       }>(paymentsResult).map((row) => ({
@@ -1796,6 +1959,10 @@ async function handleDashboard(
         payAddress: row.pay_address,
         invoiceUrl: safeInvoiceUrl(row.invoice_url),
         status: row.status,
+        creditedUsdMicros: Number(row.credited_usd_micros),
+        reversedUsdMicros: Number(row.reversed_usd_micros),
+        reviewReason: row.review_reason,
+        reviewStatus: row.review_status,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       })),
@@ -1847,29 +2014,42 @@ async function handleCreateApiKey(
   const rateLimit = clampInteger(env.API_RATE_LIMIT_RPM, 60, 1, 600);
   const createdAt = new Date().toISOString();
 
-  const inserted = await db
-    .prepare(
-      `INSERT INTO api_keys
-       (id, user_id, label, key_prefix, key_hash, rate_limit_rpm, created_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?
-       WHERE (
-         SELECT COUNT(*)
-         FROM api_keys
-         WHERE user_id = ? AND revoked_at IS NULL
-       ) < 5`,
-    )
-    .bind(
-      id,
-      user.id,
-      label,
-      prefix,
-      keyHash,
-      rateLimit,
-      createdAt,
-      user.id,
-    )
-    .run();
+  const [inserted, statusResult] = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO api_keys
+         (id, user_id, label, key_prefix, key_hash, rate_limit_rpm, created_at)
+         SELECT ?, ?, ?, ?, ?, ?, ?
+         WHERE EXISTS (
+           SELECT 1 FROM users
+           WHERE id = ? AND status = 'active'
+         )
+           AND (
+             SELECT COUNT(*)
+             FROM api_keys
+             WHERE user_id = ? AND revoked_at IS NULL
+           ) < 5`,
+      )
+      .bind(
+        id,
+        user.id,
+        label,
+        prefix,
+        keyHash,
+        rateLimit,
+        createdAt,
+        user.id,
+        user.id,
+      ),
+    db
+      .prepare(`SELECT status FROM users WHERE id = ?`)
+      .bind(user.id),
+  ]);
   if (Number(inserted.meta?.changes ?? 0) !== 1) {
+    const currentStatus = firstResult<{ status: string }>(statusResult)?.status;
+    if (currentStatus !== "active") {
+      throw new PlatformError(403, "account_suspended", "账户当前不可用。");
+    }
     throw new PlatformError(
       409,
       "api_key_limit",
@@ -1937,6 +2117,13 @@ async function handleCreatePayment(
       503,
       "payments_in_sandbox",
       "真实加密充值尚未启用；完成商户审核与法律审查后方可开放。",
+    );
+  }
+  if (env.UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED !== "true") {
+    throw new PlatformError(
+      503,
+      "commercial_clearance_required",
+      "UpstreamProvider 对稳定币仅作为 API 服务付款方式的书面澄清尚未归档，真实充值保持关闭。",
     );
   }
   const readiness = await operationalReadiness(env);
@@ -2978,11 +3165,25 @@ async function handleProxyRequest(
       "数据库迁移尚未完成，已停止真实调用与扣费。",
     );
   }
+  if (
+    readiness.capabilities.databaseConfigured &&
+    readiness.capabilities.configurationValid &&
+    readiness.capabilities.legalReviewConfirmed &&
+    readiness.capabilities.resellerAuthorized &&
+    readiness.capabilities.upstreamConfigured &&
+    !readiness.capabilities.commercialClearanceConfirmed
+  ) {
+    throw new PlatformError(
+      503,
+      "commercial_clearance_required",
+      "UpstreamProvider 对稳定币仅作为 API 服务付款方式的书面澄清尚未归档，真实代理保持关闭。",
+    );
+  }
   if (!readiness.capabilities.proxyEnabled) {
     throw new PlatformError(
       503,
       "upstream_not_authorized",
-      "上游转售尚未启用；需先完成 TikHub 经销/白标授权并配置服务端密钥。",
+      "上游转售尚未启用；需先完成 UpstreamProvider 经销/白标授权并配置服务端密钥。",
     );
   }
   if (
@@ -3037,7 +3238,8 @@ async function handleProxyRequest(
   try {
     catalog = await db
       .prepare(
-        `SELECT path, platform, http_method, upstream_price_usd_micros,
+        `SELECT path, platform, http_method, data_type, tags_json, surface,
+                operation_id, upstream_price_usd_micros,
                 customer_price_usd_micros, price_verified,
                 enabled, read_only, safety_classification,
                 safety_policy_version, sync_generation,
@@ -3068,6 +3270,10 @@ async function handleProxyRequest(
                 (SELECT safety_classification
                  FROM catalog_sync_staging LIMIT 1)
                   AS _catalog_staging_safety_schema,
+                (SELECT data_type || tags_json || surface ||
+                        COALESCE(operation_id, '')
+                 FROM catalog_sync_staging LIMIT 1)
+                  AS _catalog_staging_taxonomy_schema,
                 (SELECT idempotency_hash FROM payment_orders LIMIT 1)
                   AS _payment_idempotency_schema,
                 (SELECT upstream_cost_usd_micros FROM api_calls LIMIT 1)
@@ -3080,10 +3286,15 @@ async function handleProxyRequest(
                   AS _catalog_batch_plans_schema,
                 (SELECT expected_revision
                  FROM catalog_batch_plan_items LIMIT 1)
-                  AS _catalog_batch_items_schema
+                  AS _catalog_batch_items_schema,
+                (SELECT data_type || tags_json || surface ||
+                        COALESCE(operation_id, '')
+                 FROM catalog_batch_plan_items LIMIT 1)
+                  AS _catalog_batch_items_taxonomy_schema
          FROM endpoint_catalog
          WHERE path = ?
            AND price_verified = 1
+           AND ${catalogTaxonomyValidWhere("endpoint_catalog")}
            AND sync_generation = (
              SELECT last_success_generation
              FROM catalog_sync_state
@@ -3106,11 +3317,12 @@ async function handleProxyRequest(
       "该端点尚未通过只读与价格审核。",
     );
   }
+  strictStoredCatalogTaxonomy(catalog);
   if (catalog.coverage_verified !== 1) {
     throw new PlatformError(
       503,
       "catalog_coverage_unverified",
-      "最近目录缺少完整覆盖证据，已停止真实调用与扣费；请重新同步 TikHub。",
+      "最近目录缺少完整覆盖证据，已停止真实调用与扣费；请重新同步 UpstreamProvider。",
     );
   }
   if (catalog.enabled !== 1 || catalog.read_only !== 1) {
@@ -3218,16 +3430,47 @@ async function handleProxyRequest(
       `该 Idempotency-Key 已用于请求 ${previous.id}（${previous.status}），未重复调用或扣费。`,
     );
   }
-  const upstreamCredential = await resolveTikHubCredential(env, db);
+  const maxCostHeader = request.headers.get(
+    "x-relaybase-max-cost-usd-micros",
+  );
+  let maxCostUsdMicros: number | null = null;
+  if (maxCostHeader !== null) {
+    if (!/^(?:0|[1-9]\d{0,8})$/.test(maxCostHeader)) {
+      throw new PlatformError(
+        400,
+        "invalid_max_cost",
+        "X-RelayBase-Max-Cost-Usd-Micros 必须是 0–100000000 的整数。",
+      );
+    }
+    maxCostUsdMicros = Number(maxCostHeader);
+    if (
+      !Number.isSafeInteger(maxCostUsdMicros) ||
+      maxCostUsdMicros > 100_000_000
+    ) {
+      throw new PlatformError(
+        400,
+        "invalid_max_cost",
+        "X-RelayBase-Max-Cost-Usd-Micros 必须是 0–100000000 的整数。",
+      );
+    }
+    if (catalog.customer_price_usd_micros > maxCostUsdMicros) {
+      throw new PlatformError(
+        409,
+        "price_quote_exceeded",
+        "当前接口价格超过请求声明的最高成本，未调用上游或扣费；请刷新目录后重试。",
+      );
+    }
+  }
+  const upstreamCredential = await resolveUpstreamProviderCredential(env, db);
   if (!upstreamCredential) {
     throw new PlatformError(
       503,
       "upstream_not_configured",
-      "TikHub 服务端密钥尚未配置。",
+      "UpstreamProvider 服务端密钥尚未配置。",
     );
   }
   if (
-    !tikHubCredentialAllowsPath(
+    !upstreamProviderCredentialAllowsPath(
       upstreamCredential.scopes,
       url.pathname,
     )
@@ -3235,7 +3478,7 @@ async function handleProxyRequest(
     throw new PlatformError(
       403,
       "upstream_credential_scope_denied",
-      "当前 TikHub 活动凭据没有调用该数据接口的权限。",
+      "当前 UpstreamProvider 活动凭据没有调用该数据接口的权限。",
     );
   }
   const currentCatalogCredential = await db
@@ -3261,7 +3504,7 @@ async function handleProxyRequest(
     throw new PlatformError(
       409,
       "catalog_credential_changed",
-      "TikHub 活动凭据在请求准备期间发生变化，请稍后重试。",
+      "UpstreamProvider 活动凭据在请求准备期间发生变化，请稍后重试。",
     );
   }
 
@@ -3423,7 +3666,7 @@ async function handleProxyRequest(
   }
   await markProxyRequest(db, requestId, "charged", null);
 
-  const upstreamBase = normalizeUpstreamBase(env.TIKHUB_BASE_URL);
+  const upstreamBase = normalizeUpstreamBase(env.UPSTREAM_BASE_URL);
   const upstreamUrl = new URL(
     `${upstreamBase}${url.pathname.slice("/v1".length)}${url.search}`,
   );
@@ -3629,6 +3872,1094 @@ async function handleProxyRequest(
   });
 }
 
+const marketplaceReferenceSafetyCache = new Map<
+  string,
+  ReturnType<typeof classifyCatalogSafety>
+>();
+const EMPTY_MARKETPLACE_SOURCE: MarketplaceReference["source"] = {
+  provider: "Configured upstream",
+  openApiVersion: null,
+  snapshotHash: null,
+  generatedAt: null,
+  operationCount: 0,
+};
+type MarketplaceOverlay = {
+  rows: Map<string, MarketplaceCatalogOverlay>;
+  catalogReady: boolean;
+  source: MarketplaceReference["source"];
+};
+const marketplaceOverlayCache = new WeakMap<
+  object,
+  {
+    expiresAt: number;
+    value: Promise<MarketplaceOverlay>;
+  }
+>();
+
+function marketplaceGeneratedSummary(path: string): string {
+  const capability = path
+    .split("/")
+    .filter(Boolean)
+    .at(-1)
+    ?.replace(/[_-]+/g, " ")
+    .trim();
+  return capability
+    ? capability.replace(/\b[a-z]/g, (character) =>
+        character.toUpperCase(),
+      )
+    : "Data query";
+}
+
+function marketplaceGeneratedDescription(
+  platform: string,
+  dataType: CatalogDataType,
+): string {
+  return `通过 RelayBase 查询 ${platform} 的 ${dataType} 数据。请求参数来自当前运行时目录，只有已审核并核价的服务可以调用。`;
+}
+
+function marketplacePublicInputSchema(
+  value: unknown,
+  depth = 0,
+): unknown {
+  if (depth > 32) return null;
+  if (Array.isArray(value)) {
+    return value.map((item) =>
+      marketplacePublicInputSchema(item, depth + 1),
+    );
+  }
+  if (!isPlainRecord(value)) return value;
+  const omitted = new Set([
+    "$ref",
+    "description",
+    "example",
+    "examples",
+    "externalDocs",
+    "title",
+  ]);
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(
+        ([key]) =>
+          !omitted.has(key) &&
+          !key.toLowerCase().startsWith("x-"),
+      )
+      .map(([key, child]) => [
+        key,
+        marketplacePublicInputSchema(child, depth + 1),
+      ]),
+  );
+}
+
+async function loadMarketplaceCatalogOverlay(
+  env: PlatformEnv,
+): Promise<MarketplaceOverlay> {
+  if (!env.DB) {
+    return {
+      rows: new Map(),
+      catalogReady: false,
+      source: EMPTY_MARKETPLACE_SOURCE,
+    };
+  }
+  const readiness = await operationalReadiness(env);
+  if (!readiness.capabilities.schemaReady) {
+    return {
+      rows: new Map(),
+      catalogReady: false,
+      source: EMPTY_MARKETPLACE_SOURCE,
+    };
+  }
+  try {
+    const catalogResult = await env.DB.prepare(
+      `SELECT endpoint.path, endpoint.platform, endpoint.http_method,
+              endpoint.data_type, endpoint.tags_json, endpoint.surface,
+              endpoint.operation_id,
+              endpoint.summary, endpoint.description,
+              endpoint.parameter_schema_json,
+              endpoint.customer_price_usd_micros,
+              endpoint.price_verified, endpoint.enabled,
+              endpoint.read_only, endpoint.safety_classification,
+              endpoint.safety_policy_version, endpoint.updated_at,
+              state.openapi_snapshot_hash
+                AS catalog_openapi_snapshot_hash,
+              state.openapi_operation_count
+                AS catalog_openapi_operation_count
+       FROM endpoint_catalog AS endpoint
+       JOIN catalog_sync_state AS state
+         ON state.id = 1
+        AND endpoint.sync_generation = state.last_success_generation
+       ORDER BY endpoint.path ASC
+       LIMIT 5000`,
+    ).all();
+    const catalogRows =
+      resultRows<MarketplaceCatalogOverlay>(catalogResult);
+    const publicRows = catalogRows.filter(
+      (row) =>
+        row.platform.toLowerCase() !== "tikhub" &&
+        !/^\/v1\/tikhub(?:\/|$)/i.test(row.path),
+    );
+    const rows = new Map(
+      publicRows.map((row) => [
+        `${row.http_method.toUpperCase()}:${row.path}`,
+        row,
+      ]),
+    );
+    const stateOperationCount = Number(
+      catalogRows[0]?.catalog_openapi_operation_count ?? 0,
+    );
+    const stateSnapshotHash =
+      catalogRows[0]?.catalog_openapi_snapshot_hash ?? null;
+    const catalogStateMatches =
+      catalogRows.length > 0 &&
+      catalogRows.length === stateOperationCount &&
+      new Set(
+        catalogRows.map(
+          (row) => `${row.http_method.toUpperCase()}:${row.path}`,
+        ),
+      ).size === catalogRows.length &&
+      typeof stateSnapshotHash === "string" &&
+      /^[0-9a-f]{64}$/.test(stateSnapshotHash) &&
+      catalogRows.every(
+        (row) =>
+          Number(row.catalog_openapi_operation_count) ===
+            stateOperationCount &&
+          row.catalog_openapi_snapshot_hash === stateSnapshotHash,
+      );
+    const latestUpdate = publicRows
+      .map((row) => row.updated_at)
+      .filter((value) => typeof value === "string" && value.length > 0)
+      .sort()
+      .at(-1);
+    return {
+      rows,
+      catalogReady:
+        catalogStateMatches &&
+        readiness.capabilities.catalogReady &&
+        readiness.capabilities.proxyEnabled &&
+        readiness.capabilities.reconciliationConfigured &&
+        readiness.capabilities.reconciliationRecent,
+      source: {
+        provider: "Configured upstream",
+        openApiVersion: null,
+        snapshotHash: null,
+        generatedAt: latestUpdate ?? null,
+        operationCount: publicRows.length,
+      },
+    };
+  } catch (error) {
+    console.error("Marketplace overlay unavailable", {
+      error: error instanceof Error ? error.message : "unknown error",
+    });
+    return {
+      rows: new Map(),
+      catalogReady: false,
+      source: EMPTY_MARKETPLACE_SOURCE,
+    };
+  }
+}
+
+async function marketplaceCatalogOverlay(
+  env: PlatformEnv,
+): Promise<MarketplaceOverlay> {
+  if (!env.DB || typeof env.DB !== "object") {
+    return loadMarketplaceCatalogOverlay(env);
+  }
+  const cacheKey = env as object;
+  const now = Date.now();
+  const cached = marketplaceOverlayCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) return cached.value;
+  const value = loadMarketplaceCatalogOverlay(env);
+  marketplaceOverlayCache.set(cacheKey, {
+    expiresAt: now + 5_000,
+    value,
+  });
+  return value;
+}
+
+function mergedMarketplaceEndpoints(
+  overlay: Awaited<ReturnType<typeof marketplaceCatalogOverlay>>,
+): Array<
+  MarketplaceReferenceEndpoint & {
+    availability: MarketplaceAvailability;
+    priceUsdMicros: number | null;
+    rateLimitRpm: number | null;
+    updatedAt: string | null;
+  }
+> {
+  return [...overlay.rows.values()].map((row) => {
+    const method = row.http_method.toUpperCase();
+    if (method !== "GET" && method !== "POST") {
+      throw new PlatformError(
+        500,
+        "marketplace_catalog_invalid",
+        "运行时目录包含不支持的请求方法。",
+      );
+    }
+    const path = normalizeCatalogPath(row.path);
+    if (row.platform !== path.split("/")[2]) {
+      throw new PlatformError(
+        500,
+        "marketplace_catalog_invalid",
+        "运行时目录的平台分类无效。",
+      );
+    }
+    const taxonomy = strictStoredCatalogTaxonomy(
+      row,
+      500,
+      "marketplace_overlay_taxonomy_invalid",
+      "实时目录分类元数据无效，API 市场已停止发布。",
+    );
+    const schema = safeStoredJson(row.parameter_schema_json);
+    const parameters =
+      isPlainRecord(schema) &&
+      Array.isArray(schema.parameters) &&
+      schema.parameters.length <= 200 &&
+      schema.parameters.every(isPlainRecord)
+        ? (marketplacePublicInputSchema(
+            schema.parameters,
+          ) as Record<string, unknown>[])
+        : [];
+    const requestBody =
+      isPlainRecord(schema) && isPlainRecord(schema.requestBody)
+        ? (marketplacePublicInputSchema(
+            schema.requestBody,
+          ) as Record<string, unknown>)
+        : null;
+    const endpoint: MarketplaceReferenceEndpoint = {
+      path,
+      platform: row.platform,
+      dataType: taxonomy.dataType,
+      method,
+      surface: taxonomy.surface,
+      tags: [taxonomy.dataType, taxonomy.surface].sort(),
+      summary: marketplaceGeneratedSummary(path),
+      description: marketplaceGeneratedDescription(
+        row.platform,
+        taxonomy.dataType,
+      ),
+      operationId: null,
+      parameters,
+      requestBody,
+      response: null,
+    };
+    const key = `${endpoint.method}:${endpoint.path}`;
+    let staticSafety = marketplaceReferenceSafetyCache.get(key);
+    if (!staticSafety) {
+      staticSafety = classifyCatalogSafety(
+        endpoint.path,
+        endpoint.method,
+        {
+          summary: endpoint.summary,
+          operationId: taxonomy.operationId,
+          parameters: endpoint.parameters,
+          requestBody: endpoint.requestBody,
+        },
+      );
+      marketplaceReferenceSafetyCache.set(key, staticSafety);
+    }
+    const restricted =
+      row.safety_classification === "prohibited" ||
+      staticSafety.classification === "prohibited";
+    const available =
+      !restricted &&
+      overlay.catalogReady &&
+      row.enabled === 1 &&
+      row.read_only === 1 &&
+      row.price_verified === 1 &&
+      row.safety_classification === "safe_data_read" &&
+      row.safety_policy_version === CATALOG_SAFETY_POLICY_VERSION;
+    return {
+      ...endpoint,
+      availability: available
+        ? ("available" as const)
+        : restricted
+          ? ("restricted" as const)
+          : ("pending" as const),
+      priceUsdMicros: available
+        ? Math.max(0, Number(row.customer_price_usd_micros))
+        : null,
+      rateLimitRpm: null,
+      updatedAt: row.updated_at ?? null,
+    };
+  });
+}
+
+function marketplaceFacet<T extends string>(
+  values: T[],
+  labels: Partial<Record<T, string>> = {},
+) {
+  const counts = new Map<T, number>();
+  for (const value of values) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([value, count]) => ({
+      value,
+      label: labels[value] ?? value,
+      count,
+    }))
+    .sort(
+      (left, right) =>
+        right.count - left.count ||
+        left.label.localeCompare(right.label, "zh-CN"),
+    );
+}
+
+function marketplaceFilters(url: URL) {
+  const single = (name: string, maxLength: number): string | null => {
+    if (url.searchParams.getAll(name).length > 1) {
+      throw new PlatformError(
+        400,
+        "invalid_marketplace_filter",
+        `API 市场筛选参数 ${name} 重复。`,
+      );
+    }
+    const value = url.searchParams.get(name)?.trim() ?? "";
+    if (
+      value.length > maxLength ||
+      /[\u0000-\u001F\u007F]/.test(value)
+    ) {
+      throw new PlatformError(
+        400,
+        "invalid_marketplace_filter",
+        `API 市场筛选参数 ${name} 无效。`,
+      );
+    }
+    return value || null;
+  };
+  const q = single("q", 160);
+  const platform = single("platform", 64)?.toLowerCase() ?? null;
+  const tag = single("tag", 160)?.toLowerCase() ?? null;
+  const dataType = single("dataType", 80)?.toLowerCase() ?? null;
+  const methodRaw = single("method", 8)?.toUpperCase() ?? null;
+  const surfaceRaw = single("surface", 16)?.toLowerCase() ?? null;
+  const availabilityRaw =
+    single("availability", 16)?.toLowerCase() ?? null;
+  if (methodRaw && methodRaw !== "GET" && methodRaw !== "POST") {
+    throw new PlatformError(
+      400,
+      "invalid_marketplace_filter",
+      "API 市场请求方法筛选无效。",
+    );
+  }
+  if (
+    surfaceRaw &&
+    !["app", "web", "app_web", "other"].includes(surfaceRaw)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_marketplace_filter",
+      "API 市场端类型筛选无效。",
+    );
+  }
+  if (
+    availabilityRaw &&
+    !["available", "pending", "restricted"].includes(availabilityRaw)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_marketplace_filter",
+      "API 市场可用状态筛选无效。",
+    );
+  }
+  const rawLimit = single("limit", 4);
+  const limit = rawLimit == null ? 20 : Number(rawLimit);
+  const rawOffset = single("offset", 5);
+  const offset = rawOffset == null ? 0 : Number(rawOffset);
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 100 ||
+    !Number.isSafeInteger(offset) ||
+    offset < 0 ||
+    offset > 5_000
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_pagination",
+      "API 市场分页参数无效。",
+    );
+  }
+  return {
+    q: q?.normalize("NFKC").toLowerCase() ?? null,
+    platform,
+    tag,
+    dataType,
+    method: methodRaw as "GET" | "POST" | null,
+    surface: surfaceRaw as MarketplaceSurface | null,
+    availability:
+      availabilityRaw as MarketplaceAvailability | null,
+    limit,
+    offset,
+  };
+}
+
+function marketplacePublicEndpoint(
+  endpoint: ReturnType<typeof mergedMarketplaceEndpoints>[number],
+) {
+  return {
+    path: endpoint.path,
+    platform: endpoint.platform,
+    dataType: endpoint.dataType,
+    method: endpoint.method,
+    surface: endpoint.surface,
+    availability: endpoint.availability,
+    summary: endpoint.summary,
+    priceUsdMicros: endpoint.priceUsdMicros,
+    rateLimitRpm: endpoint.rateLimitRpm,
+    updatedAt: endpoint.updatedAt,
+  };
+}
+
+function marketplaceResponseShape(
+  endpoints: ReturnType<typeof mergedMarketplaceEndpoints>,
+  source: MarketplaceReference["source"],
+) {
+  const total = endpoints.length;
+  const available = endpoints.filter(
+    (endpoint) => endpoint.availability === "available",
+  ).length;
+  const restricted = endpoints.filter(
+    (endpoint) => endpoint.availability === "restricted",
+  ).length;
+  return {
+    source,
+    stats: {
+      total,
+      available,
+      pending: total - available - restricted,
+      restricted,
+      platforms: new Set(endpoints.map((endpoint) => endpoint.platform))
+        .size,
+      categories: new Set(
+        endpoints.flatMap((endpoint) => endpoint.tags),
+      ).size,
+      dataTypes: new Set(endpoints.map((endpoint) => endpoint.dataType))
+        .size,
+    },
+    facets: {
+      platforms: marketplaceFacet(
+        endpoints.map((endpoint) => endpoint.platform),
+        {
+          bilibili: "Bilibili",
+          demo: "Demo",
+          douyin: "抖音 / Douyin",
+          health: "Health",
+          hybrid: "Hybrid",
+          instagram: "Instagram",
+          ios_shortcut: "iOS Shortcut",
+          kuaishou: "快手 / Kuaishou",
+          lemon8: "Lemon8",
+          linkedin: "LinkedIn",
+          pipixia: "皮皮虾 / Pipixia",
+          reddit: "Reddit",
+          telegram: "Telegram",
+          temp_mail: "Temp Mail",
+          threads: "Threads",
+          tiktok: "TikTok",
+          toutiao: "今日头条 / Toutiao",
+          twitter: "X / Twitter",
+          wechat_channels: "微信视频号",
+          wechat_mp: "微信公众号",
+          wechat_search: "微信搜索",
+          weibo: "微博 / Weibo",
+          xiaohongshu: "小红书 / Xiaohongshu",
+          xigua: "西瓜视频 / Xigua",
+          youtube: "YouTube",
+          zhihu: "知乎 / Zhihu",
+        },
+      ),
+      dataTypes: marketplaceFacet(
+        endpoints.map((endpoint) => endpoint.dataType),
+        {
+          account: "账户 / Account",
+          analytics_trends: "分析与趋势",
+          comments: "评论 / Comments",
+          commerce_marketing: "电商与营销",
+          content: "内容与作品",
+          email: "邮件 / Email",
+          live: "直播 / Live",
+          media_download: "媒体下载",
+          other: "其他 / Other",
+          profile_creator: "用户与创作者",
+          search_discovery: "搜索与发现",
+          social_graph: "关注与社交关系",
+          system: "系统 / System",
+          taxonomy: "话题与分类",
+          utility: "工具 / Utility",
+        },
+      ),
+      tags: marketplaceFacet(
+        endpoints.flatMap((endpoint) => endpoint.tags),
+      ),
+      methods: marketplaceFacet(
+        endpoints.map((endpoint) => endpoint.method),
+      ),
+      surfaces: marketplaceFacet(
+        endpoints.map((endpoint) => endpoint.surface),
+        {
+          app: "APP",
+          web: "WEB",
+          app_web: "APP + WEB",
+          other: "OTHER",
+        },
+      ),
+      availability: marketplaceFacet(
+        endpoints.map((endpoint) => endpoint.availability),
+        {
+          available: "已开放",
+          pending: "待审核",
+          restricted: "不开放",
+        },
+      ),
+    },
+  };
+}
+
+async function handleMarketplace(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const filters = marketplaceFilters(url);
+  const overlay = await marketplaceCatalogOverlay(env);
+  const endpoints = mergedMarketplaceEndpoints(overlay);
+  const summary = marketplaceResponseShape(endpoints, overlay.source);
+  const filtered = endpoints.filter((endpoint) => {
+    if (
+      filters.platform &&
+      endpoint.platform.toLowerCase() !== filters.platform
+    ) {
+      return false;
+    }
+    if (
+      filters.dataType &&
+      endpoint.dataType.toLowerCase() !== filters.dataType
+    ) {
+      return false;
+    }
+    if (
+      filters.tag &&
+      !endpoint.tags.some(
+        (tag) => tag.toLowerCase() === filters.tag,
+      )
+    ) {
+      return false;
+    }
+    if (filters.method && endpoint.method !== filters.method) return false;
+    if (filters.surface && endpoint.surface !== filters.surface) return false;
+    if (
+      filters.availability &&
+      endpoint.availability !== filters.availability
+    ) {
+      return false;
+    }
+    if (filters.q) {
+      const searchable = [
+        endpoint.path,
+        endpoint.platform,
+        endpoint.dataType,
+        endpoint.summary ?? "",
+        endpoint.description ?? "",
+        ...endpoint.tags,
+      ]
+        .join(" ")
+        .normalize("NFKC")
+        .toLowerCase();
+      if (!searchable.includes(filters.q)) return false;
+    }
+    return true;
+  });
+  const page = filtered.slice(
+    filters.offset,
+    filters.offset + filters.limit,
+  );
+  return jsonResponse(
+    {
+      ...summary,
+      endpoints: page.map(marketplacePublicEndpoint),
+      count: page.length,
+      total: filtered.length,
+      offset: filters.offset,
+      nextOffset:
+        filters.offset + page.length < filtered.length
+          ? filters.offset + page.length
+          : null,
+    },
+    200,
+    requestId,
+    { "cache-control": "no-store" },
+  );
+}
+
+function marketplaceExampleScalar(
+  parameter: Record<string, unknown>,
+): string {
+  const schema = isPlainRecord(parameter.schema)
+    ? parameter.schema
+    : {};
+  const candidates = [
+    parameter.example,
+    schema.example,
+    schema.default,
+    Array.isArray(schema.enum) ? schema.enum[0] : undefined,
+  ];
+  for (const candidate of candidates) {
+    if (
+      typeof candidate === "string" &&
+      candidate.length > 0 &&
+      candidate.length <= 120 &&
+      !/[\u0000-\u001F\u007F]/.test(candidate)
+    ) {
+      return candidate;
+    }
+    if (
+      typeof candidate === "number" &&
+      Number.isFinite(candidate)
+    ) {
+      return String(candidate);
+    }
+    if (typeof candidate === "boolean") return String(candidate);
+  }
+  if (schema.type === "integer" || schema.type === "number") return "1";
+  if (schema.type === "boolean") return "true";
+  return `YOUR_${String(parameter.name ?? "VALUE")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .toUpperCase()
+    .slice(0, 48)}`;
+}
+
+function marketplaceRequestBodyExample(
+  requestBody: Record<string, unknown> | null,
+): unknown {
+  if (!requestBody) return {};
+  const content = isPlainRecord(requestBody.content)
+    ? requestBody.content
+    : null;
+  const media = content && isPlainRecord(content["application/json"])
+    ? content["application/json"]
+    : null;
+  const schema = media && isPlainRecord(media.schema) ? media.schema : null;
+  const boundedExample = (value: unknown): unknown | undefined => {
+    if (value === undefined) return undefined;
+    try {
+      const serialized = JSON.stringify(value);
+      if (
+        typeof serialized !== "string" ||
+        serialized.length > MAX_OPENAPI_INPUT_SCHEMA_BYTES
+      ) {
+        return undefined;
+      }
+      return JSON.parse(serialized) as unknown;
+    } catch {
+      return undefined;
+    }
+  };
+  const mediaExample = boundedExample(
+    redactCatalogExampleAgainstSchema(media?.example, schema),
+  );
+  if (mediaExample !== undefined) return mediaExample;
+  const build = (
+    node: Record<string, unknown> | null,
+    depth: number,
+    fieldName?: string,
+  ): unknown => {
+    if (!node || depth > 4) return {};
+    if (fieldName && catalogInputFieldRisk(fieldName) != null) {
+      return redactedCatalogExample(fieldName);
+    }
+    const declaredExample = boundedExample(
+      redactCatalogExampleAgainstSchema(node.example, node, fieldName),
+    );
+    if (declaredExample !== undefined) return declaredExample;
+    if (
+      typeof node.default === "string" ||
+      typeof node.default === "number" ||
+      typeof node.default === "boolean"
+    ) {
+      return node.default;
+    }
+    if (Array.isArray(node.enum) && node.enum.length > 0) {
+      return node.enum[0];
+    }
+    if (node.type === "array") {
+      return [
+        build(
+          isPlainRecord(node.items) ? node.items : null,
+          depth + 1,
+          fieldName,
+        ),
+      ];
+    }
+    if (isPlainRecord(node.properties)) {
+      return Object.fromEntries(
+        Object.entries(node.properties)
+          .slice(0, 12)
+          .map(([name, child]) => [
+            name,
+            build(
+              isPlainRecord(child) ? child : null,
+              depth + 1,
+              name,
+            ),
+          ]),
+      );
+    }
+    if (node.type === "integer" || node.type === "number") return 1;
+    if (node.type === "boolean") return true;
+    return "YOUR_VALUE";
+  };
+  return build(schema, 0);
+}
+
+function marketplaceCodeExamples(
+  request: Request,
+  endpoint: ReturnType<typeof mergedMarketplaceEndpoints>[number],
+) {
+  const origin = new URL(request.url).origin;
+  const queryParameters = endpoint.parameters
+    .filter(
+      (parameter) =>
+        parameter.in === "query" &&
+        typeof parameter.name === "string" &&
+        catalogInputFieldRisk(parameter.name) == null,
+    )
+    .slice(0, 20);
+  const query = new URLSearchParams();
+  for (const parameter of queryParameters) {
+    query.set(String(parameter.name), marketplaceExampleScalar(parameter));
+  }
+  const url = `${origin}${endpoint.path}${
+    query.size > 0 ? `?${query.toString()}` : ""
+  }`;
+  const body = marketplaceRequestBodyExample(endpoint.requestBody);
+  const bodyJson = JSON.stringify(body, null, 2);
+  const hasBody = endpoint.method === "POST";
+  const curl = [
+    `curl --request ${endpoint.method} \\`,
+    `  '${url}' \\`,
+    "  --header 'Authorization: Bearer rb_live_YOUR_KEY' \\",
+    "  --header 'Idempotency-Key: marketplace-example-001' \\",
+    ...(endpoint.priceUsdMicros !== null
+      ? [
+          `  --header 'X-RelayBase-Max-Cost-Usd-Micros: ${endpoint.priceUsdMicros}' \\`,
+        ]
+      : []),
+    ...(hasBody
+      ? [
+          "  --header 'Content-Type: application/json' \\",
+          `  --data '${bodyJson.replaceAll("'", "'\\''")}'`,
+        ]
+      : ["  --header 'Accept: application/json'"]),
+  ].join("\n");
+  const javascript = `const response = await fetch(${JSON.stringify(url)}, {
+  method: "${endpoint.method}",
+  headers: {
+    Authorization: "Bearer rb_live_YOUR_KEY",
+    "Idempotency-Key": "marketplace-example-001",
+    ${
+      endpoint.priceUsdMicros !== null
+        ? `"X-RelayBase-Max-Cost-Usd-Micros": "${endpoint.priceUsdMicros}",`
+        : ""
+    }
+    Accept: "application/json",${
+      hasBody ? '\n    "Content-Type": "application/json",' : ""
+    }
+  },${hasBody ? `\n  body: JSON.stringify(${bodyJson}),` : ""}
+});
+
+const payload = await response.json();
+if (!response.ok) throw new Error(payload.error?.message ?? "Request failed");`;
+  const pythonParams = Object.fromEntries(
+    queryParameters.map((parameter) => [
+      String(parameter.name),
+      marketplaceExampleScalar(parameter),
+    ]),
+  );
+  const python = `import json
+import requests
+
+response = requests.${endpoint.method.toLowerCase()}(
+    ${JSON.stringify(`${origin}${endpoint.path}`)},
+    headers={
+        "Authorization": "Bearer rb_live_YOUR_KEY",
+        "Idempotency-Key": "marketplace-example-001",
+        ${
+          endpoint.priceUsdMicros !== null
+            ? `"X-RelayBase-Max-Cost-Usd-Micros": "${endpoint.priceUsdMicros}",`
+            : ""
+        }
+        "Accept": "application/json",
+    },${
+      Object.keys(pythonParams).length > 0
+        ? `\n    params=${JSON.stringify(pythonParams, null, 4)},`
+        : ""
+    }${
+      hasBody
+        ? `\n    json=json.loads(${JSON.stringify(JSON.stringify(body))}),`
+        : ""
+    }
+    timeout=30,
+)
+response.raise_for_status()
+payload = response.json()`;
+  return { curl, javascript, python };
+}
+
+async function handleMarketplaceDetail(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  const url = new URL(request.url);
+  if (
+    url.searchParams.getAll("path").length !== 1 ||
+    url.searchParams.getAll("method").length !== 1
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_marketplace_endpoint",
+      "API 市场详情参数无效。",
+    );
+  }
+  const path = normalizeCatalogPath(url.searchParams.get("path") ?? "");
+  const method = (url.searchParams.get("method") ?? "").toUpperCase();
+  if (method !== "GET" && method !== "POST") {
+    throw new PlatformError(
+      400,
+      "invalid_marketplace_endpoint",
+      "API 市场请求方法无效。",
+    );
+  }
+  const overlay = await marketplaceCatalogOverlay(env);
+  const endpoint = mergedMarketplaceEndpoints(overlay).find(
+    (candidate) =>
+      candidate.path === path && candidate.method === method,
+  );
+  if (!endpoint) {
+    throw new PlatformError(
+      404,
+      "marketplace_endpoint_not_found",
+      "API 市场中没有这个端点。",
+    );
+  }
+  return jsonResponse(
+    {
+      source: overlay.source,
+      endpoint: {
+        ...marketplacePublicEndpoint(endpoint),
+        tags: endpoint.tags,
+        description: endpoint.description,
+        operationId: endpoint.operationId,
+        parameters: endpoint.parameters,
+        requestBody: endpoint.requestBody,
+        response: endpoint.response,
+      },
+      examples: marketplaceCodeExamples(request, endpoint),
+    },
+    200,
+    requestId,
+    { "cache-control": "no-store" },
+  );
+}
+
+type CatalogListFilters = {
+  q: string | null;
+  platform: string | null;
+  dataType: CatalogDataType | null;
+  tag: string | null;
+  surface: MarketplaceSurface | null;
+  method: "GET" | "POST" | null;
+  status: "all" | "enabled" | "disabled" | "review";
+  safety:
+    | "all"
+    | "safe_data_read"
+    | "ambiguous"
+    | "prohibited";
+  limit: number;
+  offset: number;
+};
+
+function normalizeCatalogListFilters(
+  url: URL,
+  options: {
+    admin: boolean;
+    defaultLimit: number;
+    maxLimit: number;
+    maxOffset: number;
+  },
+): CatalogListFilters {
+  const single = (name: string, maxLength: number): string | null => {
+    if (url.searchParams.getAll(name).length > 1) {
+      throw new PlatformError(
+        400,
+        "invalid_catalog_filter",
+        `目录筛选参数 ${name} 重复。`,
+      );
+    }
+    const value = url.searchParams.get(name)?.trim() ?? "";
+    if (
+      value.length > maxLength ||
+      /[\u0000-\u001F\u007F]/.test(value)
+    ) {
+      throw new PlatformError(
+        400,
+        "invalid_catalog_filter",
+        `目录筛选参数 ${name} 无效。`,
+      );
+    }
+    return value || null;
+  };
+  const q = single("q", 160)?.normalize("NFKC").toLowerCase() ?? null;
+  const platform =
+    single("platform", 64)?.normalize("NFKC").toLowerCase() ?? null;
+  if (
+    platform !== null &&
+    !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(platform)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_filter",
+      "目录平台筛选参数无效。",
+    );
+  }
+  const dataTypeRaw =
+    single("dataType", 80)?.normalize("NFKC").toLowerCase() ?? null;
+  if (dataTypeRaw && !PROVIDER_DATA_TYPES.includes(dataTypeRaw)) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_filter",
+      "目录数据类型筛选参数无效。",
+    );
+  }
+  const tag =
+    single("tag", 160)?.normalize("NFKC").toLowerCase() ?? null;
+  const surfaceRaw =
+    single("surface", 16)?.normalize("NFKC").toLowerCase() ?? null;
+  if (surfaceRaw && !PROVIDER_SURFACES.includes(surfaceRaw)) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_filter",
+      "目录端类型筛选参数无效。",
+    );
+  }
+  const methodRaw = single("method", 8)?.toUpperCase() ?? null;
+  if (methodRaw && methodRaw !== "GET" && methodRaw !== "POST") {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_filter",
+      "目录请求方法筛选参数无效。",
+    );
+  }
+  const statusRaw =
+    single("status", 16)?.normalize("NFKC").toLowerCase() ?? "all";
+  const safetyRaw =
+    single("safety", 32)?.normalize("NFKC").toLowerCase() ?? "all";
+  if (
+    (!options.admin &&
+      (url.searchParams.has("status") ||
+        url.searchParams.has("safety"))) ||
+    !["all", "enabled", "disabled", "review"].includes(statusRaw) ||
+    ![
+      "all",
+      "safe_data_read",
+      "ambiguous",
+      "prohibited",
+    ].includes(safetyRaw)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_filter",
+      "目录状态或安全分类筛选参数无效。",
+    );
+  }
+  const rawLimit = single("limit", 6);
+  const limit =
+    rawLimit == null ? options.defaultLimit : Number(rawLimit);
+  const rawOffset = single("offset", 8);
+  const offset = rawOffset == null ? 0 : Number(rawOffset);
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > options.maxLimit ||
+    !Number.isSafeInteger(offset) ||
+    offset < 0 ||
+    offset > options.maxOffset
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_pagination",
+      "目录分页参数无效。",
+    );
+  }
+  return {
+    q,
+    platform,
+    dataType: dataTypeRaw as CatalogDataType | null,
+    tag,
+    surface: surfaceRaw as MarketplaceSurface | null,
+    method: methodRaw as "GET" | "POST" | null,
+    status: statusRaw as CatalogListFilters["status"],
+    safety: safetyRaw as CatalogListFilters["safety"],
+    limit,
+    offset,
+  };
+}
+
+function appendCatalogTaxonomyFilters(
+  clauses: string[],
+  bindings: unknown[],
+  filters: CatalogListFilters,
+  alias = "endpoint_catalog",
+): void {
+  if (filters.platform) {
+    clauses.push(`${alias}.platform = ?`);
+    bindings.push(filters.platform);
+  }
+  if (filters.dataType) {
+    clauses.push(`${alias}.data_type = ?`);
+    bindings.push(filters.dataType);
+  }
+  if (filters.surface) {
+    clauses.push(`${alias}.surface = ?`);
+    bindings.push(filters.surface);
+  }
+  if (filters.method) {
+    clauses.push(`${alias}.http_method = ?`);
+    bindings.push(filters.method);
+  }
+  if (filters.tag) {
+    clauses.push(
+      `EXISTS (
+         SELECT 1
+         FROM json_each(${alias}.tags_json) AS catalog_tag
+         WHERE lower(catalog_tag.value) = ?
+       )`,
+    );
+    bindings.push(filters.tag);
+  }
+  if (filters.q) {
+    const escaped = filters.q
+      .replaceAll("\\", "\\\\")
+      .replaceAll("%", "\\%")
+      .replaceAll("_", "\\_");
+    clauses.push(
+      `(lower(${alias}.path) LIKE ? ESCAPE '\\' OR
+        lower(${alias}.platform) LIKE ? ESCAPE '\\' OR
+        lower(${alias}.data_type) LIKE ? ESCAPE '\\' OR
+        lower(COALESCE(${alias}.summary, '')) LIKE ? ESCAPE '\\' OR
+        lower(COALESCE(${alias}.operation_id, '')) LIKE ? ESCAPE '\\')`,
+    );
+    bindings.push(
+      `%${escaped}%`,
+      `%${escaped}%`,
+      `%${escaped}%`,
+      `%${escaped}%`,
+      `%${escaped}%`,
+    );
+  }
+}
+
 async function handlePublicCatalog(
   request: Request,
   env: PlatformEnv,
@@ -3636,153 +4967,84 @@ async function handlePublicCatalog(
 ): Promise<Response> {
   const db = requireDb(env);
   const url = new URL(request.url);
-  const rawPlatform = url.searchParams.get("platform")?.trim().toLowerCase();
-  if (
-    rawPlatform &&
-    (!/^[a-z0-9_-]{1,40}$/.test(rawPlatform) ||
-      url.searchParams.getAll("platform").length !== 1)
-  ) {
-    throw new PlatformError(
-      400,
-      "invalid_platform_filter",
-      "平台筛选值无效。",
-    );
-  }
-  const rawLimit = url.searchParams.get("limit");
-  const limit = rawLimit == null ? 200 : Number(rawLimit);
-  if (
-    url.searchParams.getAll("limit").length > 1 ||
-    !Number.isSafeInteger(limit) ||
-    limit < 1 ||
-    limit > 200
-  ) {
-    throw new PlatformError(
-      400,
-      "invalid_limit",
-      "limit 必须是 1–200 的整数。",
-    );
-  }
-  const rawOffset = url.searchParams.get("offset");
-  const offset = rawOffset == null ? 0 : Number(rawOffset);
-  if (
-    url.searchParams.getAll("offset").length > 1 ||
-    !Number.isSafeInteger(offset) ||
-    offset < 0 ||
-    offset > 5_000
-  ) {
-    throw new PlatformError(
-      400,
-      "invalid_offset",
-      "offset 必须是 0–5000 的整数。",
-    );
-  }
-
-  const query = rawPlatform
-    ? db
-        .prepare(
-          `SELECT path, platform, http_method, summary,
-                  customer_price_usd_micros, updated_at
-           FROM endpoint_catalog
-           WHERE enabled = 1 AND read_only = 1 AND price_verified = 1
-             AND safety_classification = 'safe_data_read'
-             AND safety_policy_version =
-                 ${CATALOG_SAFETY_POLICY_VERSION}
-             AND platform = ?
-             AND sync_generation = (
-               SELECT last_success_generation
-               FROM catalog_sync_state
-               WHERE id = 1
-             )
-             AND EXISTS (
-               SELECT 1 FROM catalog_sync_state
-               WHERE id = 1 AND ${CATALOG_COVERAGE_WHERE}
-             )
-           ORDER BY platform ASC, path ASC
-           LIMIT ? OFFSET ?`,
-        )
-        .bind(rawPlatform, limit, offset)
-    : db
-        .prepare(
-          `SELECT path, platform, http_method, summary,
-                  customer_price_usd_micros, updated_at
-           FROM endpoint_catalog
-           WHERE enabled = 1 AND read_only = 1 AND price_verified = 1
-             AND safety_classification = 'safe_data_read'
-             AND safety_policy_version =
-                 ${CATALOG_SAFETY_POLICY_VERSION}
-             AND sync_generation = (
-               SELECT last_success_generation
-               FROM catalog_sync_state
-               WHERE id = 1
-             )
-             AND EXISTS (
-               SELECT 1 FROM catalog_sync_state
-               WHERE id = 1 AND ${CATALOG_COVERAGE_WHERE}
-             )
-           ORDER BY platform ASC, path ASC
-           LIMIT ? OFFSET ?`,
-        )
-        .bind(limit, offset);
-  const countQuery = rawPlatform
-    ? db
-        .prepare(
-          `SELECT COUNT(*) AS count
-           FROM endpoint_catalog
-           WHERE enabled = 1 AND read_only = 1 AND price_verified = 1
-             AND safety_classification = 'safe_data_read'
-             AND safety_policy_version =
-                 ${CATALOG_SAFETY_POLICY_VERSION}
-             AND platform = ?
-             AND sync_generation = (
-               SELECT last_success_generation
-               FROM catalog_sync_state
-               WHERE id = 1
-             )
-             AND EXISTS (
-               SELECT 1 FROM catalog_sync_state
-               WHERE id = 1 AND ${CATALOG_COVERAGE_WHERE}
-             )`,
-        )
-        .bind(rawPlatform)
-    : db.prepare(
-        `SELECT COUNT(*) AS count
-         FROM endpoint_catalog
-         WHERE enabled = 1 AND read_only = 1 AND price_verified = 1
-           AND safety_classification = 'safe_data_read'
-           AND safety_policy_version =
-               ${CATALOG_SAFETY_POLICY_VERSION}
-           AND sync_generation = (
-             SELECT last_success_generation
-             FROM catalog_sync_state
-             WHERE id = 1
-           )
-           AND EXISTS (
-             SELECT 1 FROM catalog_sync_state
-             WHERE id = 1 AND ${CATALOG_COVERAGE_WHERE}
-           )`,
-      );
+  const filters = normalizeCatalogListFilters(url, {
+    admin: false,
+    defaultLimit: 200,
+    maxLimit: 200,
+    maxOffset: 5_000,
+  });
+  await assertStoredCatalogTaxonomyIntegrity(db);
+  const clauses = [
+    "endpoint_catalog.enabled = 1",
+    "endpoint_catalog.read_only = 1",
+    "endpoint_catalog.price_verified = 1",
+    "endpoint_catalog.safety_classification = 'safe_data_read'",
+    `endpoint_catalog.safety_policy_version =
+       ${CATALOG_SAFETY_POLICY_VERSION}`,
+    catalogTaxonomyValidWhere("endpoint_catalog"),
+    `endpoint_catalog.sync_generation = (
+       SELECT last_success_generation
+       FROM catalog_sync_state
+       WHERE id = 1
+     )`,
+    `EXISTS (
+       SELECT 1 FROM catalog_sync_state
+       WHERE id = 1 AND ${CATALOG_COVERAGE_WHERE}
+     )`,
+  ];
+  const bindings: unknown[] = [];
+  appendCatalogTaxonomyFilters(clauses, bindings, filters);
+  const where = clauses.join(" AND ");
+  const query = db
+    .prepare(
+      `SELECT path, platform, http_method, data_type, tags_json, surface,
+              operation_id, summary, customer_price_usd_micros, updated_at
+       FROM endpoint_catalog
+       WHERE ${where}
+       ORDER BY platform ASC, path ASC
+       LIMIT ? OFFSET ?`,
+    )
+    .bind(...bindings, filters.limit, filters.offset);
+  const countQuery = db
+    .prepare(
+      `SELECT COUNT(*) AS count
+       FROM endpoint_catalog
+       WHERE ${where}`,
+    )
+    .bind(...bindings);
   const rows = await query.all<{
     path: string;
     platform: string;
     http_method: string;
+    data_type: CatalogDataType;
+    tags_json: string;
+    surface: MarketplaceSurface;
+    operation_id: string | null;
     summary: string | null;
     customer_price_usd_micros: number;
     updated_at: string;
   }>();
-  const endpoints = (rows.results ?? []).map((row) => ({
-    path: row.path,
-    platform: row.platform,
-    method: row.http_method,
-    summary: row.summary,
-    priceUsdMicros: row.customer_price_usd_micros,
-    updatedAt: row.updated_at,
-  }));
+  const endpoints = (rows.results ?? []).map((row) => {
+    const taxonomy = strictStoredCatalogTaxonomy(row);
+    return {
+      path: row.path,
+      platform: row.platform,
+      dataType: taxonomy.dataType,
+      tags: taxonomy.tags,
+      surface: taxonomy.surface,
+      operationId: taxonomy.operationId,
+      method: row.http_method,
+      summary: row.summary,
+      priceUsdMicros: row.customer_price_usd_micros,
+      updatedAt: row.updated_at,
+    };
+  });
   const countRow = await countQuery.first<{ count: number }>();
   const total = Number(countRow?.count ?? 0);
   const nextOffset =
-    offset + endpoints.length < total &&
-    offset + endpoints.length < 5_000
-      ? offset + endpoints.length
+    filters.offset + endpoints.length < total &&
+    filters.offset + endpoints.length < 5_000
+      ? filters.offset + endpoints.length
       : null;
   const readiness = await operationalReadiness(env);
 
@@ -3792,7 +5054,7 @@ async function handlePublicCatalog(
       endpoints,
       count: endpoints.length,
       total,
-      offset,
+      offset: filters.offset,
       nextOffset,
     },
     200,
@@ -3811,27 +5073,44 @@ async function handleCatalogList(
   requireAdminSecret(request, env, "catalog");
   const db = requireDb(env);
   const url = new URL(request.url);
-  const limit = Number(url.searchParams.get("limit") ?? "200");
-  const offset = Number(url.searchParams.get("offset") ?? "0");
-  if (
-    url.searchParams.getAll("limit").length > 1 ||
-    url.searchParams.getAll("offset").length > 1 ||
-    !Number.isSafeInteger(limit) ||
-    limit < 1 ||
-    limit > 500 ||
-    !Number.isSafeInteger(offset) ||
-    offset < 0 ||
-    offset > 100_000
-  ) {
-    throw new PlatformError(
-      400,
-      "invalid_pagination",
-      "分页参数无效。",
+  const filters = normalizeCatalogListFilters(url, {
+    admin: true,
+    defaultLimit: 200,
+    maxLimit: 500,
+    maxOffset: 100_000,
+  });
+  await assertStoredCatalogTaxonomyIntegrity(db);
+  const clauses = ["1 = 1"];
+  const bindings: unknown[] = [];
+  appendCatalogTaxonomyFilters(clauses, bindings, filters);
+  if (filters.status === "enabled") {
+    clauses.push("endpoint_catalog.enabled = 1");
+  } else if (filters.status === "disabled") {
+    clauses.push("endpoint_catalog.enabled = 0");
+  } else if (filters.status === "review") {
+    clauses.push(
+      `(endpoint_catalog.reviewed_at IS NULL OR
+        endpoint_catalog.sync_generation IS NULL OR
+        endpoint_catalog.sync_generation != (
+          SELECT last_success_generation
+          FROM catalog_sync_state
+          WHERE id = 1
+        ) OR
+        endpoint_catalog.price_verified != 1 OR
+        endpoint_catalog.safety_classification != 'safe_data_read' OR
+        endpoint_catalog.safety_policy_version !=
+          ${CATALOG_SAFETY_POLICY_VERSION})`,
     );
   }
+  if (filters.safety !== "all") {
+    clauses.push("endpoint_catalog.safety_classification = ?");
+    bindings.push(filters.safety);
+  }
+  const where = clauses.join(" AND ");
   const rows = await db
     .prepare(
       `SELECT path, platform, http_method, summary, description,
+              data_type, tags_json, surface, operation_id,
               parameter_schema_json, upstream_price_usd_micros,
               customer_price_usd_micros, price_verified, enabled, read_only,
               safety_classification, safety_reasons_json,
@@ -3843,14 +5122,19 @@ async function handleCatalogList(
                 WHERE id = 1
               ) AS present_in_latest_sync
        FROM endpoint_catalog
+       WHERE ${where}
        ORDER BY platform ASC, path ASC
        LIMIT ? OFFSET ?`,
     )
-    .bind(limit, offset)
+    .bind(...bindings, filters.limit, filters.offset)
     .all<{
       path: string;
       platform: string;
       http_method: string;
+      data_type: CatalogDataType;
+      tags_json: string;
+      surface: MarketplaceSurface;
+      operation_id: string | null;
       summary: string | null;
       description: string | null;
       parameter_schema_json: string | null;
@@ -3871,7 +5155,12 @@ async function handleCatalogList(
     }>();
 
   const totalRow = await db
-    .prepare(`SELECT COUNT(*) AS count FROM endpoint_catalog`)
+    .prepare(
+      `SELECT COUNT(*) AS count
+       FROM endpoint_catalog
+       WHERE ${where}`,
+    )
+    .bind(...bindings)
     .first<{ count: number }>();
   const syncRow = await db
     .prepare(
@@ -3911,37 +5200,44 @@ async function handleCatalogList(
       coverage_verified: number;
     }>();
   const total = Number(totalRow?.count ?? 0);
-  const endpoints = (rows.results ?? []).map((row) => ({
-    path: row.path,
-    platform: row.platform,
-    method: row.http_method,
-    summary: row.summary,
-    description: row.description,
-    parameterSchema: safeStoredJson(row.parameter_schema_json),
-    upstreamPriceUsdMicros: row.upstream_price_usd_micros,
-    customerPriceUsdMicros: row.customer_price_usd_micros,
-    priceVerified: row.price_verified === 1,
-    enabled: row.enabled === 1,
-    readOnly: row.read_only === 1,
-    safetyClassification: row.safety_classification,
-    safetyReasons: safeStoredStringArray(row.safety_reasons_json),
-    safetyPolicyVersion: row.safety_policy_version,
-    revision: row.revision,
-    sourceUpdatedAt: row.source_updated_at,
-    presentInLatestSync: row.present_in_latest_sync === 1,
-    reviewedAt: row.reviewed_at,
-    updatedAt: row.updated_at,
-  }));
+  const endpoints = (rows.results ?? []).map((row) => {
+    const taxonomy = strictStoredCatalogTaxonomy(row);
+    return {
+      path: row.path,
+      platform: row.platform,
+      dataType: taxonomy.dataType,
+      tags: taxonomy.tags,
+      surface: taxonomy.surface,
+      operationId: taxonomy.operationId,
+      method: row.http_method,
+      summary: row.summary,
+      description: row.description,
+      parameterSchema: safeStoredJson(row.parameter_schema_json),
+      upstreamPriceUsdMicros: row.upstream_price_usd_micros,
+      customerPriceUsdMicros: row.customer_price_usd_micros,
+      priceVerified: row.price_verified === 1,
+      enabled: row.enabled === 1,
+      readOnly: row.read_only === 1,
+      safetyClassification: row.safety_classification,
+      safetyReasons: safeStoredStringArray(row.safety_reasons_json),
+      safetyPolicyVersion: row.safety_policy_version,
+      revision: row.revision,
+      sourceUpdatedAt: row.source_updated_at,
+      presentInLatestSync: row.present_in_latest_sync === 1,
+      reviewedAt: row.reviewed_at,
+      updatedAt: row.updated_at,
+    };
+  });
 
   return jsonResponse(
     {
       endpoints,
       count: endpoints.length,
       total,
-      offset,
+      offset: filters.offset,
       nextOffset:
-        offset + endpoints.length < total
-          ? offset + endpoints.length
+        filters.offset + endpoints.length < total
+          ? filters.offset + endpoints.length
           : null,
       sync: syncRow
         ? {
@@ -3992,6 +5288,9 @@ type NormalizedCatalogBatchPreview = {
   expectedCatalogGeneration: string;
   selection: {
     platform: string | null;
+    dataType: CatalogDataType | null;
+    tag: string | null;
+    surface: MarketplaceSurface | null;
     query: string;
     status: "all" | "enabled" | "disabled" | "review";
     safety:
@@ -4010,6 +5309,10 @@ type CatalogBatchSourceRow = {
   path: string;
   platform: string;
   http_method: "GET" | "POST";
+  data_type: CatalogDataType;
+  tags_json: string;
+  surface: MarketplaceSurface;
+  operation_id: string | null;
   summary: string | null;
   upstream_price_usd_micros: number;
   customer_price_usd_micros: number;
@@ -4093,6 +5396,56 @@ function normalizeCatalogBatchPreview(
       "目录平台筛选条件无效。",
     );
   }
+  const dataTypeRaw =
+    body.selection.dataType == null
+      ? null
+      : typeof body.selection.dataType === "string"
+        ? body.selection.dataType.trim().normalize("NFKC").toLowerCase()
+        : "";
+  if (
+    dataTypeRaw !== null &&
+    !PROVIDER_DATA_TYPES.includes(dataTypeRaw)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_data_type",
+      "目录数据类型筛选条件无效。",
+    );
+  }
+  const tag =
+    body.selection.tag == null
+      ? null
+      : typeof body.selection.tag === "string"
+        ? body.selection.tag.trim().normalize("NFKC").toLowerCase()
+        : "";
+  if (
+    tag !== null &&
+    (tag.length < 1 ||
+      tag.length > 160 ||
+      /[?&#=\u0000-\u001F\u007F]/.test(tag))
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_tag",
+      "目录标签筛选条件无效。",
+    );
+  }
+  const surfaceRaw =
+    body.selection.surface == null
+      ? null
+      : typeof body.selection.surface === "string"
+        ? body.selection.surface.trim().normalize("NFKC").toLowerCase()
+        : "";
+  if (
+    surfaceRaw !== null &&
+    !PROVIDER_SURFACES.includes(surfaceRaw)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_surface",
+      "目录端类型筛选条件无效。",
+    );
+  }
   const query =
     typeof body.selection.query === "string"
       ? body.selection.query.replace(/\s+/g, " ").trim().toLowerCase()
@@ -4174,7 +5527,15 @@ function normalizeCatalogBatchPreview(
   return {
     action,
     expectedCatalogGeneration: body.expectedCatalogGeneration,
-    selection: { platform, query, status, safety },
+    selection: {
+      platform,
+      dataType: dataTypeRaw as CatalogDataType | null,
+      tag,
+      surface: surfaceRaw as MarketplaceSurface | null,
+      query,
+      status,
+      safety,
+    },
     pricing,
   };
 }
@@ -4200,6 +5561,7 @@ async function handleCatalogBatchPreview(
   const canonicalRequest = JSON.stringify(sortObjectDeep(body));
   const previewRequestHash = await sha256Hex(canonicalRequest);
   const db = requireDb(env);
+  await assertStoredCatalogTaxonomyIntegrity(db);
   const replay = await catalogBatchPlanByPreviewIdempotency(
     db,
     previewIdempotencyHash,
@@ -4297,6 +5659,24 @@ async function handleCatalogBatchPreview(
     clauses.push("platform = ?");
     bindings.push(body.selection.platform);
   }
+  if (body.selection.dataType !== null) {
+    clauses.push("data_type = ?");
+    bindings.push(body.selection.dataType);
+  }
+  if (body.selection.surface !== null) {
+    clauses.push("surface = ?");
+    bindings.push(body.selection.surface);
+  }
+  if (body.selection.tag !== null) {
+    clauses.push(
+      `EXISTS (
+         SELECT 1
+         FROM json_each(tags_json) AS catalog_tag
+         WHERE lower(catalog_tag.value) = ?
+       )`,
+    );
+    bindings.push(body.selection.tag);
+  }
   if (body.selection.query) {
     const escaped = body.selection.query
       .replaceAll("\\", "\\\\")
@@ -4335,7 +5715,8 @@ async function handleCatalogBatchPreview(
       : MAX_CATALOG_BATCH_TARGETS;
   const rows = await db
     .prepare(
-      `SELECT path, platform, http_method, summary,
+      `SELECT path, platform, http_method, data_type, tags_json, surface,
+              operation_id, summary,
               upstream_price_usd_micros, customer_price_usd_micros,
               price_verified, enabled, read_only, safety_classification,
               safety_policy_version, revision, sync_generation,
@@ -4358,6 +5739,7 @@ async function handleCatalogBatchPreview(
 
   const planned = await Promise.all(
     sourceRows.map(async (row, ordinal) => {
+      const taxonomy = strictStoredCatalogTaxonomy(row);
       let blockerCode: string | null = null;
       if (body.action !== "disable") {
         if (row.sync_generation !== body.expectedCatalogGeneration) {
@@ -4408,6 +5790,10 @@ async function handleCatalogBatchPreview(
           targetReadOnly !== row.read_only);
       const before = {
         path: row.path,
+        dataType: taxonomy.dataType,
+        tags: taxonomy.tags,
+        surface: taxonomy.surface,
+        operationId: taxonomy.operationId,
         revision: row.revision,
         upstreamPriceUsdMicros: row.upstream_price_usd_micros,
         customerPriceUsdMicros: row.customer_price_usd_micros,
@@ -4631,6 +6017,7 @@ async function handleCatalogBatchPreview(
             .prepare(
               `INSERT INTO catalog_batch_plan_items
                (id, plan_id, path, ordinal, platform, http_method, summary,
+                data_type, tags_json, surface, operation_id,
                 expected_revision, original_upstream_price_usd_micros,
                 original_customer_price_usd_micros,
                 original_price_verified, original_enabled,
@@ -4639,7 +6026,7 @@ async function handleCatalogBatchPreview(
                 target_customer_price_usd_micros, target_enabled,
                 target_read_only, will_change, blocker_code, item_digest)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?)`,
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .bind(
               `${planId}:${item.ordinal}`,
@@ -4649,6 +6036,10 @@ async function handleCatalogBatchPreview(
               item.row.platform,
               item.row.http_method,
               item.row.summary,
+              item.row.data_type,
+              item.row.tags_json,
+              item.row.surface,
+              item.row.operation_id,
               item.row.revision,
               item.row.upstream_price_usd_micros,
               item.row.customer_price_usd_micros,
@@ -4688,7 +6079,12 @@ async function handleCatalogBatchPreview(
                JOIN endpoint_catalog e ON e.path = i.path
                WHERE i.plan_id = ?
                  AND e.revision = i.expected_revision
+                 AND e.platform = i.platform
                  AND e.http_method = i.http_method
+                 AND e.data_type = i.data_type
+                 AND e.tags_json = i.tags_json
+                 AND e.surface = i.surface
+                 AND e.operation_id IS i.operation_id
                  AND e.upstream_price_usd_micros =
                      i.original_upstream_price_usd_micros
                  AND e.customer_price_usd_micros =
@@ -4738,6 +6134,8 @@ async function handleCatalogBatchPreview(
           previewAuditId,
           JSON.stringify({
             action: body.action,
+            selection: body.selection,
+            pricing: body.pricing,
             matchedCount,
             selectedCount,
             blockedCount,
@@ -4890,6 +6288,7 @@ async function handleCatalogBatchApply(
     `catalog-apply:${actorFingerprint}:${idempotencyKey}`,
   );
   const db = requireDb(env);
+  await assertStoredCatalogTaxonomyIntegrity(db);
   const existingApplyKey = await db
     .prepare(
       `SELECT id, actor_fingerprint, apply_request_hash, status
@@ -4986,6 +6385,14 @@ async function handleCatalogBatchApply(
     catalogGeneration: plan.catalog_generation,
     appliedAt,
   };
+  const storedSelector = parseCatalogBatchMetadata(
+    plan.selector_json,
+    "selector",
+  );
+  const storedMutation = parseCatalogBatchMetadata(
+    plan.mutation_json,
+    "mutation",
+  );
   const strictSourceClause =
     plan.action === "disable"
       ? "1 = 1"
@@ -5039,7 +6446,12 @@ async function handleCatalogBatchApply(
              JOIN endpoint_catalog e ON e.path = i.path
              WHERE i.plan_id = catalog_batch_plans.id
                AND e.revision = i.expected_revision
+               AND e.platform = i.platform
                AND e.http_method = i.http_method
+               AND e.data_type = i.data_type
+               AND e.tags_json = i.tags_json
+               AND e.surface = i.surface
+               AND e.operation_id IS i.operation_id
                AND e.upstream_price_usd_micros =
                    i.original_upstream_price_usd_micros
                AND e.customer_price_usd_micros =
@@ -5134,6 +6546,12 @@ async function handleCatalogBatchApply(
              WHERE i.plan_id = catalog_batch_plans.id
                AND i.will_change = 1
                AND e.revision = i.expected_revision + 1
+               AND e.platform = i.platform
+               AND e.http_method = i.http_method
+               AND e.data_type = i.data_type
+               AND e.tags_json = i.tags_json
+               AND e.surface = i.surface
+               AND e.operation_id IS i.operation_id
                AND e.customer_price_usd_micros =
                    i.target_customer_price_usd_micros
                AND e.enabled = i.target_enabled
@@ -5162,6 +6580,8 @@ async function handleCatalogBatchApply(
         auditId,
         JSON.stringify({
           action: plan.action,
+          selection: storedSelector,
+          mutation: storedMutation,
           matchedCount: plan.matched_count,
           selectedCount: plan.selected_count,
           targetDigest: plan.target_digest,
@@ -5266,6 +6686,23 @@ async function catalogBatchPlanByPreviewIdempotency(
     .first<CatalogBatchPlanRecord>();
 }
 
+function parseCatalogBatchMetadata(
+  value: string,
+  kind: "selector" | "mutation",
+): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!isPlainRecord(parsed)) throw new Error("invalid metadata");
+    return parsed;
+  } catch {
+    throw new PlatformError(
+      500,
+      "catalog_batch_metadata_invalid",
+      `批量目录${kind === "selector" ? "筛选" : "变更"}元数据损坏。`,
+    );
+  }
+}
+
 async function catalogBatchResponse(
   db: D1Database,
   plan: CatalogBatchPlanRecord,
@@ -5276,7 +6713,8 @@ async function catalogBatchResponse(
 ): Promise<Response> {
   const itemsResult = await db
     .prepare(
-      `SELECT path, ordinal, platform, http_method, summary,
+      `SELECT path, ordinal, platform, http_method, data_type, tags_json,
+              surface, operation_id, summary,
               expected_revision, original_upstream_price_usd_micros,
               original_customer_price_usd_micros, original_price_verified,
               original_enabled, original_read_only,
@@ -5291,31 +6729,38 @@ async function catalogBatchResponse(
     )
     .bind(plan.id, limit, offset)
     .all<CatalogBatchItemRecord>();
-  const items = (itemsResult.results ?? []).map((item) => ({
-    path: item.path,
-    platform: item.platform,
-    method: item.http_method,
-    summary: item.summary,
-    expectedRevision: item.expected_revision,
-    before: {
-      upstreamPriceUsdMicros: item.original_upstream_price_usd_micros,
-      customerPriceUsdMicros: item.original_customer_price_usd_micros,
-      priceVerified: item.original_price_verified === 1,
-      enabled: item.original_enabled === 1,
-      readOnly: item.original_read_only === 1,
-      syncGeneration: item.original_sync_generation,
-      reviewedAt: item.original_reviewed_at,
-      updatedAt: item.original_updated_at,
-    },
-    after: {
-      customerPriceUsdMicros: item.target_customer_price_usd_micros,
-      enabled: item.target_enabled === 1,
-      readOnly: item.target_read_only === 1,
-    },
-    willChange: item.will_change === 1,
-    blockerCode: item.blocker_code,
-    itemDigest: item.item_digest,
-  }));
+  const items = (itemsResult.results ?? []).map((item) => {
+    const taxonomy = strictStoredCatalogTaxonomy(item);
+    return {
+      path: item.path,
+      platform: item.platform,
+      dataType: taxonomy.dataType,
+      tags: taxonomy.tags,
+      surface: taxonomy.surface,
+      operationId: taxonomy.operationId,
+      method: item.http_method,
+      summary: item.summary,
+      expectedRevision: item.expected_revision,
+      before: {
+        upstreamPriceUsdMicros: item.original_upstream_price_usd_micros,
+        customerPriceUsdMicros: item.original_customer_price_usd_micros,
+        priceVerified: item.original_price_verified === 1,
+        enabled: item.original_enabled === 1,
+        readOnly: item.original_read_only === 1,
+        syncGeneration: item.original_sync_generation,
+        reviewedAt: item.original_reviewed_at,
+        updatedAt: item.original_updated_at,
+      },
+      after: {
+        customerPriceUsdMicros: item.target_customer_price_usd_micros,
+        enabled: item.target_enabled === 1,
+        readOnly: item.target_read_only === 1,
+      },
+      willChange: item.will_change === 1,
+      blockerCode: item.blocker_code,
+      itemDigest: item.item_digest,
+    };
+  });
   const nextOffset =
     offset + items.length < plan.matched_count
       ? offset + items.length
@@ -5340,6 +6785,14 @@ async function catalogBatchResponse(
         status: plan.status,
         version: plan.version,
         action: plan.action,
+        selection: parseCatalogBatchMetadata(
+          plan.selector_json,
+          "selector",
+        ),
+        mutation: parseCatalogBatchMetadata(
+          plan.mutation_json,
+          "mutation",
+        ),
         catalogGeneration: plan.catalog_generation,
         counts: {
           matched: plan.matched_count,
@@ -5384,12 +6837,12 @@ async function handleAdminOverview(
   requireAdminSecret(request, env, "platform");
   const db = requireDb(env);
   const readiness = await operationalReadiness(env);
-  const upstreamSnapshot = await managedTikHubCredentialsSnapshot(db);
+  const upstreamSnapshot = await managedUpstreamProviderCredentialsSnapshot(db);
   const activeManagedCredential =
     upstreamSnapshot.credentials.find(
       (credential) => credential.status === "active",
     ) ?? null;
-  const environmentUpstreamKey = env.TIKHUB_API_KEY;
+  const environmentUpstreamKey = env.UPSTREAM_API_KEY;
   const environmentUpstreamConfigured = hasConfiguredCredential(
     environmentUpstreamKey,
   );
@@ -5538,11 +6991,11 @@ async function handleAdminOverview(
         managedEnabled: upstreamSnapshot.managedEnabled,
         managedCredentialCount: upstreamSnapshot.credentials.length,
         stateVersion: upstreamSnapshot.stateVersion,
-        encryptionConfigured: hasValidTikHubCredentialsEncryptionKey(
-          env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY,
+        encryptionConfigured: hasValidUpstreamProviderCredentialsEncryptionKey(
+          env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY,
         ),
         baseUrl: hasValidRuntimeConfiguration(env)
-          ? normalizeUpstreamBase(env.TIKHUB_BASE_URL)
+          ? normalizeUpstreamBase(env.UPSTREAM_BASE_URL)
           : null,
       },
       generatedAt: new Date().toISOString(),
@@ -5601,15 +7054,48 @@ async function handleAdminUsers(
                   MAX(created_at) AS last_call_at
            FROM api_calls
            GROUP BY user_id
+         ),
+         identity_providers AS (
+           SELECT DISTINCT user_id, provider
+           FROM auth_identities
+         ),
+         identities AS (
+           SELECT p.user_id, json_group_array(p.provider) AS providers_json,
+                  (
+                    SELECT MAX(a.wallet_address)
+                    FROM auth_identities a
+                    WHERE a.user_id = p.user_id AND a.provider = 'wallet'
+                  ) AS wallet_address
+           FROM identity_providers p
+           GROUP BY p.user_id
+         ),
+         active_keys AS (
+           SELECT user_id, COUNT(*) AS active_key_count
+           FROM api_keys
+           WHERE revoked_at IS NULL
+           GROUP BY user_id
+         ),
+         active_sessions AS (
+           SELECT user_id, COUNT(*) AS active_session_count
+           FROM auth_sessions
+           WHERE datetime(expires_at) > datetime('now')
+           GROUP BY user_id
          )
          SELECT u.id, u.email, u.display_name, u.status, u.created_at,
                 COALESCE(b.balance, 0) AS balance,
                 COALESCE(g.calls_30d, 0) AS calls_30d,
                 COALESCE(g.spend_30d, 0) AS spend_30d,
-                g.last_call_at
+                g.last_call_at,
+                COALESCE(i.providers_json, '["sites"]') AS providers_json,
+                i.wallet_address,
+                COALESCE(k.active_key_count, 0) AS active_key_count,
+                COALESCE(s.active_session_count, 0) AS active_session_count
          FROM users u
          LEFT JOIN balances b ON b.user_id = u.id
          LEFT JOIN usage g ON g.user_id = u.id
+         LEFT JOIN identities i ON i.user_id = u.id
+         LEFT JOIN active_keys k ON k.user_id = u.id
+         LEFT JOIN active_sessions s ON s.user_id = u.id
          ORDER BY u.created_at DESC
          LIMIT ? OFFSET ?`,
       )
@@ -5629,6 +7115,10 @@ async function handleAdminUsers(
     calls_30d: number;
     spend_30d: number;
     last_call_at: string | null;
+    providers_json: string;
+    wallet_address: string | null;
+    active_key_count: number;
+    active_session_count: number;
   }>(usersResult).map((row) => ({
     id: row.id,
     email: row.email,
@@ -5638,6 +7128,10 @@ async function handleAdminUsers(
     calls30d: Number(row.calls_30d),
     spend30dUsdMicros: Number(row.spend_30d),
     lastCallAt: row.last_call_at,
+    providers: safeStoredStringArray(row.providers_json),
+    walletAddress: row.wallet_address,
+    activeKeyCount: Number(row.active_key_count),
+    activeSessionCount: Number(row.active_session_count),
     createdAt: row.created_at,
   }));
 
@@ -5664,11 +7158,16 @@ async function handleAdminUserUpdate(
   const body = await readJsonBody<{
     userId?: unknown;
     status?: unknown;
+    expectedStatus?: unknown;
   }>(request, MAX_DASHBOARD_BODY_BYTES);
   const userId =
     typeof body.userId === "string" ? body.userId.trim() : "";
   const status =
     typeof body.status === "string" ? body.status.trim() : "";
+  const expectedStatus =
+    typeof body.expectedStatus === "string"
+      ? body.expectedStatus.trim()
+      : "";
   if (!/^usr_[A-Za-z0-9_-]{8,128}$/.test(userId)) {
     throw new PlatformError(400, "invalid_user_id", "用户编号无效。");
   }
@@ -5679,16 +7178,38 @@ async function handleAdminUserUpdate(
       "用户状态仅支持 active 或 suspended。",
     );
   }
+  if (
+    (expectedStatus !== "active" && expectedStatus !== "suspended") ||
+    expectedStatus === status
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_expected_user_status",
+      "必须提交与目标状态不同的当前用户状态。",
+    );
+  }
 
   const db = requireDb(env);
+  const auditStatement = await prepareAdminAuditStatement(db, request, {
+    action: "user.status_updated",
+    targetType: "user",
+    targetId: userId,
+    details: {
+      status,
+      expectedStatus,
+      credentialsInvalidated: status === "suspended",
+    },
+    userStatusUpdate: { userId, status },
+  });
   const results = await db.batch([
     db
       .prepare(
         `UPDATE users
          SET status = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?`,
+         WHERE id = ? AND status = ?`,
       )
-      .bind(status, userId),
+      .bind(status, userId, expectedStatus),
+    auditStatement,
     db
       .prepare(
         `UPDATE api_keys
@@ -5696,16 +7217,27 @@ async function handleAdminUserUpdate(
          WHERE user_id = ? AND ? = 'suspended'`,
       )
       .bind(userId, status),
+    db
+      .prepare(
+        `DELETE FROM auth_sessions
+         WHERE user_id = ? AND ? = 'suspended'`,
+      )
+      .bind(userId, status),
   ]);
   if (Number(results[0]?.meta?.changes ?? 0) !== 1) {
-    throw new PlatformError(404, "user_not_found", "没有找到这个用户。");
+    const exists = await db
+      .prepare(`SELECT 1 AS present FROM users WHERE id = ?`)
+      .bind(userId)
+      .first<{ present: number }>();
+    if (!exists) {
+      throw new PlatformError(404, "user_not_found", "没有找到这个用户。");
+    }
+    throw new PlatformError(
+      409,
+      "user_status_conflict",
+      "用户状态已变化，请刷新后重新操作。",
+    );
   }
-  await writeAdminAudit(db, request, {
-    action: "user.status_updated",
-    targetType: "user",
-    targetId: userId,
-    details: { status },
-  });
   return jsonResponse({ ok: true, userId, status }, 200, requestId);
 }
 
@@ -6573,10 +8105,10 @@ async function handleUpstreamCredentialsList(
 ): Promise<Response> {
   requireAdminSecret(request, env, "platform");
   const db = requireDb(env);
-  const snapshot = await managedTikHubCredentialsSnapshot(db);
+  const snapshot = await managedUpstreamProviderCredentialsSnapshot(db);
   const active =
     snapshot.credentials.find((row) => row.status === "active") ?? null;
-  const environmentKey = env.TIKHUB_API_KEY;
+  const environmentKey = env.UPSTREAM_API_KEY;
   const environmentConfigured = hasConfiguredCredential(environmentKey);
   const environmentFingerprint = environmentConfigured
     ? (await sha256Hex(environmentKey)).slice(0, 16)
@@ -6584,7 +8116,7 @@ async function handleUpstreamCredentialsList(
 
   return jsonResponse(
     {
-      credentials: snapshot.credentials.map(publicManagedTikHubCredential),
+      credentials: snapshot.credentials.map(publicManagedUpstreamProviderCredential),
       activeSource: active
         ? "managed"
         : !snapshot.managedEnabled && environmentConfigured
@@ -6596,8 +8128,8 @@ async function handleUpstreamCredentialsList(
         (!snapshot.managedEnabled ? environmentFingerprint : null),
       stateVersion: snapshot.stateVersion,
       managedEnabled: snapshot.managedEnabled,
-      encryptionConfigured: hasValidTikHubCredentialsEncryptionKey(
-        env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY,
+      encryptionConfigured: hasValidUpstreamProviderCredentialsEncryptionKey(
+        env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY,
       ),
       environmentFallbackConfigured: environmentConfigured,
     },
@@ -6613,7 +8145,7 @@ async function handleUpstreamCredentialCreate(
 ): Promise<Response> {
   assertSameOrigin(request, env);
   requireAdminSecret(request, env, "platform");
-  const encryptionKey = requireTikHubCredentialsEncryptionKey(env);
+  const encryptionKey = requireUpstreamProviderCredentialsEncryptionKey(env);
   const body = await readJsonBody<{
     label?: unknown;
     apiKey?: unknown;
@@ -6623,11 +8155,11 @@ async function handleUpstreamCredentialCreate(
   const label = sanitizeUpstreamCredentialLabel(body.label);
   const apiKey =
     typeof body.apiKey === "string" ? body.apiKey : "";
-  if (!isValidTikHubApiKey(apiKey)) {
+  if (!isValidUpstreamProviderApiKey(apiKey)) {
     throw new PlatformError(
       400,
       "invalid_upstream_credential",
-      "TikHub API Key 格式无效。",
+      "UpstreamProvider API Key 格式无效。",
     );
   }
   if (typeof body.activate !== "boolean") {
@@ -6650,7 +8182,7 @@ async function handleUpstreamCredentialCreate(
     throw new PlatformError(
       400,
       "invalid_upstream_credential_version",
-      "启用 TikHub 凭据时必须提供当前状态版本。",
+      "启用 UpstreamProvider 凭据时必须提供当前状态版本。",
     );
   }
 
@@ -6661,18 +8193,18 @@ async function handleUpstreamCredentialCreate(
       throw new PlatformError(
         409,
         "upstream_credential_update_conflict",
-        "TikHub 活动凭据已发生变化，请刷新后重试。",
+        "UpstreamProvider 活动凭据已发生变化，请刷新后重试。",
       );
     }
   }
   const verification = body.activate
-    ? await verifyTikHubApiKey(apiKey, env)
+    ? await verifyUpstreamProviderApiKey(apiKey, env)
     : null;
 
   const id = `upc_${randomBase64Url(18)}`;
   const secretHash = await sha256Hex(apiKey);
   const fingerprint = secretHash.slice(0, 16);
-  const encryptedSecret = await encryptTikHubApiKey(
+  const encryptedSecret = await encryptUpstreamProviderApiKey(
     apiKey,
     encryptionKey,
     id,
@@ -6734,25 +8266,25 @@ async function handleUpstreamCredentialCreate(
       throw new PlatformError(
         409,
         "upstream_credential_exists",
-        "相同 TikHub API Key 已经存在。",
+        "相同 UpstreamProvider API Key 已经存在。",
       );
     }
     throw new PlatformError(
       409,
       "upstream_credential_limit",
-      "当前未撤销的 TikHub 凭据已达到 100 条安全上限。",
+      "当前未撤销的 UpstreamProvider 凭据已达到 100 条安全上限。",
     );
   }
 
   let activationConflict = false;
   if (body.activate) {
     try {
-      await activateManagedTikHubCredential(
+      await activateManagedUpstreamProviderCredential(
         db,
         request,
         id,
         expectedVersion,
-        verification as TikHubCredentialVerification,
+        verification as UpstreamProviderCredentialVerification,
       );
     } catch (error) {
       if (
@@ -6765,17 +8297,17 @@ async function handleUpstreamCredentialCreate(
       }
     }
   }
-  const stored = await managedTikHubCredentialById(db, id);
+  const stored = await managedUpstreamProviderCredentialById(db, id);
   if (!stored) {
     throw new PlatformError(
       500,
       "upstream_credential_write_failed",
-      "TikHub 凭据保存失败。",
+      "UpstreamProvider 凭据保存失败。",
     );
   }
   return jsonResponse(
     {
-      credential: publicManagedTikHubCredential(stored),
+      credential: publicManagedUpstreamProviderCredential(stored),
       verified: body.activate,
       activationConflict,
     },
@@ -6803,14 +8335,14 @@ async function handleUpstreamCredentialUpdate(
     throw new PlatformError(
       400,
       "invalid_upstream_credential_id",
-      "TikHub 凭据编号无效。",
+      "UpstreamProvider 凭据编号无效。",
     );
   }
   if (action !== "activate" && action !== "revoke") {
     throw new PlatformError(
       400,
       "invalid_upstream_credential_action",
-      "TikHub 凭据操作仅支持 activate 或 revoke。",
+      "UpstreamProvider 凭据操作仅支持 activate 或 revoke。",
     );
   }
   const expectedVersion =
@@ -6825,24 +8357,24 @@ async function handleUpstreamCredentialUpdate(
     throw new PlatformError(
       400,
       "invalid_upstream_credential_version",
-      "TikHub 凭据操作必须提供当前状态版本。",
+      "UpstreamProvider 凭据操作必须提供当前状态版本。",
     );
   }
 
   const db = requireDb(env);
-  const existing = await managedTikHubCredentialById(db, id);
+  const existing = await managedUpstreamProviderCredentialById(db, id);
   if (!existing) {
     throw new PlatformError(
       404,
       "upstream_credential_not_found",
-      "没有找到这个 TikHub 凭据。",
+      "没有找到这个 UpstreamProvider 凭据。",
     );
   }
   if (existing.status === "revoked") {
     throw new PlatformError(
       409,
       "upstream_credential_revoked",
-      "已撤销的 TikHub 凭据不能再次使用。",
+      "已撤销的 UpstreamProvider 凭据不能再次使用。",
     );
   }
 
@@ -6852,17 +8384,17 @@ async function handleUpstreamCredentialUpdate(
       throw new PlatformError(
         409,
         "upstream_credential_update_conflict",
-        "TikHub 活动凭据已发生变化，请刷新后重试。",
+        "UpstreamProvider 活动凭据已发生变化，请刷新后重试。",
       );
     }
-    const encryptionKey = requireTikHubCredentialsEncryptionKey(env);
-    const apiKey = await decryptTikHubApiKey(
+    const encryptionKey = requireUpstreamProviderCredentialsEncryptionKey(env);
+    const apiKey = await decryptUpstreamProviderApiKey(
       existing.encrypted_secret,
       encryptionKey,
       existing.id,
     );
-    const verification = await verifyTikHubApiKey(apiKey, env);
-    await activateManagedTikHubCredential(
+    const verification = await verifyUpstreamProviderApiKey(apiKey, env);
+    await activateManagedUpstreamProviderCredential(
       db,
       request,
       id,
@@ -6927,7 +8459,7 @@ async function handleUpstreamCredentialUpdate(
         throw new PlatformError(
           409,
           "upstream_credential_update_conflict",
-          "TikHub 活动凭据已发生变化，请刷新后重试。",
+          "UpstreamProvider 活动凭据已发生变化，请刷新后重试。",
         );
       }
     } else {
@@ -6957,22 +8489,22 @@ async function handleUpstreamCredentialUpdate(
         throw new PlatformError(
           409,
           "upstream_credential_update_conflict",
-          "TikHub 凭据状态已发生变化，请刷新后重试。",
+          "UpstreamProvider 凭据状态已发生变化，请刷新后重试。",
         );
       }
     }
   }
 
-  const updated = await managedTikHubCredentialById(db, id);
+  const updated = await managedUpstreamProviderCredentialById(db, id);
   if (!updated) {
     throw new PlatformError(
       500,
       "upstream_credential_write_failed",
-      "TikHub 凭据状态更新失败。",
+      "UpstreamProvider 凭据状态更新失败。",
     );
   }
   return jsonResponse(
-    { credential: publicManagedTikHubCredential(updated) },
+    { credential: publicManagedUpstreamProviderCredential(updated) },
     200,
     requestId,
   );
@@ -7008,16 +8540,16 @@ async function handleCatalogSync(
   }
 
   try {
-    const credential = await resolveTikHubCredential(env, db);
+    const credential = await resolveUpstreamProviderCredential(env, db);
     if (!credential) {
       throw new PlatformError(
         503,
         "upstream_not_configured",
-        "TikHub 服务端密钥尚未配置。",
+        "UpstreamProvider 服务端密钥尚未配置。",
       );
     }
 
-    const upstreamBase = normalizeUpstreamBase(env.TIKHUB_BASE_URL);
+    const upstreamBase = normalizeUpstreamBase(env.UPSTREAM_BASE_URL);
     let response: Response;
     try {
       response = await fetch(
@@ -7042,14 +8574,14 @@ async function handleCatalogSync(
       throw new PlatformError(
         502,
         "catalog_sync_failed",
-        "TikHub 端点目录暂时不可用。",
+        "UpstreamProvider 端点目录暂时不可用。",
       );
     }
     if (!response.ok) {
       throw new PlatformError(
         502,
         "catalog_sync_failed",
-        `TikHub 端点目录同步失败（${response.status}）。`,
+        `UpstreamProvider 端点目录同步失败（${response.status}）。`,
       );
     }
 
@@ -7080,14 +8612,14 @@ async function handleCatalogSync(
       throw new PlatformError(
         502,
         "catalog_schema_sync_failed",
-        "TikHub OpenAPI 文档暂时不可用。",
+        "UpstreamProvider OpenAPI 文档暂时不可用。",
       );
     }
     if (!openApiResponse.ok) {
       throw new PlatformError(
         502,
         "catalog_schema_sync_failed",
-        `TikHub OpenAPI 文档同步失败（${openApiResponse.status}）。`,
+        `UpstreamProvider OpenAPI 文档同步失败（${openApiResponse.status}）。`,
       );
     }
     const openApiSnapshot = await readResponseJsonSnapshot(
@@ -7296,13 +8828,14 @@ async function handleCatalogSync(
             .prepare(
               `INSERT INTO catalog_sync_staging
                (id, generation, path, platform, http_method, summary,
+                data_type, tags_json, surface, operation_id,
                 description, parameter_schema_json,
                 upstream_price_usd_micros,
                 suggested_customer_price_usd_micros,
                 price_verified, looks_read_only, safety_classification,
                 safety_reasons_json, safety_policy_version, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       CURRENT_TIMESTAMP)`,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, CURRENT_TIMESTAMP)`,
             )
             .bind(
               `${syncGeneration}:${offset + batchIndex}`,
@@ -7311,6 +8844,10 @@ async function handleCatalogSync(
               entry.platform,
               entry.httpMethod,
               entry.summary,
+              entry.dataType,
+              JSON.stringify(entry.tags),
+              entry.surface,
+              entry.operationId,
               entry.description,
               entry.parameterSchemaJson,
               entry.upstreamPriceUsdMicros,
@@ -7327,21 +8864,69 @@ async function handleCatalogSync(
     }
     const staged = await db
       .prepare(
-        `SELECT COUNT(*) AS count
+        `SELECT COUNT(*) AS count,
+                COALESCE(SUM(
+                  CASE
+                    WHEN data_type IN (
+                      'account', 'analytics_trends', 'comments',
+                      'commerce_marketing', 'content', 'email', 'live',
+                      'media_download', 'profile_creator',
+                      'search_discovery', 'social_graph', 'system',
+                      'taxonomy', 'utility', 'other'
+                    )
+                      AND surface IN ('app', 'web', 'app_web', 'other')
+                      AND json_valid(tags_json)
+                      AND json_type(
+                        CASE WHEN json_valid(tags_json)
+                             THEN tags_json ELSE '[]' END
+                      ) = 'array'
+                      AND json_array_length(
+                        CASE WHEN json_valid(tags_json)
+                             THEN tags_json ELSE '[]' END
+                      ) <= 100
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM json_each(
+                          CASE WHEN json_valid(tags_json)
+                               THEN tags_json ELSE '[]' END
+                        )
+                        WHERE type != 'text' OR length(value) < 1
+                          OR length(value) > 160 OR trim(value) != value
+                      )
+                      AND json_array_length(
+                        CASE WHEN json_valid(tags_json)
+                             THEN tags_json ELSE '[]' END
+                      ) = (
+                        SELECT COUNT(DISTINCT value)
+                        FROM json_each(
+                          CASE WHEN json_valid(tags_json)
+                               THEN tags_json ELSE '[]' END
+                        )
+                      )
+                      AND (
+                        operation_id IS NULL OR
+                        length(operation_id) BETWEEN 1 AND 500
+                      )
+                    THEN 1 ELSE 0
+                  END
+                ), 0) AS metadata_complete
          FROM catalog_sync_staging
          WHERE generation = ?`,
       )
       .bind(syncGeneration)
-      .first<{ count: number }>();
-    if (Number(staged?.count ?? 0) !== entries.length) {
+      .first<{ count: number; metadata_complete: number }>();
+    if (
+      Number(staged?.count ?? 0) !== entries.length ||
+      Number(staged?.metadata_complete ?? 0) !== entries.length
+    ) {
       throw new PlatformError(
         409,
         "catalog_snapshot_incomplete",
-        "目录暂存快照不完整，本次不会发布。",
+        "目录暂存快照或数据类型元数据不完整，本次不会发布。",
       );
     }
 
-    const publishCredential = await resolveTikHubCredential(env, db);
+    const publishCredential = await resolveUpstreamProviderCredential(env, db);
     if (
       !publishCredential ||
       publishCredential.id !== credential.id ||
@@ -7352,7 +8937,7 @@ async function handleCatalogSync(
       throw new PlatformError(
         409,
         "catalog_sync_credential_changed",
-        "TikHub 活动凭据在同步期间发生变化，本次快照不会发布。",
+        "UpstreamProvider 活动凭据在同步期间发生变化，本次快照不会发布。",
       );
     }
     const managedCredentialFlag =
@@ -7384,13 +8969,15 @@ async function handleCatalogSync(
       db
         .prepare(
           `INSERT INTO endpoint_catalog
-           (path, platform, http_method, summary, description,
-            parameter_schema_json, upstream_price_usd_micros,
+           (path, platform, http_method, data_type, tags_json, surface,
+            operation_id, summary, description, parameter_schema_json,
+            upstream_price_usd_micros,
             customer_price_usd_micros, price_verified, enabled, read_only,
             safety_classification, safety_reasons_json,
             safety_policy_version, revision, source_updated_at,
             sync_generation, created_at, updated_at)
-           SELECT s.path, s.platform, s.http_method, s.summary,
+           SELECT s.path, s.platform, s.http_method, s.data_type,
+                  s.tags_json, s.surface, s.operation_id, s.summary,
                   s.description, s.parameter_schema_json,
                   s.upstream_price_usd_micros,
                   s.suggested_customer_price_usd_micros,
@@ -7413,6 +9000,10 @@ async function handleCatalogSync(
            ON CONFLICT(path) DO UPDATE SET
              platform = excluded.platform,
              http_method = excluded.http_method,
+             data_type = excluded.data_type,
+             tags_json = excluded.tags_json,
+             surface = excluded.surface,
+             operation_id = excluded.operation_id,
              summary = excluded.summary,
              description = excluded.description,
              parameter_schema_json = excluded.parameter_schema_json,
@@ -7428,6 +9019,11 @@ async function handleCatalogSync(
                  OR endpoint_catalog.http_method != excluded.http_method
                  OR endpoint_catalog.upstream_price_usd_micros !=
                     excluded.upstream_price_usd_micros
+                 OR endpoint_catalog.data_type != excluded.data_type
+                 OR endpoint_catalog.tags_json != excluded.tags_json
+                 OR endpoint_catalog.surface != excluded.surface
+                 OR endpoint_catalog.operation_id IS NOT
+                    excluded.operation_id
                  OR endpoint_catalog.safety_classification !=
                     excluded.safety_classification
                  OR endpoint_catalog.safety_policy_version !=
@@ -7437,7 +9033,12 @@ async function handleCatalogSync(
                ELSE endpoint_catalog.enabled
              END,
              read_only = CASE
-               WHEN endpoint_catalog.safety_classification !=
+               WHEN endpoint_catalog.data_type != excluded.data_type
+                 OR endpoint_catalog.tags_json != excluded.tags_json
+                 OR endpoint_catalog.surface != excluded.surface
+                 OR endpoint_catalog.operation_id IS NOT
+                    excluded.operation_id
+                 OR endpoint_catalog.safety_classification !=
                       excluded.safety_classification
                  OR endpoint_catalog.safety_policy_version !=
                       excluded.safety_policy_version
@@ -7450,6 +9051,11 @@ async function handleCatalogSync(
                  OR endpoint_catalog.http_method != excluded.http_method
                  OR endpoint_catalog.upstream_price_usd_micros !=
                     excluded.upstream_price_usd_micros
+                 OR endpoint_catalog.data_type != excluded.data_type
+                 OR endpoint_catalog.tags_json != excluded.tags_json
+                 OR endpoint_catalog.surface != excluded.surface
+                 OR endpoint_catalog.operation_id IS NOT
+                    excluded.operation_id
                  OR endpoint_catalog.safety_classification !=
                     excluded.safety_classification
                  OR endpoint_catalog.safety_policy_version !=
@@ -7473,7 +9079,8 @@ async function handleCatalogSync(
       db
         .prepare(
           `UPDATE endpoint_catalog
-           SET enabled = 0, reviewed_at = NULL, source_updated_at = NULL,
+           SET enabled = 0, read_only = 0, reviewed_at = NULL,
+               source_updated_at = NULL,
                sync_generation = NULL, revision = revision + 1,
                updated_at = CURRENT_TIMESTAMP
            WHERE NOT EXISTS (
@@ -7711,10 +9318,12 @@ async function handleCatalogUpdate(
   }
 
   const db = requireDb(env);
+  await assertStoredCatalogTaxonomyIntegrity(db);
   const existing = await db
     .prepare(
       `SELECT http_method, upstream_price_usd_micros,
               customer_price_usd_micros, price_verified, enabled,
+              data_type, tags_json, surface, operation_id,
               read_only, safety_classification, safety_policy_version,
               revision, sync_generation,
               (
@@ -7732,6 +9341,10 @@ async function handleCatalogUpdate(
       http_method: string;
       price_verified: number;
       enabled: number;
+      data_type: CatalogDataType;
+      tags_json: string;
+      surface: MarketplaceSurface;
+      operation_id: string | null;
       read_only: number;
       safety_classification: CatalogSafetyClassification;
       safety_policy_version: number;
@@ -7746,6 +9359,7 @@ async function handleCatalogUpdate(
       "目录中没有这个端点，请先同步上游目录。",
     );
   }
+  const existingTaxonomy = strictStoredCatalogTaxonomy(existing);
   if (
     body.enabled &&
     (existing.sync_generation == null ||
@@ -7793,7 +9407,7 @@ async function handleCatalogUpdate(
     throw new PlatformError(
       409,
       "endpoint_price_unverified",
-      "该端点尚未从 TikHub 价格目录获得可验证价格，不能启用。",
+      "该端点尚未从 UpstreamProvider 价格目录获得可验证价格，不能启用。",
     );
   }
   const nextRevision = existing.revision + 1;
@@ -7859,6 +9473,7 @@ async function handleCatalogUpdate(
         customerPriceUsdMicros: price,
       },
       safetyClassification: existing.safety_classification,
+      taxonomy: existingTaxonomy,
       upstreamPriceUsdMicros: existing.upstream_price_usd_micros,
       syncGeneration: existing.sync_generation,
     },
@@ -7973,6 +9588,7 @@ async function handleReconciliation(
   let creditedPaymentsPolled = 0;
   let rejectedPaymentsPolled = 0;
   let paymentErrors = 0;
+  let paymentProviderAttempts = 0;
   const paymentApiKey = env.NOWPAYMENTS_API_KEY;
   if (paymentApiKey) {
     const events = await db
@@ -7990,6 +9606,7 @@ async function handleReconciliation(
         order_id: string;
       }>();
     const eventRows = events.results ?? [];
+    paymentProviderAttempts += eventRows.length;
     for (let offset = 0; offset < eventRows.length; offset += 3) {
       await Promise.all(
         eventRows.slice(offset, offset + 3).map(async (event) => {
@@ -8026,7 +9643,7 @@ async function handleReconciliation(
                AND datetime(updated_at) < datetime('now', '-1 minute')
              )
              OR (
-               status = 'expired'
+               status IN ('expired', 'failed')
                AND datetime(updated_at) < datetime('now', '-6 hours')
                AND datetime(created_at) >= datetime('now', '-7 days')
              )
@@ -8036,6 +9653,7 @@ async function handleReconciliation(
       )
       .all<{ id: string; provider_payment_id: string }>();
     const pendingRows = pendingPayments.results ?? [];
+    paymentProviderAttempts += pendingRows.length;
     for (let offset = 0; offset < pendingRows.length; offset += 3) {
       await Promise.all(
         pendingRows.slice(offset, offset + 3).map(async (payment) => {
@@ -8149,6 +9767,7 @@ async function handleReconciliation(
             )
             .first<{ name: string }>();
           if (!claimed) return;
+          paymentProviderAttempts += 1;
           let pollError: string | null = null;
           try {
             const verified = await getNowPaymentsPayment(
@@ -8215,7 +9834,6 @@ async function handleReconciliation(
                 'nowpayments:' || p.provider_payment_id || ':reversal'
            WHERE p.provider = 'nowpayments'
              AND p.provider_payment_id IS NOT NULL
-             AND datetime(p.created_at) >= datetime('now', '-180 days')
              AND reversal.id IS NULL
            UNION
            SELECT r.order_id, r.provider_payment_id
@@ -8242,6 +9860,7 @@ async function handleReconciliation(
       )
       .all<{ order_id: string; provider_payment_id: string }>();
     const creditedRows = creditedCandidates.results ?? [];
+    paymentProviderAttempts += creditedRows.length;
     for (let offset = 0; offset < creditedRows.length; offset += 3) {
       await Promise.all(
         creditedRows.slice(offset, offset + 3).map(async (payment) => {
@@ -8297,7 +9916,27 @@ async function handleReconciliation(
     }
   }
 
-  await db.batch([
+  const paymentProviderSuccesses =
+    paymentEventsProcessed +
+    paymentsPolled +
+    creditedPaymentsPolled +
+    rejectedPaymentsPolled;
+  const providerObservationFailed =
+    Boolean(paymentApiKey) &&
+    paymentProviderAttempts > 0 &&
+    paymentProviderSuccesses === 0;
+  const reconciliationDetails = JSON.stringify({
+    refunded,
+    paymentEventsProcessed,
+    paymentsPolled,
+    creditedPaymentsPolled,
+    rejectedPaymentsPolled,
+    paymentErrors,
+    paymentProviderAttempts,
+    paymentProviderSuccesses,
+    status: providerObservationFailed ? "provider_failed" : "healthy",
+  });
+  const maintenanceStatements = [
     db
       .prepare(
         `DELETE FROM payment_rate_limit_buckets
@@ -8344,22 +9983,28 @@ async function handleReconciliation(
       .prepare(
         `INSERT INTO operation_heartbeats
          (name, last_success_at, details_json)
-         VALUES ('reconciliation', CURRENT_TIMESTAMP, ?)
+         VALUES ('reconciliation:last-run', CURRENT_TIMESTAMP, ?)
          ON CONFLICT(name) DO UPDATE SET
            last_success_at = CURRENT_TIMESTAMP,
            details_json = excluded.details_json`,
       )
-      .bind(
-        JSON.stringify({
-          refunded,
-          paymentEventsProcessed,
-          paymentsPolled,
-          creditedPaymentsPolled,
-          rejectedPaymentsPolled,
-          paymentErrors,
-        }),
-      ),
-  ]);
+      .bind(reconciliationDetails),
+  ];
+  if (!providerObservationFailed) {
+    maintenanceStatements.push(
+      db
+        .prepare(
+          `INSERT INTO operation_heartbeats
+         (name, last_success_at, details_json)
+         VALUES ('reconciliation', CURRENT_TIMESTAMP, ?)
+         ON CONFLICT(name) DO UPDATE SET
+           last_success_at = CURRENT_TIMESTAMP,
+           details_json = excluded.details_json`,
+        )
+        .bind(reconciliationDetails),
+    );
+  }
+  await db.batch(maintenanceStatements);
 
   return jsonResponse(
     {
@@ -8373,11 +10018,14 @@ async function handleReconciliation(
         creditedPolled: creditedPaymentsPolled,
         rejectedPolled: rejectedPaymentsPolled,
         errors: paymentErrors,
+        providerAttempts: paymentProviderAttempts,
+        providerSuccesses: paymentProviderSuccesses,
+        providerHealthy: !providerObservationFailed,
         skipped: paymentApiKey ? null : "NOWPAYMENTS_API_KEY 未配置",
       },
       note: "回退两分钟前仍未完成且存在扣款流水的代理请求，并复核未处理事件、待确认充值、近期零入账拒绝案件与已入账退款状态。",
     },
-    200,
+    providerObservationFailed ? 502 : 200,
     requestId,
   );
 }
@@ -8534,7 +10182,7 @@ async function getNowPaymentsPayment(
   return payload as NowPaymentsPayment;
 }
 
-async function managedTikHubCredentialsSnapshot(
+async function managedUpstreamProviderCredentialsSnapshot(
   db: D1Database,
 ): Promise<{
   credentials: ManagedUpstreamCredentialRecord[];
@@ -8572,7 +10220,7 @@ async function managedTikHubCredentialsSnapshot(
     throw new PlatformError(
       503,
       "database_migrations_required",
-      "TikHub 凭据库迁移尚未完成。",
+      "UpstreamProvider 凭据库迁移尚未完成。",
     );
   }
   return {
@@ -8622,12 +10270,12 @@ async function upstreamCredentialState(
     throw new PlatformError(
       503,
       "database_migrations_required",
-      "TikHub 凭据库迁移尚未完成。",
+      "UpstreamProvider 凭据库迁移尚未完成。",
     );
   }
 }
 
-async function managedTikHubCredentialById(
+async function managedUpstreamProviderCredentialById(
   db: D1Database,
   id: string,
 ): Promise<ManagedUpstreamCredentialRecord | null> {
@@ -8653,17 +10301,17 @@ async function managedTikHubCredentialById(
     throw new PlatformError(
       503,
       "database_migrations_required",
-      "TikHub 凭据库迁移尚未完成。",
+      "UpstreamProvider 凭据库迁移尚未完成。",
     );
   }
 }
 
-function publicManagedTikHubCredential(
+function publicManagedUpstreamProviderCredential(
   credential: ManagedUpstreamCredentialRecord,
 ) {
   let scopeCount = 0;
   try {
-    const scopes = normalizeTikHubCredentialScopes(
+    const scopes = normalizeUpstreamProviderCredentialScopes(
       credential.verified_scopes_json
         ? (JSON.parse(credential.verified_scopes_json) as unknown)
         : null,
@@ -8686,26 +10334,26 @@ function publicManagedTikHubCredential(
   };
 }
 
-async function activateManagedTikHubCredential(
+async function activateManagedUpstreamProviderCredential(
   db: D1Database,
   request: Request,
   id: string,
   expectedVersion: number,
-  verification: TikHubCredentialVerification,
+  verification: UpstreamProviderCredentialVerification,
 ): Promise<void> {
-  const existing = await managedTikHubCredentialById(db, id);
+  const existing = await managedUpstreamProviderCredentialById(db, id);
   if (!existing) {
     throw new PlatformError(
       404,
       "upstream_credential_not_found",
-      "没有找到这个 TikHub 凭据。",
+      "没有找到这个 UpstreamProvider 凭据。",
     );
   }
   if (existing.status === "revoked") {
     throw new PlatformError(
       409,
       "upstream_credential_revoked",
-      "已撤销的 TikHub 凭据不能再次使用。",
+      "已撤销的 UpstreamProvider 凭据不能再次使用。",
     );
   }
   const nextVersion = expectedVersion + 1;
@@ -8796,7 +10444,7 @@ async function activateManagedTikHubCredential(
     throw new PlatformError(
       409,
       "upstream_credential_update_conflict",
-      "TikHub 活动凭据已发生变化，请刷新后重试。",
+      "UpstreamProvider 活动凭据已发生变化，请刷新后重试。",
     );
   }
 }
@@ -8806,7 +10454,7 @@ function sanitizeUpstreamCredentialLabel(value: unknown): string {
     throw new PlatformError(
       400,
       "invalid_upstream_credential_label",
-      "TikHub 凭据名称无效。",
+      "UpstreamProvider 凭据名称无效。",
     );
   }
   const label = value.replace(/\s+/g, " ").trim();
@@ -8818,17 +10466,17 @@ function sanitizeUpstreamCredentialLabel(value: unknown): string {
     throw new PlatformError(
       400,
       "invalid_upstream_credential_label",
-      "TikHub 凭据名称必须是 2–80 个可见字符。",
+      "UpstreamProvider 凭据名称必须是 2–80 个可见字符。",
     );
   }
   return label;
 }
 
-function isValidTikHubApiKey(value: string): boolean {
+function isValidUpstreamProviderApiKey(value: string): boolean {
   return /^[\x21-\x7E]{16,512}$/.test(value);
 }
 
-function hasValidTikHubCredentialsEncryptionKey(
+function hasValidUpstreamProviderCredentialsEncryptionKey(
   value?: string,
 ): value is string {
   if (!value || !/^[A-Za-z0-9_-]{43}$/.test(value)) return false;
@@ -8839,22 +10487,22 @@ function hasValidTikHubCredentialsEncryptionKey(
   }
 }
 
-function requireTikHubCredentialsEncryptionKey(env: PlatformEnv): string {
+function requireUpstreamProviderCredentialsEncryptionKey(env: PlatformEnv): string {
   if (
-    !hasValidTikHubCredentialsEncryptionKey(
-      env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY,
+    !hasValidUpstreamProviderCredentialsEncryptionKey(
+      env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY,
     )
   ) {
     throw new PlatformError(
       503,
       "upstream_credential_encryption_unavailable",
-      "TikHub 凭据加密主密钥尚未正确配置。",
+      "UpstreamProvider 凭据加密主密钥尚未正确配置。",
     );
   }
-  return env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY;
+  return env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY;
 }
 
-async function importTikHubCredentialsEncryptionKey(
+async function importUpstreamProviderCredentialsEncryptionKey(
   encodedKey: string,
 ): Promise<CryptoKey> {
   return await crypto.subtle.importKey(
@@ -8866,13 +10514,13 @@ async function importTikHubCredentialsEncryptionKey(
   );
 }
 
-function tikHubCredentialAdditionalData(id: string): ArrayBuffer {
+function upstreamProviderCredentialAdditionalData(id: string): ArrayBuffer {
   return bytesToArrayBuffer(
     new TextEncoder().encode(`relaybase:tikhub:${id}:v1`),
   );
 }
 
-async function encryptTikHubApiKey(
+async function encryptUpstreamProviderApiKey(
   apiKey: string,
   encodedKey: string,
   id: string,
@@ -8882,10 +10530,10 @@ async function encryptTikHubApiKey(
     {
       name: "AES-GCM",
       iv,
-      additionalData: tikHubCredentialAdditionalData(id),
+      additionalData: upstreamProviderCredentialAdditionalData(id),
       tagLength: 128,
     },
-    await importTikHubCredentialsEncryptionKey(encodedKey),
+    await importUpstreamProviderCredentialsEncryptionKey(encodedKey),
     new TextEncoder().encode(apiKey),
   );
   return `v1.${bytesToBase64Url(iv)}.${bytesToBase64Url(
@@ -8893,7 +10541,7 @@ async function encryptTikHubApiKey(
   )}`;
 }
 
-async function decryptTikHubApiKey(
+async function decryptUpstreamProviderApiKey(
   encryptedSecret: string,
   encodedKey: string,
   id: string,
@@ -8908,7 +10556,7 @@ async function decryptTikHubApiKey(
     throw new PlatformError(
       503,
       "upstream_credential_decryption_failed",
-      "TikHub 凭据密文格式无效，已停止上游调用。",
+      "UpstreamProvider 凭据密文格式无效，已停止上游调用。",
     );
   }
   try {
@@ -8916,16 +10564,16 @@ async function decryptTikHubApiKey(
       {
         name: "AES-GCM",
         iv: bytesToArrayBuffer(base64UrlToBytes(parts[1] ?? "")),
-        additionalData: tikHubCredentialAdditionalData(id),
+        additionalData: upstreamProviderCredentialAdditionalData(id),
         tagLength: 128,
       },
-      await importTikHubCredentialsEncryptionKey(encodedKey),
+      await importUpstreamProviderCredentialsEncryptionKey(encodedKey),
       bytesToArrayBuffer(base64UrlToBytes(parts[2] ?? "")),
     );
     const apiKey = new TextDecoder("utf-8", { fatal: true }).decode(
       plaintext,
     );
-    if (!isValidTikHubApiKey(apiKey)) {
+    if (!isValidUpstreamProviderApiKey(apiKey)) {
       throw new Error("invalid decrypted secret");
     }
     return apiKey;
@@ -8933,16 +10581,16 @@ async function decryptTikHubApiKey(
     throw new PlatformError(
       503,
       "upstream_credential_decryption_failed",
-      "TikHub 凭据无法解密，已停止上游调用。",
+      "UpstreamProvider 凭据无法解密，已停止上游调用。",
     );
   }
 }
 
-async function verifyTikHubApiKey(
+async function verifyUpstreamProviderApiKey(
   apiKey: string,
   env: PlatformEnv,
-): Promise<TikHubCredentialVerification> {
-  const upstreamBase = normalizeUpstreamBase(env.TIKHUB_BASE_URL);
+): Promise<UpstreamProviderCredentialVerification> {
+  const upstreamBase = normalizeUpstreamBase(env.UPSTREAM_BASE_URL);
   let response: Response | null = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
@@ -8984,21 +10632,21 @@ async function verifyTikHubApiKey(
     throw new PlatformError(
       502,
       "upstream_credential_verification_failed",
-      "TikHub 暂时无法验证这个 API Key。",
+      "UpstreamProvider 暂时无法验证这个 API Key。",
     );
   }
   if (response.status === 401 || response.status === 403) {
     throw new PlatformError(
       400,
       "upstream_credential_rejected",
-      "TikHub 拒绝了这个 API Key。",
+      "UpstreamProvider 拒绝了这个 API Key。",
     );
   }
   if (!response.ok) {
     throw new PlatformError(
       502,
       "upstream_credential_verification_failed",
-      `TikHub 凭据验证失败（${response.status}）。`,
+      `UpstreamProvider 凭据验证失败（${response.status}）。`,
     );
   }
   const payload = await readResponseJson(
@@ -9015,7 +10663,7 @@ async function verifyTikHubApiKey(
     throw new PlatformError(
       502,
       "upstream_credential_verification_failed",
-      "TikHub 凭据验证响应格式无效。",
+      "UpstreamProvider 凭据验证响应格式无效。",
     );
   }
   const apiKeyData = payload.api_key_data;
@@ -9028,7 +10676,7 @@ async function verifyTikHubApiKey(
     throw new PlatformError(
       400,
       "upstream_credential_inactive",
-      "这个 TikHub API Key 或所属账户当前不可用。",
+      "这个 UpstreamProvider API Key 或所属账户当前不可用。",
     );
   }
   let expiresAt: string | null = null;
@@ -9041,25 +10689,25 @@ async function verifyTikHubApiKey(
       throw new PlatformError(
         400,
         "upstream_credential_expired",
-        "这个 TikHub API Key 已过期。",
+        "这个 UpstreamProvider API Key 已过期。",
       );
     }
     expiresAt = new Date(apiKeyData.expires_at).toISOString();
   }
-  const scopes = normalizeTikHubCredentialScopes(
+  const scopes = normalizeUpstreamProviderCredentialScopes(
     apiKeyData.api_key_scopes,
   );
-  if (!scopes || !hasTikHubDataScope(scopes)) {
+  if (!scopes || !hasUpstreamProviderDataScope(scopes)) {
     throw new PlatformError(
       400,
       "upstream_credential_scope_insufficient",
-      "这个 TikHub API Key 没有可用于数据接口的授权范围。",
+      "这个 UpstreamProvider API Key 没有可用于数据接口的授权范围。",
     );
   }
   return { scopes, expiresAt };
 }
 
-function normalizeTikHubCredentialScopes(
+function normalizeUpstreamProviderCredentialScopes(
   value: unknown,
 ): string[] | null {
   if (!Array.isArray(value) || value.length === 0 || value.length > 500) {
@@ -9083,7 +10731,7 @@ function normalizeTikHubCredentialScopes(
   return [...new Set(normalized)].sort();
 }
 
-function hasTikHubDataScope(scopes: string[]): boolean {
+function hasUpstreamProviderDataScope(scopes: string[]): boolean {
   return scopes.some((normalized) => {
     if (
       normalized === "*" ||
@@ -9101,7 +10749,7 @@ function hasTikHubDataScope(scopes: string[]): boolean {
   });
 }
 
-function tikHubCredentialAllowsPath(
+function upstreamProviderCredentialAllowsPath(
   scopes: string[] | null,
   catalogPath: string,
 ): boolean {
@@ -9118,36 +10766,36 @@ function tikHubCredentialAllowsPath(
   });
 }
 
-function storedTikHubCredentialScopes(value: string | null): string[] {
+function storedUpstreamProviderCredentialScopes(value: string | null): string[] {
   if (!value) {
     throw new PlatformError(
       503,
       "upstream_credential_state_invalid",
-      "TikHub 活动凭据缺少已验证的授权范围。",
+      "UpstreamProvider 活动凭据缺少已验证的授权范围。",
     );
   }
   try {
     const parsed = JSON.parse(value) as unknown;
-    const scopes = normalizeTikHubCredentialScopes(parsed);
-    if (!scopes || !hasTikHubDataScope(scopes)) throw new Error();
+    const scopes = normalizeUpstreamProviderCredentialScopes(parsed);
+    if (!scopes || !hasUpstreamProviderDataScope(scopes)) throw new Error();
     return scopes;
   } catch {
     throw new PlatformError(
       503,
       "upstream_credential_state_invalid",
-      "TikHub 活动凭据授权范围无效，已停止上游调用。",
+      "UpstreamProvider 活动凭据授权范围无效，已停止上游调用。",
     );
   }
 }
 
-async function resolveTikHubCredential(
+async function resolveUpstreamProviderCredential(
   env: PlatformEnv,
   db: D1Database,
-): Promise<ResolvedTikHubCredential | null> {
+): Promise<ResolvedUpstreamProviderCredential | null> {
   const state = await upstreamCredentialState(db);
   if (state.managedEnabled) {
     if (!state.activeCredentialId) return null;
-    const managed = await managedTikHubCredentialById(
+    const managed = await managedUpstreamProviderCredentialById(
       db,
       state.activeCredentialId,
     );
@@ -9155,7 +10803,7 @@ async function resolveTikHubCredential(
       throw new PlatformError(
         503,
         "upstream_credential_state_invalid",
-        "TikHub 活动凭据状态无效，已停止上游调用。",
+        "UpstreamProvider 活动凭据状态无效，已停止上游调用。",
       );
     }
     if (
@@ -9166,12 +10814,12 @@ async function resolveTikHubCredential(
       throw new PlatformError(
         503,
         "upstream_credential_expired",
-        "TikHub 活动凭据已过期，已停止上游调用。",
+        "UpstreamProvider 活动凭据已过期，已停止上游调用。",
       );
     }
-    const encryptionKey = requireTikHubCredentialsEncryptionKey(env);
+    const encryptionKey = requireUpstreamProviderCredentialsEncryptionKey(env);
     return {
-      secret: await decryptTikHubApiKey(
+      secret: await decryptUpstreamProviderApiKey(
         managed.encrypted_secret,
         encryptionKey,
         managed.id,
@@ -9179,17 +10827,17 @@ async function resolveTikHubCredential(
       fingerprint: managed.secret_hash.slice(0, 16),
       source: "managed",
       id: managed.id,
-      scopes: storedTikHubCredentialScopes(
+      scopes: storedUpstreamProviderCredentialScopes(
         managed.verified_scopes_json,
       ),
       expiresAt: managed.expires_at,
       stateVersion: state.version,
     };
   }
-  if (!hasConfiguredCredential(env.TIKHUB_API_KEY)) return null;
+  if (!hasConfiguredCredential(env.UPSTREAM_API_KEY)) return null;
   return {
-    secret: env.TIKHUB_API_KEY,
-    fingerprint: (await sha256Hex(env.TIKHUB_API_KEY)).slice(0, 16),
+    secret: env.UPSTREAM_API_KEY,
+    fingerprint: (await sha256Hex(env.UPSTREAM_API_KEY)).slice(0, 16),
     source: "environment",
     id: null,
     scopes: null,
@@ -9233,7 +10881,9 @@ function platformReadiness(env: PlatformEnv) {
   const databaseConfigured = Boolean(env.DB);
   const legalReviewConfirmed = env.LEGAL_REVIEW_CONFIRMED === "true";
   const resellerAuthorized = env.RESELLER_AUTHORIZED === "true";
-  const upstreamConfigured = hasConfiguredCredential(env.TIKHUB_API_KEY);
+  const commercialClearanceConfirmed =
+    env.UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED === "true";
+  const upstreamConfigured = hasConfiguredCredential(env.UPSTREAM_API_KEY);
   const configurationValid = hasValidRuntimeConfiguration(env);
   const masterAdminConfigured =
     hasConfiguredAdminSecret(env.ADMIN_MASTER_SECRET);
@@ -9264,16 +10914,20 @@ function platformReadiness(env: PlatformEnv) {
     googleAuthenticationConfigured ||
     walletAuthenticationConfigured ||
     trustedSitesIdentityConfigured;
+  const productionAuthenticationConfigured =
+    googleAuthenticationConfigured && walletAuthenticationConfigured;
   const proxyEnabled =
     databaseConfigured &&
     legalReviewConfirmed &&
     resellerAuthorized &&
+    commercialClearanceConfirmed &&
     upstreamConfigured &&
     configurationValid;
   const paymentsEnabled =
     proxyEnabled &&
-    authenticationConfigured &&
+    productionAuthenticationConfigured &&
     env.CRYPTO_PAYMENTS_ENABLED === "true" &&
+    commercialClearanceConfirmed &&
     paymentProviderConfigured;
   const missing: string[] = [];
   if (!databaseConfigured) missing.push("database");
@@ -9285,13 +10939,22 @@ function platformReadiness(env: PlatformEnv) {
   if (env.CRYPTO_PAYMENTS_ENABLED !== "true") {
     missing.push("crypto_payments");
   }
+  if (!commercialClearanceConfirmed) {
+    missing.push("commercial_clearance");
+  }
   if (!paymentProviderConfigured) missing.push("payment_provider");
   if (!authenticationConfigured) missing.push("authentication");
+  if (!googleAuthenticationConfigured) {
+    missing.push("google_authentication");
+  }
+  if (!walletAuthenticationConfigured) {
+    missing.push("wallet_authentication");
+  }
   const ready =
     proxyEnabled &&
     paymentsEnabled &&
     adminConfigured &&
-    authenticationConfigured;
+    productionAuthenticationConfigured;
   const mode = ready
     ? "live"
     : proxyEnabled || paymentsEnabled
@@ -9306,6 +10969,7 @@ function platformReadiness(env: PlatformEnv) {
       configurationValid,
       legalReviewConfirmed,
       resellerAuthorized,
+      commercialClearanceConfirmed,
       upstreamConfigured,
       proxyEnabled,
       paymentsEnabled,
@@ -9315,6 +10979,7 @@ function platformReadiness(env: PlatformEnv) {
       reconciliationConfigured,
       paymentAdminConfigured,
       authenticationConfigured,
+      productionAuthenticationConfigured,
       googleAuthenticationConfigured,
       walletAuthenticationConfigured,
       trustedSitesIdentityConfigured,
@@ -9338,14 +11003,14 @@ function hasConfiguredAdminSecret(value?: string): value is string {
 
 function hasValidRuntimeConfiguration(env: PlatformEnv): boolean {
   try {
-    normalizeUpstreamBase(env.TIKHUB_BASE_URL);
+    normalizeUpstreamBase(env.UPSTREAM_BASE_URL);
   } catch {
     return false;
   }
   if (
-    env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY &&
-    !hasValidTikHubCredentialsEncryptionKey(
-      env.TIKHUB_CREDENTIALS_ENCRYPTION_KEY,
+    env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY &&
+    !hasValidUpstreamProviderCredentialsEncryptionKey(
+      env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY,
     )
   ) {
     return false;
@@ -9375,6 +11040,7 @@ async function operationalReadiness(env: PlatformEnv) {
   const base = platformReadiness(env);
   let catalogReady = false;
   let schemaReady = false;
+  let taxonomyReady = false;
   let reconciliationRecent = false;
   let upstreamConfigured = base.capabilities.upstreamConfigured;
   if (env.DB) {
@@ -9387,6 +11053,7 @@ async function operationalReadiness(env: PlatformEnv) {
                FROM endpoint_catalog
                WHERE enabled = 1 AND read_only = 1
                  AND price_verified = 1
+                 AND ${catalogTaxonomyValidWhere("endpoint_catalog")}
                  AND safety_classification = 'safe_data_read'
                  AND safety_policy_version = ${CATALOG_SAFETY_POLICY_VERSION}
                  AND sync_generation = (
@@ -9435,6 +11102,10 @@ async function operationalReadiness(env: PlatformEnv) {
              (SELECT safety_classification
               FROM catalog_sync_staging LIMIT 1)
                AS catalog_staging_safety_schema,
+             (SELECT data_type || tags_json || surface ||
+                     COALESCE(operation_id, '')
+              FROM catalog_sync_staging LIMIT 1)
+               AS catalog_staging_taxonomy_schema,
              (SELECT idempotency_hash FROM payment_orders LIMIT 1)
                AS payment_idempotency_schema,
              (SELECT upstream_cost_usd_micros FROM api_calls LIMIT 1)
@@ -9449,11 +11120,19 @@ async function operationalReadiness(env: PlatformEnv) {
                AS catalog_safety_schema,
              (SELECT revision FROM endpoint_catalog LIMIT 1)
                AS catalog_revision_schema,
+             (SELECT data_type || tags_json || surface ||
+                     COALESCE(operation_id, '')
+              FROM endpoint_catalog LIMIT 1)
+               AS catalog_taxonomy_schema,
              (SELECT target_digest FROM catalog_batch_plans LIMIT 1)
                AS catalog_batch_plans_schema,
              (SELECT expected_revision
               FROM catalog_batch_plan_items LIMIT 1)
                AS catalog_batch_items_schema,
+             (SELECT data_type || tags_json || surface ||
+                     COALESCE(operation_id, '')
+              FROM catalog_batch_plan_items LIMIT 1)
+               AS catalog_batch_items_taxonomy_schema,
              (SELECT provider FROM auth_identities LIMIT 1)
                AS auth_identities_schema,
              (SELECT provider FROM auth_sessions LIMIT 1)
@@ -9493,12 +11172,19 @@ async function operationalReadiness(env: PlatformEnv) {
           catalog_credential_state_version: number | null;
         }>();
       schemaReady = row != null;
+      try {
+        await assertStoredCatalogTaxonomyIntegrity(env.DB);
+        taxonomyReady = true;
+      } catch {
+        taxonomyReady = false;
+      }
       reconciliationRecent =
         Number(row?.reconciliation_recent ?? 0) === 1;
       try {
-        const resolved = await resolveTikHubCredential(env, env.DB);
+        const resolved = await resolveUpstreamProviderCredential(env, env.DB);
         upstreamConfigured = Boolean(resolved);
         catalogReady =
+          taxonomyReady &&
           resolved != null &&
           Number(row?.enabled_count ?? 0) > 0 &&
           Number(row?.coverage_verified ?? 0) === 1 &&
@@ -9513,6 +11199,7 @@ async function operationalReadiness(env: PlatformEnv) {
       }
     } catch {
       schemaReady = false;
+      taxonomyReady = false;
       catalogReady = false;
       reconciliationRecent = false;
       upstreamConfigured = false;
@@ -9523,11 +11210,13 @@ async function operationalReadiness(env: PlatformEnv) {
     base.capabilities.configurationValid &&
     base.capabilities.legalReviewConfirmed &&
     base.capabilities.resellerAuthorized &&
+    base.capabilities.commercialClearanceConfirmed &&
     upstreamConfigured;
   const paymentsEnabled =
     proxyEnabled &&
-    base.capabilities.authenticationConfigured &&
+    base.capabilities.productionAuthenticationConfigured &&
     env.CRYPTO_PAYMENTS_ENABLED === "true" &&
+    base.capabilities.commercialClearanceConfirmed &&
     (env.PAYMENT_PROVIDER ?? "nowpayments") === "nowpayments" &&
     hasConfiguredCredential(env.NOWPAYMENTS_API_KEY) &&
     hasConfiguredCredential(env.NOWPAYMENTS_IPN_SECRET) &&
@@ -9539,7 +11228,7 @@ async function operationalReadiness(env: PlatformEnv) {
     proxyEnabled &&
     paymentsEnabled &&
     base.capabilities.adminConfigured &&
-    base.capabilities.authenticationConfigured &&
+    base.capabilities.productionAuthenticationConfigured &&
     schemaReady &&
     catalogReady &&
     reconciliationRecent;
@@ -9548,6 +11237,7 @@ async function operationalReadiness(env: PlatformEnv) {
   );
   if (!upstreamConfigured) missing.push("upstream_credentials");
   if (!schemaReady) missing.push("database_migrations");
+  if (schemaReady && !taxonomyReady) missing.push("catalog_taxonomy");
   if (!catalogReady) missing.push("enabled_catalog");
   if (!reconciliationRecent) missing.push("scheduled_reconciliation");
   const mode = ready
@@ -9564,6 +11254,7 @@ async function operationalReadiness(env: PlatformEnv) {
       upstreamConfigured,
       proxyEnabled,
       schemaReady,
+      taxonomyReady,
       catalogReady,
       reconciliationRecent,
       paymentsEnabled,
@@ -9647,8 +11338,10 @@ function paymentOrderResponse(
     {
       payment: {
         id: order.id,
+        providerPaymentId: order.provider_payment_id,
         status: order.status,
         amountUsdMicros: order.amount_usd_micros,
+        creditedUsdMicros: order.credited_usd_micros,
         payAddress: order.pay_address,
         payAmount: order.pay_amount,
         payCurrency: order.pay_currency,
@@ -10149,6 +11842,10 @@ type CatalogSyncEntry = {
   path: string;
   platform: string;
   httpMethod: "GET" | "POST";
+  dataType: CatalogDataType;
+  tags: string[];
+  surface: MarketplaceSurface;
+  operationId: string | null;
   summary: string | null;
   description: string | null;
   parameterSchemaJson: string | null;
@@ -10179,7 +11876,7 @@ function extractCatalogPrices(payload: unknown): {
     throw new PlatformError(
       502,
       "catalog_price_response_failed",
-      "TikHub 价格目录返回非成功业务状态，本次同步已停止。",
+      "UpstreamProvider 价格目录返回非成功业务状态，本次同步已停止。",
     );
   }
   const byPath = new Map<string, CatalogPriceEntry>();
@@ -10217,14 +11914,14 @@ function extractCatalogPrices(payload: unknown): {
       throw new PlatformError(
         502,
         "catalog_price_schema_invalid",
-        "TikHub 正式价格目录记录缺少 endpoint_uri 或 endpoint_cost。",
+        "UpstreamProvider 正式价格目录记录缺少 endpoint_uri 或 endpoint_cost。",
       );
     }
     if (rawPath && price.present && price.usdMicros == null) {
       throw new PlatformError(
         502,
         "catalog_price_value_invalid",
-        "TikHub 价格目录包含无法精确表示的成本，本次同步已停止。",
+        "UpstreamProvider 价格目录包含无法精确表示的成本，本次同步已停止。",
       );
     }
     if (rawPath && price.usdMicros != null) {
@@ -10244,7 +11941,7 @@ function extractCatalogPrices(payload: unknown): {
           throw new PlatformError(
             502,
             "catalog_price_method_invalid",
-            "TikHub 价格目录包含不受支持的显式请求方法，本次同步已停止。",
+            "UpstreamProvider 价格目录包含不受支持的显式请求方法，本次同步已停止。",
           );
         }
         const httpMethod: CatalogPriceEntry["httpMethod"] =
@@ -10268,7 +11965,7 @@ function extractCatalogPrices(payload: unknown): {
           throw new PlatformError(
             502,
             "catalog_price_conflict",
-            "TikHub 价格目录包含相互冲突的重复端点，本次同步已停止。",
+            "UpstreamProvider 价格目录包含相互冲突的重复端点，本次同步已停止。",
           );
         }
         byPath.set(
@@ -10294,7 +11991,7 @@ function extractCatalogPrices(payload: unknown): {
           throw new PlatformError(
             502,
             "catalog_price_schema_invalid",
-            "TikHub 正式价格目录包含无效端点路径，本次同步已停止。",
+            "UpstreamProvider 正式价格目录包含无效端点路径，本次同步已停止。",
           );
         }
         // Ignore non-endpoint URLs and malformed catalog records.
@@ -10329,7 +12026,7 @@ function extractCatalogPrices(payload: unknown): {
         throw new PlatformError(
           502,
           "catalog_price_schema_invalid",
-          "TikHub 正式价格目录包含非对象记录，本次同步已停止。",
+          "UpstreamProvider 正式价格目录包含非对象记录，本次同步已停止。",
         );
       }
       parseRecord(item, true);
@@ -10354,6 +12051,618 @@ function extractOpenApiVersion(payload: unknown): string | null {
   return compactCatalogText(payload.info.version, 80);
 }
 
+function redactedCatalogExample(fieldName?: string): string {
+  const canonical = fieldName
+    ? canonicalCatalogInputField(fieldName)
+    : "";
+  return canonical
+    ? `YOUR_${canonical.toUpperCase().slice(0, 48)}`
+    : "[REDACTED]";
+}
+
+function looksSensitiveCatalogExample(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  return (
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----/i.test(value) ||
+    /(?:Bearer\s+[A-Za-z0-9._~+/-]{16,}={0,2}|sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|AIza[A-Za-z0-9_-]{20,}|rb_live_[A-Za-z0-9_-]{16,})/i.test(
+      value,
+    ) ||
+    /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/.test(
+      value,
+    )
+  );
+}
+
+function redactSensitiveCatalogText(value: string): string {
+  const placeholder = (field: string) => redactedCatalogExample(field);
+  return value
+    .replace(
+      /(["'])([A-Za-z][A-Za-z0-9_.\-/]{0,80})\1(\s*[:=]\s*)(["'])([^\r\n]*?)\4/g,
+      (
+        match: string,
+        keyQuote: string,
+        field: string,
+        separator: string,
+        valueQuote: string,
+      ) =>
+        catalogInputFieldRisk(field) != null
+          ? `${keyQuote}${field}${keyQuote}${separator}${valueQuote}${placeholder(field)}${valueQuote}`
+          : match,
+    )
+    .replace(
+      /(^|[^A-Za-z0-9_])([A-Za-z][A-Za-z0-9_.\-/]{0,80})(\s*[:=]\s*)(["'])([^\r\n]*?)\4/gm,
+      (
+        match: string,
+        prefix: string,
+        field: string,
+        separator: string,
+        quote: string,
+      ) =>
+        catalogInputFieldRisk(field) != null
+          ? `${prefix}${field}${separator}${quote}${placeholder(field)}${quote}`
+          : match,
+    )
+    .replace(
+      /(^|[^A-Za-z0-9_])(["']?)([A-Za-z][A-Za-z0-9_.\-/]{0,80})\2(\s*[:=]\s*)(?!["'])([^\r\n]+)/gm,
+      (
+        match: string,
+        prefix: string,
+        keyQuote: string,
+        field: string,
+        separator: string,
+      ) =>
+        catalogInputFieldRisk(field) != null
+          ? `${prefix}${keyQuote}${field}${keyQuote}${separator}${placeholder(field)}`
+          : match,
+    )
+    .replace(
+      /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gi,
+      "[REDACTED_PRIVATE_KEY]",
+    )
+    .replace(
+      /\bBearer\s+[A-Za-z0-9._~+/-]{16,}={0,2}/gi,
+      "Bearer [REDACTED]",
+    )
+    .replace(
+      /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
+      "[REDACTED_JWT]",
+    )
+    .replace(
+      /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|AIza[A-Za-z0-9_-]{20,}|rb_live_[A-Za-z0-9_-]{16,})\b/gi,
+      "[REDACTED_TOKEN]",
+    );
+}
+
+function stripUpstreamCatalogExamples(value: string): string {
+  const output: string[] = [];
+  const lines = value.replace(/\r\n?/g, "\n").split("\n");
+  let skippedHeadingLevel: number | null = null;
+  let insideFence = false;
+  let insertedNotice = false;
+  const insertNotice = (): void => {
+    if (!insertedNotice) {
+      output.push(
+        "上游原始示例已移除；请使用 RelayBase 生成的安全调用示例。",
+      );
+      insertedNotice = true;
+    }
+  };
+
+  for (const line of lines) {
+    const heading = line.match(
+      /^\s{0,4}(#{1,6})\s*(.*?)\s*#*\s*$/,
+    );
+    if (skippedHeadingLevel != null) {
+      if (heading && heading[1].length <= skippedHeadingLevel) {
+        skippedHeadingLevel = null;
+      } else {
+        continue;
+      }
+    }
+    if (
+      heading &&
+      /(?:示例|例子|\bexamples?\b)/iu.test(heading[2])
+    ) {
+      insertNotice();
+      skippedHeadingLevel = heading[1].length;
+      continue;
+    }
+    if (/^\s*(?:```|~~~)/.test(line)) {
+      if (!insideFence) insertNotice();
+      insideFence = !insideFence;
+      continue;
+    }
+    if (insideFence) continue;
+    output.push(line);
+  }
+  return output.join("\n").trim();
+}
+
+function publicCatalogDescription(value: unknown, maxLength: number): string | null {
+  if (typeof value !== "string") return null;
+  return compactCatalogText(
+    redactSensitiveCatalogText(stripUpstreamCatalogExamples(value)),
+    maxLength,
+  );
+}
+
+function redactCatalogExampleAgainstSchema(
+  value: unknown,
+  schema: unknown,
+  fieldName?: string,
+  depth = 0,
+): unknown {
+  if (
+    (fieldName && catalogInputFieldRisk(fieldName) != null) ||
+    looksSensitiveCatalogExample(value)
+  ) {
+    return redactedCatalogExample(fieldName);
+  }
+  if (depth > 32) return "[REDACTED]";
+  if (Array.isArray(value)) {
+    const itemSchema =
+      isPlainRecord(schema) && isPlainRecord(schema.items)
+        ? schema.items
+        : null;
+    return value.map((item) =>
+      redactCatalogExampleAgainstSchema(
+        item,
+        itemSchema,
+        fieldName,
+        depth + 1,
+      ),
+    );
+  }
+  if (typeof value === "string") return redactSensitiveCatalogText(value);
+  if (!isPlainRecord(value)) return value;
+  const properties =
+    isPlainRecord(schema) && isPlainRecord(schema.properties)
+      ? schema.properties
+      : null;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [
+      key,
+      redactCatalogExampleAgainstSchema(
+        child,
+        properties?.[key],
+        key,
+        depth + 1,
+      ),
+    ]),
+  );
+}
+
+function redactUnknownCatalogExample(
+  value: unknown,
+  fieldName?: string,
+  depth = 0,
+): unknown {
+  if (
+    (fieldName && catalogInputFieldRisk(fieldName) != null) ||
+    looksSensitiveCatalogExample(value)
+  ) {
+    return redactedCatalogExample(fieldName);
+  }
+  if (depth > 32) return "[REDACTED]";
+  if (Array.isArray(value)) {
+    return value.map((item) =>
+      redactUnknownCatalogExample(item, fieldName, depth + 1),
+    );
+  }
+  if (typeof value === "string") return redactSensitiveCatalogText(value);
+  if (!isPlainRecord(value)) return value;
+  const exampleObject =
+    Object.hasOwn(value, "value") &&
+    Object.keys(value).every((key) =>
+      ["summary", "description", "value", "externalValue"].includes(key),
+    );
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => {
+      if (
+        exampleObject &&
+        (key === "summary" ||
+          key === "description" ||
+          key === "externalValue")
+      ) {
+        return [
+          key,
+          typeof child === "string"
+            ? redactSensitiveCatalogText(child)
+            : "[REDACTED_INVALID_EXAMPLE_METADATA]",
+        ];
+      }
+      return [
+        key,
+        redactUnknownCatalogExample(
+          child,
+          exampleObject && key === "value" ? fieldName : key,
+          depth + 1,
+        ),
+      ];
+    }),
+  );
+}
+
+function redactCatalogInputMetadata(
+  value: unknown,
+  fieldName?: string,
+  depth = 0,
+): unknown {
+  if (depth > 64) return value;
+  if (Array.isArray(value)) {
+    return value.map((item) =>
+      redactCatalogInputMetadata(item, fieldName, depth + 1),
+    );
+  }
+  if (typeof value === "string") return redactSensitiveCatalogText(value);
+  if (!isPlainRecord(value)) return value;
+  const declaredName =
+    typeof value.name === "string" &&
+    catalogInputFieldRisk(value.name) != null
+      ? value.name
+      : fieldName;
+  const schema = isPlainRecord(value.schema) ? value.schema : null;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => {
+      if (key === "description" && typeof child === "string") {
+        return [
+          key,
+          publicCatalogDescription(child, 2_000),
+        ];
+      }
+      if ((key === "example" || key === "default") && schema) {
+        return [
+          key,
+          redactCatalogExampleAgainstSchema(
+            child,
+            schema,
+            declaredName,
+          ),
+        ];
+      }
+      if (
+        key === "example" ||
+        key === "examples" ||
+        key === "default"
+      ) {
+        return [
+          key,
+          redactUnknownCatalogExample(child, declaredName),
+        ];
+      }
+      if (key === "properties" && isPlainRecord(child)) {
+        return [
+          key,
+          Object.fromEntries(
+            Object.entries(child).map(([propertyName, propertySchema]) => [
+              propertyName,
+              redactCatalogInputMetadata(
+                propertySchema,
+                propertyName,
+                depth + 1,
+              ),
+            ]),
+          ),
+        ];
+      }
+      return [
+        key,
+        redactCatalogInputMetadata(child, declaredName, depth + 1),
+      ];
+    }),
+  );
+}
+
+function resolveOpenApiInputReferences(
+  document: Record<string, unknown>,
+  value: unknown,
+): unknown {
+  let visitedNodes = 0;
+  let expandedBytes = 0;
+  let referenceCount = 0;
+  const activeReferences = new Set<string>();
+  const encoder = new TextEncoder();
+
+  class ReferenceBudgetError extends Error {
+    constructor(readonly reason: string) {
+      super(reason);
+    }
+  }
+
+  const addBytes = (value: string): void => {
+    const bytes = encoder.encode(value).byteLength;
+    if (bytes > MAX_OPENAPI_REFERENCE_STRING_BYTES) {
+      throw new ReferenceBudgetError("string_limit");
+    }
+    expandedBytes += bytes;
+    if (expandedBytes > MAX_OPENAPI_REFERENCE_BYTES) {
+      throw new ReferenceBudgetError("byte_limit");
+    }
+  };
+
+  const unresolvedReference = (
+    reference: string,
+    reason: string,
+  ): Record<string, string> => ({
+    $ref: reference.slice(0, 512),
+    "x-relaybase-unresolved": reason,
+  });
+
+  const resolvePointer = (reference: string): unknown => {
+    if (
+      !reference.startsWith("#/components/") ||
+      reference.length > 512
+    ) {
+      return undefined;
+    }
+    let current: unknown = document;
+    for (const rawSegment of reference.slice(2).split("/")) {
+      const segment = rawSegment.replace(/~1/g, "/").replace(/~0/g, "~");
+      if (
+        !segment ||
+        segment.length > 200 ||
+        segment === "__proto__" ||
+        segment === "prototype" ||
+        segment === "constructor" ||
+        !isPlainRecord(current) ||
+        !Object.hasOwn(current, segment)
+      ) {
+        return undefined;
+      }
+      current = current[segment];
+    }
+    return current;
+  };
+
+  const visit = (input: unknown, depth: number): unknown => {
+    visitedNodes += 1;
+    if (visitedNodes > MAX_OPENAPI_REFERENCE_NODES) {
+      throw new ReferenceBudgetError("node_limit");
+    }
+    if (depth > MAX_OPENAPI_REFERENCE_DEPTH) {
+      throw new ReferenceBudgetError("depth_limit");
+    }
+    if (Array.isArray(input)) {
+      if (input.length > MAX_OPENAPI_REFERENCE_ITEMS) {
+        throw new ReferenceBudgetError("array_limit");
+      }
+      return input.map((item) => visit(item, depth + 1));
+    }
+    if (typeof input === "string") {
+      addBytes(input);
+      return input;
+    }
+    if (!isPlainRecord(input)) {
+      expandedBytes += 8;
+      if (expandedBytes > MAX_OPENAPI_REFERENCE_BYTES) {
+        throw new ReferenceBudgetError("byte_limit");
+      }
+      return input;
+    }
+    const entries = Object.entries(input);
+    if (entries.length > MAX_OPENAPI_REFERENCE_ITEMS) {
+      throw new ReferenceBudgetError("object_limit");
+    }
+    for (const [key] of entries) addBytes(key);
+
+    const reference =
+      typeof input.$ref === "string" ? input.$ref.trim() : null;
+    if (reference) {
+      referenceCount += 1;
+      if (referenceCount > MAX_OPENAPI_REFERENCES) {
+        throw new ReferenceBudgetError("reference_limit");
+      }
+      if (activeReferences.has(reference)) {
+        return unresolvedReference(reference, "reference_cycle");
+      }
+      const target = resolvePointer(reference);
+      if (target === undefined) {
+        return unresolvedReference(reference, "reference_not_allowed");
+      }
+      activeReferences.add(reference);
+      const resolvedTarget = visit(target, depth + 1);
+      activeReferences.delete(reference);
+      if (!isPlainRecord(resolvedTarget)) {
+        return unresolvedReference(reference, "reference_not_object");
+      }
+      const siblings = Object.fromEntries(
+        Object.entries(input)
+          .filter(([key]) => key !== "$ref")
+          .map(([key, child]) => [key, visit(child, depth + 1)]),
+      );
+      return { ...resolvedTarget, ...siblings };
+    }
+
+    return Object.fromEntries(
+      entries.map(([key, child]) => [
+        key,
+        visit(child, depth + 1),
+      ]),
+    );
+  };
+
+  try {
+    return visit(value, 0);
+  } catch (error) {
+    if (error instanceof ReferenceBudgetError) {
+      return unresolvedReference(
+        "#/components/relaybase/input-budget",
+        error.reason,
+      );
+    }
+    throw error;
+  }
+}
+
+function normalizeCatalogOperationTags(value: unknown): string[] {
+  if (value == null) return [];
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new PlatformError(
+      502,
+      "catalog_openapi_taxonomy_invalid",
+      "UpstreamProvider OpenAPI 的 operation tags 无效，本次同步已停止。",
+    );
+  }
+  const tags = value.map((item) => {
+    if (
+      typeof item !== "string" ||
+      item.length < 1 ||
+      item.length > 160 ||
+      item.trim() !== item ||
+      /[?&#=\u0000-\u001F\u007F]/.test(item) ||
+      looksSensitiveCatalogExample(item) ||
+      redactSensitiveCatalogText(item) !== item
+    ) {
+      throw new PlatformError(
+        502,
+        "catalog_openapi_taxonomy_invalid",
+        "UpstreamProvider OpenAPI 的 operation tag 无效，本次同步已停止。",
+      );
+    }
+    return item;
+  });
+  return [...new Set(tags)].sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  );
+}
+
+function normalizeCatalogOperationId(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value !== "string") {
+    throw new PlatformError(
+      502,
+      "catalog_openapi_taxonomy_invalid",
+      "UpstreamProvider OpenAPI 的 operationId 无效，本次同步已停止。",
+    );
+  }
+  const operationId = value.trim();
+  if (
+    operationId.length < 1 ||
+    operationId.length > 500 ||
+    /[\u0000-\u001F\u007F]/.test(operationId)
+  ) {
+    throw new PlatformError(
+      502,
+      "catalog_openapi_taxonomy_invalid",
+      "UpstreamProvider OpenAPI 的 operationId 无效，本次同步已停止。",
+    );
+  }
+  return redactSensitiveCatalogText(operationId);
+}
+
+function strictStoredCatalogTaxonomy(
+  value: {
+    data_type: unknown;
+    tags_json: unknown;
+    surface: unknown;
+    operation_id: unknown;
+  },
+  status = 503,
+  code = "catalog_taxonomy_invalid",
+  message = "目录分类元数据无效，已停止发布与调用。",
+): {
+  dataType: CatalogDataType;
+  tags: string[];
+  surface: MarketplaceSurface;
+  operationId: string | null;
+} {
+  try {
+    if (
+      typeof value.data_type !== "string" ||
+      !PROVIDER_DATA_TYPES.includes(value.data_type)
+    ) {
+      throw new Error("invalid data type");
+    }
+    if (
+      typeof value.surface !== "string" ||
+      !PROVIDER_SURFACES.includes(value.surface)
+    ) {
+      throw new Error("invalid surface");
+    }
+    if (typeof value.tags_json !== "string") {
+      throw new Error("invalid tags storage");
+    }
+    const parsedTags = JSON.parse(value.tags_json) as unknown;
+    const tags = normalizeCatalogOperationTags(parsedTags);
+    if (JSON.stringify(parsedTags) !== JSON.stringify(tags)) {
+      throw new Error("tags are not canonical");
+    }
+    const operationId = normalizeCatalogOperationId(value.operation_id);
+    if (operationId !== value.operation_id) {
+      throw new Error("operation id is not canonical");
+    }
+    return {
+      dataType: value.data_type as CatalogDataType,
+      tags,
+      surface: value.surface as MarketplaceSurface,
+      operationId,
+    };
+  } catch {
+    throw new PlatformError(status, code, message);
+  }
+}
+
+async function assertStoredCatalogTaxonomyIntegrity(
+  db: D1Database,
+): Promise<void> {
+  let afterPath = "";
+  let inspected = 0;
+  while (true) {
+    let rows: Array<{
+      path: string;
+      data_type: unknown;
+      tags_json: unknown;
+      surface: unknown;
+      operation_id: unknown;
+    }>;
+    try {
+      const result = await db
+        .prepare(
+          `SELECT path, data_type, tags_json, surface, operation_id
+           FROM endpoint_catalog
+           WHERE path > ?
+           ORDER BY path ASC
+           LIMIT 500`,
+        )
+        .bind(afterPath)
+        .all();
+      rows = resultRows<{
+        path: string;
+        data_type: unknown;
+        tags_json: unknown;
+        surface: unknown;
+        operation_id: unknown;
+      }>(result);
+    } catch {
+      throw new PlatformError(
+        503,
+        "catalog_taxonomy_schema_unavailable",
+        "目录分类迁移尚未完成，已停止发布与调用。",
+      );
+    }
+    for (const row of rows) {
+      if (typeof row.path !== "string" || row.path <= afterPath) {
+        throw new PlatformError(
+          503,
+          "catalog_taxonomy_order_invalid",
+          "目录分类记录顺序无效，已停止发布与调用。",
+        );
+      }
+      strictStoredCatalogTaxonomy(row);
+      afterPath = row.path;
+      inspected += 1;
+    }
+    if (inspected > 100_000) {
+      throw new PlatformError(
+        503,
+        "catalog_taxonomy_limit_exceeded",
+        "历史目录记录超过安全审查上限，已停止发布与调用。",
+      );
+    }
+    if (rows.length < 500) break;
+  }
+}
+
 function extractOpenApiCatalog(
   payload: unknown,
 ): Map<
@@ -10364,7 +12673,7 @@ function extractOpenApiCatalog(
     throw new PlatformError(
       502,
       "catalog_schema_sync_failed",
-      "TikHub OpenAPI 文档格式无效。",
+      "UpstreamProvider OpenAPI 文档格式无效。",
     );
   }
   const byPath = new Map<
@@ -10372,8 +12681,20 @@ function extractOpenApiCatalog(
     Omit<CatalogSyncEntry, "upstreamPriceUsdMicros" | "priceVerified">
   >();
   for (const [rawPath, pathItem] of Object.entries(payload.paths)) {
-    if (!isPlainRecord(pathItem)) continue;
-    const documentedMethods = [
+    if (!/^\/(?:api\/)?v1\//.test(rawPath)) continue;
+    if (
+      !isPlainRecord(pathItem) ||
+      Object.hasOwn(pathItem, "$ref") ||
+      (Object.hasOwn(pathItem, "parameters") &&
+        !Array.isArray(pathItem.parameters))
+    ) {
+      throw new PlatformError(
+        502,
+        "catalog_openapi_operation_invalid",
+        "UpstreamProvider OpenAPI 的 v1 path item 无效，本次同步已停止。",
+      );
+    }
+    const operationMethods = [
       "get",
       "post",
       "put",
@@ -10382,9 +12703,24 @@ function extractOpenApiCatalog(
       "head",
       "options",
       "trace",
-    ].filter((method) =>
-      isPlainRecord(pathItem[method]),
+    ] as const;
+    const presentMethods = operationMethods.filter((method) =>
+      Object.hasOwn(pathItem, method),
     );
+    if (
+      presentMethods.some(
+        (method) =>
+          !isPlainRecord(pathItem[method]) ||
+          Object.hasOwn(pathItem[method] as Record<string, unknown>, "$ref"),
+      )
+    ) {
+      throw new PlatformError(
+        502,
+        "catalog_openapi_operation_invalid",
+        "UpstreamProvider OpenAPI 的 v1 operation 无效，本次同步已停止。",
+      );
+    }
+    const documentedMethods = presentMethods;
     if (
       documentedMethods.some(
         (method) => method !== "get" && method !== "post",
@@ -10393,14 +12729,14 @@ function extractOpenApiCatalog(
       throw new PlatformError(
         502,
         "catalog_openapi_method_unsupported",
-        "TikHub OpenAPI 出现 GET/POST 之外的操作，本次同步已停止。",
+        "UpstreamProvider OpenAPI 出现 GET/POST 之外的操作，本次同步已停止。",
       );
     }
     if (documentedMethods.length > 1) {
       throw new PlatformError(
         502,
         "catalog_openapi_method_collision",
-        "TikHub OpenAPI 同一路径出现多个请求方法，当前目录模型无法安全区分。",
+        "UpstreamProvider OpenAPI 同一路径出现多个请求方法，当前目录模型无法安全区分。",
       );
     }
     let selected:
@@ -10413,37 +12749,102 @@ function extractOpenApiCatalog(
       const operation = pathItem[method];
       if (!isPlainRecord(operation)) continue;
       try {
+        if (
+          (Object.hasOwn(operation, "parameters") &&
+            !Array.isArray(operation.parameters)) ||
+          (Object.hasOwn(operation, "requestBody") &&
+            !isPlainRecord(operation.requestBody))
+        ) {
+          throw new PlatformError(
+            502,
+            "catalog_openapi_operation_invalid",
+            "UpstreamProvider OpenAPI 的 v1 operation 输入元数据无效，本次同步已停止。",
+          );
+        }
         const path = normalizeCatalogPath(rawPath);
         const httpMethod = method.toUpperCase() as "GET" | "POST";
+        const tags = normalizeCatalogOperationTags(operation.tags);
+        const operationId = normalizeCatalogOperationId(
+          operation.operationId,
+        );
+        const surface = providerSurfaceForPath(
+          rawPath,
+          tags,
+        ) as MarketplaceSurface;
+        const platform = path.split("/")[2] || "other";
+        const dataType = providerDataTypeFor({
+          platform,
+          sourcePath: rawPath,
+          tags,
+          operationId,
+        }) as CatalogDataType;
+        if (
+          !PROVIDER_SURFACES.includes(surface) ||
+          !PROVIDER_DATA_TYPES.includes(dataType)
+        ) {
+          throw new PlatformError(
+            502,
+            "catalog_openapi_taxonomy_invalid",
+            "UpstreamProvider OpenAPI 的数据分类无效，本次同步已停止。",
+          );
+        }
         const pathParameters = Array.isArray(pathItem.parameters)
           ? pathItem.parameters
           : [];
         const operationParameters = Array.isArray(operation.parameters)
           ? operation.parameters
           : [];
-        const mergedParameters = [
-          ...pathParameters,
-          ...operationParameters,
-        ];
+        const mergedParameters = redactCatalogInputMetadata(
+          resolveOpenApiInputReferences(payload, [
+            ...pathParameters,
+            ...operationParameters,
+          ]),
+        );
+        const requestBody = redactCatalogInputMetadata(
+          resolveOpenApiInputReferences(
+            payload,
+            isPlainRecord(operation.requestBody)
+              ? operation.requestBody
+              : null,
+          ),
+        );
         const schemaPayload = {
           parameters: mergedParameters,
-          requestBody: isPlainRecord(operation.requestBody)
-            ? operation.requestBody
-            : null,
+          requestBody,
         };
         const serializedSchema = JSON.stringify(schemaPayload);
-        const safety = classifyCatalogSafety(path, httpMethod, {
-          ...operation,
-          parameters: mergedParameters,
-        });
+        const safety =
+          serializedSchema.length <= MAX_OPENAPI_INPUT_SCHEMA_BYTES
+            ? classifyCatalogSafety(path, httpMethod, {
+                ...operation,
+                parameters: mergedParameters,
+                requestBody,
+              })
+            : {
+                classification: "ambiguous" as const,
+                reasons: ["input_schema_storage_limit"],
+              };
         const entry = {
           path,
-          platform: path.split("/")[2] || "other",
+          platform,
           httpMethod,
-          summary: compactCatalogText(operation.summary, 240),
-          description: compactCatalogText(operation.description, 2_000),
+          dataType,
+          tags,
+          surface,
+          operationId,
+          summary:
+            typeof operation.summary === "string"
+              ? compactCatalogText(
+                  redactSensitiveCatalogText(operation.summary),
+                  240,
+                )
+              : null,
+          description: publicCatalogDescription(
+            operation.description,
+            2_000,
+          ),
           parameterSchemaJson:
-            serializedSchema.length <= 16_384
+            serializedSchema.length <= MAX_OPENAPI_INPUT_SCHEMA_BYTES
               ? serializedSchema
               : JSON.stringify({ truncated: true }),
           looksReadOnly: safety.classification === "safe_data_read",
@@ -10452,11 +12853,25 @@ function extractOpenApiCatalog(
           safetyPolicyVersion: CATALOG_SAFETY_POLICY_VERSION,
         };
         if (selected == null || httpMethod === "GET") selected = entry;
-      } catch {
-        // Ignore malformed non-v1 documentation paths.
+      } catch (error) {
+        if (error instanceof PlatformError && error.status === 502) {
+          throw error;
+        }
+        throw new PlatformError(
+          502,
+          "catalog_openapi_taxonomy_invalid",
+          "UpstreamProvider OpenAPI 的 v1 operation 元数据无效，本次同步已停止。",
+        );
       }
     }
     if (selected) {
+      if (byPath.has(selected.path)) {
+        throw new PlatformError(
+          502,
+          "catalog_openapi_path_collision",
+          "UpstreamProvider OpenAPI 出现归一化后重复的 v1 路径，本次同步已停止。",
+        );
+      }
       byPath.set(selected.path, selected);
     }
   }
@@ -10475,7 +12890,7 @@ function mergeCatalogEntries(
       price != null &&
       (price.httpMethod == null ||
         price.httpMethod === metadata.httpMethod) &&
-      tikHubCredentialAllowsPath(credentialScopes, metadata.path);
+      upstreamProviderCredentialAllowsPath(credentialScopes, metadata.path);
     return {
       ...metadata,
       upstreamPriceUsdMicros: methodMatches
@@ -10510,7 +12925,7 @@ function catalogCoverageBreakdown(
     }
     openApiPriceMapped += 1;
     if (
-      !tikHubCredentialAllowsPath(
+      !upstreamProviderCredentialAllowsPath(
         credentialScopes,
         metadata.path,
       )
@@ -10637,9 +13052,15 @@ function catalogInputFieldRisk(
     "access_token",
     "refresh_token",
     "auth_token",
+    "auth",
     "authorization",
     "password",
+    "passwd",
     "secret",
+    "credential",
+    "credentials",
+    "csrf",
+    "csrf_token",
     "api_key",
     "private_key",
     "proxy",
@@ -10660,8 +13081,13 @@ function catalogInputFieldRisk(
     "cookie",
     "cookies",
     "session",
+    "auth",
     "password",
+    "passwd",
     "secret",
+    "credential",
+    "credentials",
+    "csrf",
     "proxy",
     "authorization",
     "device",
@@ -11055,6 +13481,10 @@ async function prepareAdminAuditStatement(
       action: string;
       requestHash: string;
     };
+    userStatusUpdate?: {
+      userId: string;
+      status: "active" | "suspended";
+    };
     catalogEndpointRevision?: {
       path: string;
       revision: number;
@@ -11119,6 +13549,25 @@ async function prepareAdminAuditStatement(
     input.targetId.slice(0, 180),
     details,
   ];
+  if (input.userStatusUpdate) {
+    return db
+      .prepare(
+        `INSERT INTO admin_audit_logs
+         (id, actor_fingerprint, action, target_type, target_id,
+         details_json, created_at)
+         SELECT ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+         WHERE changes() = 1
+           AND EXISTS (
+           SELECT 1 FROM users
+           WHERE id = ? AND status = ?
+         )`,
+      )
+      .bind(
+        ...values,
+        input.userStatusUpdate.userId,
+        input.userStatusUpdate.status,
+      );
+  }
   if (input.paymentReviewResolution) {
     return db
       .prepare(

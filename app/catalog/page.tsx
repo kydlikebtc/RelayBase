@@ -3,9 +3,9 @@ import CatalogClient from "./CatalogClient";
 import "../styles/catalog.css";
 
 export const metadata: Metadata = {
-  title: "接口目录",
+  title: "API 市场",
   description:
-    "浏览 RelayBase 当前开放的只读数据接口，按平台筛选并查看每次成功请求的公开价格。",
+    "浏览当前部署已同步和审核的 RelayBase API 服务，按平台、能力分类、数据类型、方法与调用表面筛选。",
 };
 
 export default function CatalogPage() {

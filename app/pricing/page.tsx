@@ -34,8 +34,8 @@ const topups = [
 ] as const;
 
 const examples = [
-  ["TikTok 用户资料", "GET", "/tiktok/web/fetch_user_profile", "$0.002 起"],
-  ["视频详情", "GET", "/tiktok/web/fetch_video_detail", "按能力计费"],
+  ["示例资料查询", "GET", "/example/profile/read", "$0.002 起"],
+  ["示例内容详情", "GET", "/example/content/detail", "按能力计费"],
   ["搜索与列表", "GET", "/{platform}/web/search_*", "按能力计费"],
 ] as const;
 
