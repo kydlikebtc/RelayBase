@@ -3937,6 +3937,24 @@ export function AdminClient() {
     upstreamCredentials.status === "ready"
       ? upstreamCredentials.data.credentials.length
       : overviewData?.upstream.managedCredentialCount ?? 0;
+  const activeUserRate =
+    overviewData && overviewData.summary.totalUsers > 0
+      ? overviewData.summary.activeUsers / overviewData.summary.totalUsers
+      : 0;
+  const grossMarginRate =
+    overviewData && overviewData.summary.grossRevenueUsdMicros > 0
+      ? overviewData.summary.grossMarginUsdMicros /
+        overviewData.summary.grossRevenueUsdMicros
+      : 0;
+  const failedCalls30d = overviewData
+    ? Math.max(
+        0,
+        Math.round(
+          overviewData.summary.calls30d *
+            (1 - overviewData.summary.successRate),
+        ),
+      )
+    : 0;
   const adminModules: Array<{
     id: AdminTab;
     index: string;
@@ -3983,11 +4001,21 @@ export function AdminClient() {
     <main className="admin-page" id="main-content">
       <div className="admin-shell">
         <header className="admin-topbar">
-          <div>
-            <span className="admin-eyebrow">RELAYBASE / OPERATIONS</span>
-            <h1>运营管理后台</h1>
+          <div className="admin-topbar-brand">
+            <span className="admin-topbar-mark" aria-hidden="true">
+              R/
+            </span>
+            <div>
+              <h1>运营管理后台</h1>
+              <span>RelayBase Data Market Operations</span>
+            </div>
           </div>
           <div className="admin-topbar-actions">
+            {overviewData ? (
+              <span className="admin-last-refresh">
+                数据更新 {formatDate(overviewData.generatedAt)}
+              </span>
+            ) : null}
             <span
               className={`admin-readiness ${
                 overviewData?.readiness.ready ? "is-ready" : ""
@@ -4006,37 +4034,56 @@ export function AdminClient() {
           </div>
         </header>
 
-        <nav className="admin-tabs" aria-label="管理模块">
-          {adminModules.map((module) => (
-            <button
-              key={module.id}
-              className={activeTab === module.id ? "is-active" : ""}
-              aria-current={activeTab === module.id ? "page" : undefined}
-              onClick={() => setActiveTab(module.id)}
-            >
-              <span className="admin-tab-index">{module.index}</span>
-              <span className="admin-tab-copy">
-                <strong>{module.label}</strong>
-                <small>{module.description}</small>
-              </span>
-              {module.badge ? (
-                <span className="admin-tab-badge">
-                  {module.badge.toLocaleString()}
-                </span>
-              ) : null}
-            </button>
-          ))}
-        </nav>
+        <div className="admin-workspace">
+          <aside className="admin-sidebar">
+            <p className="admin-sidebar-label">工作区</p>
+            <nav className="admin-tabs" aria-label="管理模块">
+              {adminModules.map((module) => (
+                <button
+                  key={module.id}
+                  className={activeTab === module.id ? "is-active" : ""}
+                  aria-current={activeTab === module.id ? "page" : undefined}
+                  onClick={() => setActiveTab(module.id)}
+                >
+                  <span className="admin-tab-index">{module.index}</span>
+                  <span className="admin-tab-copy">
+                    <strong>{module.label}</strong>
+                    <small>{module.description}</small>
+                  </span>
+                  {module.badge ? (
+                    <span className="admin-tab-badge">
+                      {module.badge.toLocaleString()}
+                    </span>
+                  ) : null}
+                </button>
+              ))}
+            </nav>
+            <div className="admin-sidebar-status">
+              <div>
+                <span>公开路由</span>
+                <strong>{publishedRouteCount.toLocaleString()}</strong>
+              </div>
+              <div>
+                <span>待审核路由</span>
+                <strong>{reviewRouteCount.toLocaleString()}</strong>
+              </div>
+              <div>
+                <span>支付复核</span>
+                <strong>{(openReviewCount ?? 0).toLocaleString()}</strong>
+              </div>
+            </div>
+          </aside>
 
-        {notice ? (
-          <div className="admin-notice" role="status">
-            <span aria-hidden="true">i</span>
-            <p>{notice}</p>
-            <button onClick={() => setNotice("")} aria-label="关闭提示">
-              ×
-            </button>
-          </div>
-        ) : null}
+          <div className="admin-content">
+            {notice ? (
+              <div className="admin-notice" role="status">
+                <span aria-hidden="true">i</span>
+                <p>{notice}</p>
+                <button onClick={() => setNotice("")} aria-label="关闭提示">
+                  ×
+                </button>
+              </div>
+            ) : null}
 
         {activeTab === "overview" ? (
           <section className="admin-section" aria-labelledby="overview-title">
@@ -4044,6 +4091,7 @@ export function AdminClient() {
               <div>
                 <p className="section-kicker">LIVE OPERATIONS</p>
                 <h2 id="overview-title">运营总览</h2>
+                <p>汇总账户、调用、收入、成本、毛利和运行就绪状态。</p>
               </div>
               <button
                 className="button button-ghost button-small"
@@ -4136,18 +4184,28 @@ export function AdminClient() {
                       <strong>
                         {overviewData.summary.totalUsers.toLocaleString()}
                       </strong>
-                      <small>
-                        活跃 {overviewData.summary.activeUsers.toLocaleString()}
-                      </small>
+                      <small>全部已创建账户</small>
+                    </article>
+                    <article>
+                      <span>活跃用户</span>
+                      <strong>
+                        {overviewData.summary.activeUsers.toLocaleString()}
+                      </strong>
+                      <small>活跃率 {formatRate(activeUserRate)}</small>
                     </article>
                     <article>
                       <span>近 30 日调用</span>
                       <strong>
                         {overviewData.summary.calls30d.toLocaleString()}
                       </strong>
-                      <small>
-                        成功率 {formatRate(overviewData.summary.successRate)}
-                      </small>
+                      <small>失败约 {failedCalls30d.toLocaleString()} 次</small>
+                    </article>
+                    <article>
+                      <span>调用成功率</span>
+                      <strong>
+                        {formatRate(overviewData.summary.successRate)}
+                      </strong>
+                      <small>近 30 日全部请求</small>
                     </article>
                     <article>
                       <span>近 30 日收入</span>
@@ -4156,12 +4214,16 @@ export function AdminClient() {
                           overviewData.summary.grossRevenueUsdMicros,
                         )}
                       </strong>
-                      <small>
-                        上游成本{" "}
+                      <small>客户实际扣费</small>
+                    </article>
+                    <article>
+                      <span>近 30 日上游成本</span>
+                      <strong>
                         {formatUsd(
                           overviewData.summary.upstreamCostUsdMicros,
                         )}
-                      </small>
+                      </strong>
+                      <small>同步自实际调用快照</small>
                     </article>
                     <article
                       className={
@@ -4174,11 +4236,25 @@ export function AdminClient() {
                       <strong>
                         {formatUsd(overviewData.summary.grossMarginUsdMicros)}
                       </strong>
-                      <small>
-                        用户余额负债{" "}
+                      <small>毛利率 {formatRate(grossMarginRate)}</small>
+                    </article>
+                    <article
+                      className={
+                        overviewData.summary.outstandingBalanceUsdMicros < 0
+                          ? "is-negative"
+                          : ""
+                      }
+                    >
+                      <span>用户余额负债</span>
+                      <strong>
                         {formatUsd(
                           overviewData.summary.outstandingBalanceUsdMicros,
                         )}
+                      </strong>
+                      <small>
+                        待支付复核{" "}
+                        {overviewData.summary.manualReviewPayments.toLocaleString()}{" "}
+                        笔
                       </small>
                     </article>
                   </div>
@@ -4271,6 +4347,7 @@ export function AdminClient() {
               <div>
                 <p className="section-kicker">CUSTOMER OPERATIONS</p>
                 <h2 id="users-title">用户管理</h2>
+                <p>查询用户身份、余额、调用消费、Key、会话和账户权限。</p>
               </div>
               <button
                 className="button button-ghost button-small"
@@ -4313,90 +4390,105 @@ export function AdminClient() {
                     </p>
                   </div>
                   {visibleUsers.length ? (
-                    <div className="admin-card-list">
-                      {visibleUsers.map((user) => (
-                        <article className="admin-user-card" key={user.id}>
-                          <div className="admin-user-identity">
-                            <span aria-hidden="true">
-                              {(user.displayName || user.email)
-                                .slice(0, 2)
-                                .toUpperCase()}
-                            </span>
-                            <div>
-                              <strong>{user.displayName}</strong>
-                              <p>{user.email}</p>
-                              <p>
-                                {user.providers
-                                  .map(authProviderLabel)
-                                  .join(" / ")}
-                                {" · "}
-                                {user.activeKeyCount} Key
-                                {" · "}
-                                {user.activeSessionCount} 会话
-                              </p>
-                              {user.walletAddress ? (
-                                <code>{user.walletAddress}</code>
-                              ) : null}
-                              <code>{user.id}</code>
-                            </div>
-                          </div>
-                          <dl>
-                            <div>
-                              <dt>余额</dt>
-                              <dd
-                                className={
-                                  user.balanceUsdMicros < 0
-                                    ? "is-negative-balance"
-                                    : undefined
-                                }
-                              >
-                                {formatUsd(user.balanceUsdMicros)}
-                                {user.balanceUsdMicros < 0 ? " · 欠款" : ""}
-                              </dd>
-                            </div>
-                            <div>
-                              <dt>30 日调用</dt>
-                              <dd>{user.calls30d.toLocaleString()}</dd>
-                            </div>
-                            <div>
-                              <dt>30 日消费</dt>
-                              <dd>{formatUsd(user.spend30dUsdMicros)}</dd>
-                            </div>
-                            <div>
-                              <dt>最后调用</dt>
-                              <dd>{formatDate(user.lastCallAt)}</dd>
-                            </div>
-                          </dl>
-                          <div className="admin-card-actions">
-                            <span
-                              className={`admin-account-status is-${user.status}`}
-                            >
-                              {user.status === "active" ? "正常" : "已暂停"}
-                            </span>
-                            <button
-                              className={`button button-small ${
-                                user.status === "active"
-                                  ? "admin-button-danger-ghost"
-                                  : "button-blue"
-                              }`}
-                              onClick={() =>
-                                setConfirmAction({
-                                  kind: "user",
-                                  user,
-                                  nextStatus:
+                    <div className="admin-table-wrap admin-saas-table-wrap">
+                      <table className="admin-table admin-saas-table">
+                        <thead>
+                          <tr>
+                            <th>用户</th>
+                            <th>状态 / 登录</th>
+                            <th>余额</th>
+                            <th>30 日调用</th>
+                            <th>30 日消费</th>
+                            <th>Key / 会话</th>
+                            <th>最后调用</th>
+                            <th>操作</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {visibleUsers.map((user) => (
+                            <tr key={user.id}>
+                              <td>
+                                <strong>{user.displayName || "未设置昵称"}</strong>
+                                <small>{user.email}</small>
+                                <code title={user.id}>{user.id}</code>
+                              </td>
+                              <td>
+                                <span
+                                  className={`admin-account-status is-${user.status}`}
+                                >
+                                  {user.status === "active"
+                                    ? "正常"
+                                    : "已暂停"}
+                                </span>
+                                <small>
+                                  {user.providers.length
+                                    ? user.providers
+                                        .map(authProviderLabel)
+                                        .join(" / ")
+                                    : "无登录方式"}
+                                </small>
+                              </td>
+                              <td>
+                                <strong
+                                  className={
+                                    user.balanceUsdMicros < 0
+                                      ? "is-negative-balance"
+                                      : undefined
+                                  }
+                                >
+                                  {formatUsd(user.balanceUsdMicros)}
+                                </strong>
+                                {user.balanceUsdMicros < 0 ? (
+                                  <small>欠款账户</small>
+                                ) : null}
+                              </td>
+                              <td>
+                                <strong>{user.calls30d.toLocaleString()}</strong>
+                              </td>
+                              <td>
+                                <strong>
+                                  {formatUsd(user.spend30dUsdMicros)}
+                                </strong>
+                              </td>
+                              <td>
+                                <strong>
+                                  {user.activeKeyCount} /{" "}
+                                  {user.activeSessionCount}
+                                </strong>
+                              </td>
+                              <td>
+                                <span>{formatDate(user.lastCallAt)}</span>
+                                <small>
+                                  注册 {formatDate(user.createdAt)}
+                                </small>
+                              </td>
+                              <td>
+                                <button
+                                  className={`button button-small ${
                                     user.status === "active"
-                                      ? "suspended"
-                                      : "active",
-                                })
-                              }
-                            >
-                              {user.status === "active"
-                                ? "暂停调用"
-                                : "恢复账户"}
-                            </button>
-                          </div>
-                        </article>
-                      ))}
+                                      ? "admin-button-danger-ghost"
+                                      : "button-blue"
+                                  }`}
+                                  onClick={() =>
+                                    setConfirmAction({
+                                      kind: "user",
+                                      user,
+                                      nextStatus:
+                                        user.status === "active"
+                                          ? "suspended"
+                                          : "active",
+                                    })
+                                  }
+                                >
+                                  {user.status === "active"
+                                    ? "暂停调用"
+                                    : "恢复账户"}
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
                   ) : (
                     <div className="admin-empty">
@@ -5000,94 +5092,105 @@ export function AdminClient() {
 
                   {upstreamView === "current" &&
                   upstreamCredentials.data.credentials.length ? (
-                    <div className="admin-upstream-credential-list">
-                      {upstreamCredentials.data.credentials.map(
-                        (credential) => (
-                          <article
-                            className={`admin-upstream-credential is-${credential.status}`}
-                            key={credential.id}
-                          >
-                            <div>
-                              <span
-                                className={`admin-account-status is-${credential.status}`}
-                              >
-                                {credential.status === "active"
-                                  ? "活动"
-                                  : credential.status === "standby"
-                                    ? "备用"
-                                    : "已撤销"}
-                              </span>
-                              <h3>{credential.label}</h3>
-                              <code>{credential.fingerprint}</code>
-                              <small>
-                                {credential.scopeCount
-                                  ? `${credential.scopeCount} 个已验证授权范围`
-                                  : "尚未验证授权范围"}
-                              </small>
-                            </div>
-                            <dl>
-                              <div>
-                                <dt>创建时间</dt>
-                                <dd>{formatDate(credential.createdAt)}</dd>
-                              </div>
-                              <div>
-                                <dt>最近验证</dt>
-                                <dd>{formatDate(credential.verifiedAt)}</dd>
-                              </div>
-                              <div>
-                                <dt>最近调用</dt>
-                                <dd>{formatDate(credential.lastUsedAt)}</dd>
-                              </div>
-                              <div>
-                                <dt>到期时间</dt>
-                                <dd>
+                    <div className="admin-table-wrap admin-saas-table-wrap">
+                      <table className="admin-table admin-saas-table">
+                        <thead>
+                          <tr>
+                            <th>数据源凭据</th>
+                            <th>状态</th>
+                            <th>授权范围</th>
+                            <th>最近验证</th>
+                            <th>最近调用</th>
+                            <th>到期时间</th>
+                            <th>操作</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {upstreamCredentials.data.credentials.map(
+                            (credential) => (
+                              <tr key={credential.id}>
+                                <td>
+                                  <strong>{credential.label}</strong>
+                                  <code>{credential.fingerprint}</code>
+                                  <small>
+                                    创建于 {formatDate(credential.createdAt)}
+                                  </small>
+                                </td>
+                                <td>
+                                  <span
+                                    className={`admin-account-status is-${credential.status}`}
+                                  >
+                                    {credential.status === "active"
+                                      ? "活动"
+                                      : credential.status === "standby"
+                                        ? "备用"
+                                        : "已撤销"}
+                                  </span>
+                                </td>
+                                <td>
+                                  <strong>
+                                    {credential.scopeCount.toLocaleString()}
+                                  </strong>
+                                  <small>
+                                    {credential.scopeCount
+                                      ? "已验证 scope"
+                                      : "尚未验证"}
+                                  </small>
+                                </td>
+                                <td>{formatDate(credential.verifiedAt)}</td>
+                                <td>{formatDate(credential.lastUsedAt)}</td>
+                                <td>
                                   {credential.expiresAt
                                     ? formatDate(credential.expiresAt)
                                     : "不设到期"}
-                                </dd>
-                              </div>
-                            </dl>
-                            <div className="admin-card-actions">
-                              {credential.status === "standby" ? (
-                                <button
-                                  className="button button-blue button-small"
-                                  disabled={
-                                    !upstreamCredentials.data
-                                      .encryptionConfigured
-                                  }
-                                  onClick={() =>
-                                    setConfirmAction({
-                                      kind: "credential",
-                                      credential,
-                                      action: "activate",
-                                      expectedVersion:
-                                        upstreamCredentials.data.stateVersion,
-                                    })
-                                  }
-                                >
-                                  验证并切换
-                                </button>
-                              ) : null}
-                              {credential.status !== "revoked" ? (
-                                <button
-                                  className="button admin-button-danger-ghost button-small"
-                                  onClick={() =>
-                                    setConfirmAction({
-                                      kind: "credential",
-                                      credential,
-                                      action: "revoke",
-                                      expectedVersion:
-                                        upstreamCredentials.data.stateVersion,
-                                    })
-                                  }
-                                >
-                                  撤销
-                                </button>
-                              ) : null}
-                            </div>
-                          </article>
-                        ),
-                      )}
+                                </td>
+                                <td>
+                                  <div className="admin-inline-actions">
+                                    {credential.status === "standby" ? (
+                                      <button
+                                        className="button button-blue button-small"
+                                        disabled={
+                                          !upstreamCredentials.data
+                                            .encryptionConfigured
+                                        }
+                                        onClick={() =>
+                                          setConfirmAction({
+                                            kind: "credential",
+                                            credential,
+                                            action: "activate",
+                                            expectedVersion:
+                                              upstreamCredentials.data
+                                                .stateVersion,
+                                          })
+                                        }
+                                      >
+                                        验证并切换
+                                      </button>
+                                    ) : null}
+                                    {credential.status !== "revoked" ? (
+                                      <button
+                                        className="button admin-button-danger-ghost button-small"
+                                        onClick={() =>
+                                          setConfirmAction({
+                                            kind: "credential",
+                                            credential,
+                                            action: "revoke",
+                                            expectedVersion:
+                                              upstreamCredentials.data
+                                                .stateVersion,
+                                          })
+                                        }
+                                      >
+                                        撤销
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                </td>
+                              </tr>
+                            ),
+                          )}
+                        </tbody>
+                      </table>
                     </div>
                   ) : upstreamView === "current" ? (
                     <div className="admin-empty">
@@ -6268,12 +6371,13 @@ export function AdminClient() {
           </section>
         ) : null}
 
-        {activeTab === "payments" ? (
+            {activeTab === "payments" ? (
           <section className="admin-section" aria-labelledby="payments-title">
             <div className="admin-section-head">
               <div>
                 <p className="section-kicker">PAYMENT REVIEW QUEUE</p>
                 <h2 id="payments-title">支付复核</h2>
+                <p>处理异常付款、人工复核、订单恢复和完整支付记录。</p>
               </div>
               <button
                 className="button button-ghost button-small"
@@ -6513,73 +6617,69 @@ export function AdminClient() {
                     </p>
                   </div>
                   {visiblePayments.length ? (
-                    <div className="admin-payment-list">
-                      {visiblePayments.map((payment) => (
-                        <article
-                          className={`admin-payment-card ${
-                            payment.status === "manual_review"
-                              ? "needs-review"
-                              : ""
-                          }`}
-                          key={payment.id}
-                        >
-                          <header>
-                            <div>
-                              <span
-                                className={`admin-payment-status is-${paymentStatusClass(
-                                  payment.status,
-                                )}`}
-                              >
-                                {paymentStatusLabel(payment.status)}
-                              </span>
-                              <strong>{payment.userEmail}</strong>
-                            </div>
-                            <time>{formatDate(payment.updatedAt)}</time>
-                          </header>
-                          <dl>
-                            <div>
-                              <dt>订单金额</dt>
-                              <dd>{formatUsd(payment.amountUsdMicros)}</dd>
-                            </div>
-                            <div>
-                              <dt>链上应付</dt>
-                              <dd>
-                                {payment.payAmount ?? "—"}{" "}
-                                {payment.payCurrency.toUpperCase()}
-                              </dd>
-                            </div>
-                            <div>
-                              <dt>已入账</dt>
-                              <dd>
-                                {formatUsd(payment.creditedUsdMicros)}
-                              </dd>
-                            </div>
-                          </dl>
-                          <div className="admin-payment-refs">
-                            <p>
-                              <span>内部订单</span>
-                              <code>{payment.id}</code>
-                            </p>
-                            <p>
-                              <span>服务商编号</span>
-                              <code>
-                                {payment.providerPaymentId ?? "尚未绑定"}
-                              </code>
-                            </p>
-                            {payment.payAddress ? (
-                              <p>
-                                <span>收款地址</span>
-                                <code>{payment.payAddress}</code>
-                              </p>
-                            ) : null}
-                          </div>
-                          {payment.status === "manual_review" ? (
-                            <footer>
-                              该订单未自动入账。请先在支付服务商后台核验币种、金额、订单绑定与退款状态，再使用受控恢复流程处理。
-                            </footer>
-                          ) : null}
-                        </article>
-                      ))}
+                    <div className="admin-table-wrap admin-saas-table-wrap">
+                      <table className="admin-table admin-saas-table">
+                        <thead>
+                          <tr>
+                            <th>状态</th>
+                            <th>用户</th>
+                            <th>订单 / 服务商</th>
+                            <th>订单金额</th>
+                            <th>链上应付</th>
+                            <th>已入账</th>
+                            <th>更新时间</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {visiblePayments.map((payment) => (
+                            <tr key={payment.id}>
+                              <td>
+                                <span
+                                  className={`admin-payment-status is-${paymentStatusClass(
+                                    payment.status,
+                                  )}`}
+                                >
+                                  {paymentStatusLabel(payment.status)}
+                                </span>
+                                {payment.status === "manual_review" ? (
+                                  <small>需要人工处理</small>
+                                ) : null}
+                              </td>
+                              <td>
+                                <strong>{payment.userEmail}</strong>
+                              </td>
+                              <td>
+                                <code title={payment.id}>{payment.id}</code>
+                                <small>
+                                  {payment.providerPaymentId ?? "尚未绑定服务商编号"}
+                                </small>
+                                {payment.payAddress ? (
+                                  <small title={payment.payAddress}>
+                                    地址 {payment.payAddress}
+                                  </small>
+                                ) : null}
+                              </td>
+                              <td>
+                                <strong>
+                                  {formatUsd(payment.amountUsdMicros)}
+                                </strong>
+                              </td>
+                              <td>
+                                <strong>
+                                  {payment.payAmount ?? "—"}{" "}
+                                  {payment.payCurrency.toUpperCase()}
+                                </strong>
+                              </td>
+                              <td>
+                                <strong>
+                                  {formatUsd(payment.creditedUsdMicros)}
+                                </strong>
+                              </td>
+                              <td>{formatDate(payment.updatedAt)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
                   ) : (
                     <div className="admin-empty">
@@ -6599,7 +6699,9 @@ export function AdminClient() {
               ) : null}
             </StatePanel>
           </section>
-        ) : null}
+            ) : null}
+          </div>
+        </div>
       </div>
 
       {confirmAction ? (
