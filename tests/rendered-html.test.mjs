@@ -380,10 +380,10 @@ function responseCookie(response, name) {
 
 test("renders the finished product routes without starter metadata", async () => {
   for (const [path, expected] of [
-    ["/", "多平台数据市场"],
-    ["/docs", "API 文档"],
-    ["/catalog", "数据市场"],
-    ["/pricing", "只为真实请求付费"],
+    ["/", "The multi-platform"],
+    ["/docs", "Build your first request"],
+    ["/catalog", "Multi-platform data market"],
+    ["/pricing", "Pay only for real requests"],
     ["/console", "控制台"],
   ]) {
     const response = await fetchWorker(path, {
@@ -405,6 +405,27 @@ test("renders the finished product routes without starter metadata", async () =>
     assert.match(html, new RegExp(expected));
     assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
     assert.doesNotMatch(html, /react-loading-skeleton/i);
+    assert.doesNotMatch(html, /安全沙盒/i);
+  }
+});
+
+test("renders the Chinese public experience when the locale cookie is set", async () => {
+  for (const [path, expected] of [
+    ["/", "面向 AI 与应用的"],
+    ["/docs", "把第一条请求跑起来"],
+    ["/catalog", "多平台数据市场"],
+    ["/pricing", "只为真实请求付费"],
+  ]) {
+    const response = await fetchWorker(path, {
+      headers: {
+        accept: "text/html",
+        cookie: "relaybase_locale=zh",
+      },
+    });
+    assert.equal(response.status, 200, path);
+    const html = await response.text();
+    assert.match(html, new RegExp(expected));
+    assert.doesNotMatch(html, /安全沙盒/i);
   }
 });
 

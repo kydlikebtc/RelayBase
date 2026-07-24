@@ -982,7 +982,7 @@ export function ConsoleClient({
             {user && !loading && !paymentsEnabled
               ? !commercialClearanceConfirmed
                 ? "真实充值保持关闭：尚未归档 上游 对稳定币仅作为 API 付款方式的书面澄清。"
-                : "当前为安全沙盒，真实充值将在数据代理、商户与合规条件全部就绪后开放。"
+                : "当前充值功能尚未开放，将在数据代理、商户与合规条件全部就绪后启用。"
               : "只向充值单指定的网络和地址转账。链上确认前，余额不会改变。"}
           </p>
         </aside>

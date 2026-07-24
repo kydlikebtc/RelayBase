@@ -2753,7 +2753,56 @@
 }
 
 .marketplace-platform-content {
+  position: relative;
   min-width: 0;
+}
+
+.marketplace-refresh-indicator {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 3;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.marketplace-refresh-indicator > span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 38%;
+  border-radius: inherit;
+  background: var(--accent);
+  animation: marketplace-refresh 1s ease-in-out infinite;
+}
+
+.marketplace-refresh-indicator > em {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@keyframes marketplace-refresh {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(365%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .marketplace-refresh-indicator > span {
+    width: 100%;
+    animation: none;
+  }
 }
 
 .marketplace-platform-summary {

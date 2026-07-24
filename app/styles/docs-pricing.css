@@ -106,7 +106,11 @@
   gap: 2px;
 }
 
-.docs-sidebar nav > span {
+.docs-sidebar nav > div {
+  display: contents;
+}
+
+.docs-sidebar nav > div > span {
   margin: 20px 0 7px;
   color: var(--ink-3);
   font-family: var(--mono);
@@ -116,7 +120,7 @@
   text-transform: uppercase;
 }
 
-.docs-sidebar nav > span:first-child {
+.docs-sidebar nav > div:first-child > span {
   margin-top: 0;
 }
 
@@ -1064,12 +1068,12 @@
     gap: 3px 8px;
   }
 
-  .docs-sidebar nav > span {
+  .docs-sidebar nav > div > span {
     width: 100%;
     margin: 12px 0 4px;
   }
 
-  .docs-sidebar nav > span:first-child {
+  .docs-sidebar nav > div:first-child > span {
     margin-top: 0;
   }
 

@@ -1,18 +1,34 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import type { Locale } from "../locale";
 
 type PlatformMode = "checking" | "sandbox" | "partial" | "live" | "unknown";
 
-const labels: Record<PlatformMode, string> = {
-  checking: "检查服务状态",
-  sandbox: "安全沙盒",
-  partial: "部分能力已启用",
-  live: "服务运行中",
-  unknown: "状态未知",
+const labels: Record<Locale, Record<PlatformMode, string>> = {
+  en: {
+    checking: "Checking status",
+    sandbox: "Operational",
+    partial: "Partially available",
+    live: "Operational",
+    unknown: "Status unavailable",
+  },
+  zh: {
+    checking: "检查状态",
+    sandbox: "服务正常",
+    partial: "部分可用",
+    live: "服务正常",
+    unknown: "状态不可用",
+  },
 };
 
-export function PlatformStatus({ className }: { className: string }) {
+export function PlatformStatus({
+  className,
+  locale,
+}: {
+  className: string;
+  locale: Locale;
+}) {
   const [mode, setMode] = useState<PlatformMode>("checking");
 
   useEffect(() => {
@@ -50,10 +66,10 @@ export function PlatformStatus({ className }: { className: string }) {
   return (
     <span
       className={`${className} platform-status platform-status-${mode}`}
-      title={labels[mode]}
+      title={labels[locale][mode]}
     >
       <span className="status-dot" aria-hidden="true" />
-      {labels[mode]}
+      {labels[locale][mode]}
     </span>
   );
 }

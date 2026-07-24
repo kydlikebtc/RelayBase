@@ -9,6 +9,7 @@ import {
   type RefObject,
 } from "react";
 import { PlatformIcon } from "../components/PlatformIcon";
+import type { Locale } from "../locale";
 
 const PAGE_SIZE = 20;
 const MAX_FACET_OPTIONS = 500;
@@ -113,8 +114,9 @@ type MarketplaceDetailResponse = {
 
 type MarketplaceState =
   | { status: "loading" }
+  | { status: "refreshing"; data: MarketplaceResponse }
   | { status: "ready"; data: MarketplaceResponse }
-  | { status: "error"; message: string };
+  | { status: "error"; message: string; data?: MarketplaceResponse };
 
 type DetailState =
   | { status: "idle" }
@@ -164,6 +166,247 @@ const exampleLanguages: ExampleLanguage[] = [
   "javascript",
   "python",
 ];
+
+const catalogCopy = {
+  en: {
+    pendingPrice: "Price pending",
+    surfaceOther: "Other",
+    availability: {
+      available: "Callable",
+      pending: "Pending",
+      restricted: "Restricted",
+    },
+    loadingProducts: "Loading data products",
+    parameter: "Parameter",
+    required: "Required",
+    detailFallback: "Data product detail",
+    closeDetail: "Close API detail",
+    loadingDetail: "Loading parameters, response behavior and examples…",
+    detailUnavailable: "Product detail is temporarily unavailable",
+    reload: "Reload",
+    methodPending: "Method pending",
+    specComplete: "Specification complete",
+    specPending: "Specification pending",
+    copyPath: "Copy endpoint path",
+    copied: "Copied",
+    copyFailed: "Copy failed",
+    copy: "Copy",
+    normalizedType: "RelayBase normalized type",
+    productId: "Product ID",
+    capabilityCategories: "Capability categories",
+    notDeclared: "Not declared",
+    perRequestPrice: "Price per request",
+    verifiedPrice: "Verified",
+    priceVerificationPending: "Price verification pending",
+    rateLimit: "Rate limit",
+    accountPolicy: "Account policy",
+    description: "Product description",
+    descriptionFallback:
+      "No additional description is available. Use the parameter structure and response behavior as the contract.",
+    parameters: "Request parameters",
+    parameterSpecPending: "Parameter specification is pending.",
+    noUrlParameters: "This endpoint has no additional URL parameters.",
+    requestBody: "Request body",
+    bodySpecPending: "Request-body specification is pending.",
+    noRequestBody: "This data product does not declare a request body.",
+    responseFormat: "Response format",
+    contentType: "Content type",
+    responseMode: "Response mode",
+    responseEnvelope: "RelayBase JSON envelope",
+    responseFallback:
+      "Successful requests return the RelayBase { success: true, data } JSON envelope.",
+    examples: "Request examples",
+    copyCode: "Copy code",
+    selectExampleLanguage: "Select example language",
+    examplesPending: "Examples are generated after the request method is confirmed.",
+    createKey: "Create access Key",
+    timeoutMarket:
+      "The data market request timed out. Your account, access Key and balance are unaffected.",
+    unavailableMarket:
+      "The data market is temporarily unavailable. Your account, access Key and balance are unaffected.",
+    timeoutDetail: "Product detail timed out. Try again shortly.",
+    invalidDetail: "The product detail could not be verified. Try again shortly.",
+    productFallback: "data product",
+    rateByPolicy: "Policy-based limit",
+    perRequest: " / request",
+    pricingPending: " · pricing pending",
+    viewDetail: "View product detail",
+    mastheadTitle: "Multi-platform data market",
+    mastheadBody:
+      "Discover, compare and call curated data products by platform. Choose a source first, then inspect data types, price and callable capabilities.",
+    marketOverview: "Market overview",
+    dataProducts: "Data products",
+    sourcePlatforms: "Source platforms",
+    currentResults: "Current results",
+    browseTitle: "Browse data products by platform",
+    browseIntro:
+      "Platforms are the primary entry to supply. Choose one, then narrow the catalog by data type.",
+    items: "items",
+    item: "item",
+    page: "page",
+    calculating: "Calculating results",
+    searchLabel: "Search data products",
+    searchPlaceholder: "Search platform, data type, product name or /v1/ path",
+    search: "Search",
+    moreFilters: "More filters",
+    category: "Data category",
+    allCategories: "All categories",
+    method: "Method",
+    surface: "Surface",
+    availabilityLabel: "Availability",
+    allStatuses: "All statuses",
+    clearFilters: "Clear filters",
+    marketConnectionFailed: "Data market connection failed",
+    platformDirectory: "Data platform directory",
+    choosePlatform: "Choose a platform",
+    platformCount: "data platforms",
+    browseByPlatform: "Browse APIs by platform",
+    allPlatforms: "All platforms",
+    fullMarket: "Complete data market",
+    dataProduct: "Data products",
+    selectedPlatform: "SELECTED PLATFORM",
+    allPlatformTitle: "All platforms",
+    activePlatformBody: (label: string) =>
+      `Browse all ${label} data products, capabilities and prices.`,
+    allPlatformBody:
+      "Start with a platform, then narrow the supply by product capability.",
+    productCount: "products",
+    productCountSingle: "product",
+    updating: "Updating products",
+    dataType: "Data type",
+    filterByType: "Filter by data type",
+    allCapabilities: "All capabilities",
+    noMatchTitle: "No data products match this platform and filter.",
+    emptyTitle: "The data market is preparing its supply catalog.",
+    noMatchBody: "Try another platform or remove one or more filters.",
+    emptyBody:
+      "Products will appear after catalog sync, safety review and price verification.",
+    viewAll: "View all data products",
+    readDocs: "Read the integration docs",
+    pagination: "Data product pagination",
+    previous: "Previous",
+    of: "of",
+    next: "Next",
+    copySuccess: "Copied to clipboard.",
+    copyError: "Copy failed. Select the content manually.",
+    footerTitle: "One access Key for approved, callable data products.",
+    footerBody:
+      "Only callable products enter the live proxy. Pending and restricted products remain visible for supply discovery.",
+    transparentPricing: "View transparent pricing",
+  },
+  zh: {
+    pendingPrice: "待定价",
+    surfaceOther: "其他",
+    availability: { available: "可调用", pending: "待开放", restricted: "受限" },
+    loadingProducts: "正在加载数据产品",
+    parameter: "参数",
+    required: "必填",
+    detailFallback: "数据产品详情",
+    closeDetail: "关闭 API 详情",
+    loadingDetail: "正在读取参数、响应状态与调用示例…",
+    detailUnavailable: "详情暂时不可用",
+    reload: "重新加载",
+    methodPending: "待确认",
+    specComplete: "规范完整",
+    specPending: "规范待补齐",
+    copyPath: "复制接口路径",
+    copied: "已复制",
+    copyFailed: "复制失败",
+    copy: "复制",
+    normalizedType: "RelayBase 归一化类型",
+    productId: "产品 ID",
+    capabilityCategories: "能力分类",
+    notDeclared: "未声明",
+    perRequestPrice: "每次请求价格",
+    verifiedPrice: "已核价",
+    priceVerificationPending: "价格待核验",
+    rateLimit: "速率上限",
+    accountPolicy: "按账户策略",
+    description: "产品说明",
+    descriptionFallback: "该数据产品暂未提供补充说明，请以参数结构和响应示例为准。",
+    parameters: "请求参数",
+    parameterSpecPending: "参数规范待补齐。",
+    noUrlParameters: "此接口没有额外的 URL 参数。",
+    requestBody: "请求体",
+    bodySpecPending: "请求体规范待补齐。",
+    noRequestBody: "此数据产品没有声明请求体结构。",
+    responseFormat: "响应格式",
+    contentType: "内容类型",
+    responseMode: "响应模式",
+    responseEnvelope: "RelayBase JSON 包装",
+    responseFallback: "成功时返回 RelayBase 的 { success: true, data } JSON 包装。",
+    examples: "调用示例",
+    copyCode: "复制代码",
+    selectExampleLanguage: "选择示例语言",
+    examplesPending: "请求方法确认后生成调用示例。",
+    createKey: "创建访问 Key",
+    timeoutMarket: "数据市场读取超时，请稍后重试。你的账户、访问 Key 与余额不会受到影响。",
+    unavailableMarket: "数据市场暂时无法读取。你的账户、访问 Key 与余额不会受到影响。",
+    timeoutDetail: "产品详情读取超时，请稍后重试。",
+    invalidDetail: "无法验证该数据产品的详情，请稍后重试。",
+    productFallback: "数据产品",
+    rateByPolicy: "按策略限流",
+    perRequest: " / 次",
+    pricingPending: " · 待核价",
+    viewDetail: "查看产品详情",
+    mastheadTitle: "多平台数据市场",
+    mastheadBody: "按平台发现、比较并调用经过审核的数据产品。先选择数据来源，再进入平台查看类型、价格与可用能力。",
+    marketOverview: "市场概览",
+    dataProducts: "数据产品",
+    sourcePlatforms: "来源平台",
+    currentResults: "当前结果",
+    browseTitle: "按平台浏览数据产品",
+    browseIntro: "平台是数据供给的一级入口；进入平台后，再按数据类型继续筛选。",
+    items: "项",
+    item: "项",
+    page: "第",
+    calculating: "正在统计结果",
+    searchLabel: "搜索数据产品",
+    searchPlaceholder: "搜索平台、数据分类、产品名称或 /v1/ 路径",
+    search: "搜索",
+    moreFilters: "更多筛选",
+    category: "数据分类",
+    allCategories: "全部数据分类",
+    method: "方法",
+    surface: "调用表面",
+    availabilityLabel: "可用状态",
+    allStatuses: "全部状态",
+    clearFilters: "清除筛选",
+    marketConnectionFailed: "数据市场连接失败",
+    platformDirectory: "数据平台目录",
+    choosePlatform: "选择平台",
+    platformCount: "个数据平台",
+    browseByPlatform: "按平台浏览 API",
+    allPlatforms: "全部平台",
+    fullMarket: "完整数据市场",
+    dataProduct: "数据产品",
+    selectedPlatform: "已选平台",
+    allPlatformTitle: "全部平台",
+    activePlatformBody: (label: string) => `浏览 ${label} 的全部数据产品、调用能力与价格。`,
+    allPlatformBody: "从平台开始发现数据供给，并在平台内继续筛选产品能力。",
+    productCount: "项产品",
+    productCountSingle: "项产品",
+    updating: "正在更新产品",
+    dataType: "数据类型",
+    filterByType: "按数据类型筛选",
+    allCapabilities: "全部能力",
+    noMatchTitle: "这个平台下暂时没有符合条件的数据产品。",
+    emptyTitle: "数据市场正在准备供给目录。",
+    noMatchBody: "试试切换平台、减少数据类型或其他筛选条件。",
+    emptyBody: "完成目录同步、安全核验和价格复核后，数据产品会在这里出现。",
+    viewAll: "查看全部数据产品",
+    readDocs: "先阅读调用文档",
+    pagination: "数据产品分页",
+    previous: "上一页",
+    of: "共",
+    next: "下一页",
+    copySuccess: "内容已复制到剪贴板。",
+    copyError: "复制失败，请手动选择内容。",
+    footerTitle: "一个访问 Key，消费已审核开放的数据产品。",
+    footerBody: "只有状态为“可调用”的数据产品会进入真实代理；待开放与受限产品仅用于供给发现。",
+    transparentPricing: "查看透明定价",
+  },
+} as const;
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -552,8 +795,8 @@ function marketplaceCatalogsMatch(
   );
 }
 
-function formatPrice(micros: number | null): string {
-  if (micros === null) return "待定价";
+function formatPrice(micros: number | null, locale: Locale): string {
+  if (micros === null) return catalogCopy[locale].pendingPrice;
   const value = (micros / 1_000_000)
     .toFixed(6)
     .replace(/0+$/, "")
@@ -561,28 +804,32 @@ function formatPrice(micros: number | null): string {
   return `$${value || "0"}`;
 }
 
-function formatMarketplaceTotal(total: number | undefined): string {
+function formatMarketplaceTotal(
+  total: number | undefined,
+  locale: Locale,
+): string {
   if (total === undefined) return "—";
-  return total.toLocaleString("zh-CN");
+  return total.toLocaleString(locale === "zh" ? "zh-CN" : "en-US");
 }
 
-function surfaceLabel(surface: MarketplaceSurface): string {
+function surfaceLabel(
+  surface: MarketplaceSurface,
+  locale: Locale,
+): string {
   const labels: Record<MarketplaceSurface, string> = {
     app: "APP",
     web: "WEB",
     app_web: "APP + WEB",
-    other: "其他",
+    other: catalogCopy[locale].surfaceOther,
   };
   return labels[surface];
 }
 
-function availabilityLabel(availability: Availability): string {
-  const labels: Record<Availability, string> = {
-    available: "可调用",
-    pending: "待开放",
-    restricted: "受限",
-  };
-  return labels[availability];
+function availabilityLabel(
+  availability: Availability,
+  locale: Locale,
+): string {
+  return catalogCopy[locale].availability[availability];
 }
 
 function jsonPreview(value: JsonContainer): string {
@@ -594,6 +841,34 @@ function facetLabel<T extends string>(
   value: T | string,
 ): string {
   return options.find((option) => option.value === value)?.label ?? value;
+}
+
+function humanizeFacet(value: string): string {
+  return value
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((word) => word[0]?.toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+function localizedFacetLabel<T extends string>(
+  options: FacetOption<T>[],
+  value: T | string,
+  locale: Locale,
+): string {
+  const label = facetLabel(options, value);
+  if (locale === "zh" || !/[\u3400-\u9FFF]/.test(label)) return label;
+  return humanizeFacet(String(value));
+}
+
+function localizedSourceText(
+  value: string | null,
+  locale: Locale,
+  fallback: string,
+): string {
+  if (!value?.trim()) return fallback;
+  if (locale === "en" && /[\u3400-\u9FFF]/.test(value)) return fallback;
+  return value;
 }
 
 function endpointDisplayName(path: string): string {
@@ -625,13 +900,13 @@ async function writeToClipboard(value: string): Promise<void> {
   }
 }
 
-function LoadingCards() {
+function LoadingCards({ locale }: { locale: Locale }) {
   return (
     <div
       className="marketplace-loading"
       role="status"
       aria-live="polite"
-      aria-label="正在加载数据产品"
+      aria-label={catalogCopy[locale].loadingProducts}
     >
       {Array.from({ length: 6 }, (_, index) => (
         <span key={index} aria-hidden="true" />
@@ -643,9 +918,11 @@ function LoadingCards() {
 function SchemaDocument({
   value,
   emptyLabel,
+  locale,
 }: {
   value: JsonContainer | null;
   emptyLabel: string;
+  locale: Locale;
 }) {
   if (value === null || (Array.isArray(value) && value.length === 0)) {
     return <p className="marketplace-schema-empty">{emptyLabel}</p>;
@@ -659,7 +936,7 @@ function SchemaDocument({
           const name =
             record && typeof record.name === "string"
               ? record.name
-              : `参数 ${index + 1}`;
+              : `${catalogCopy[locale].parameter} ${index + 1}`;
           const location =
             record && typeof record.in === "string" ? record.in : null;
           const required =
@@ -672,7 +949,9 @@ function SchemaDocument({
                 <code>{name}</code>
                 <span>
                   {location ? location.toUpperCase() : "SCHEMA"}
-                  {required === true ? " · 必填" : ""}
+                  {required === true
+                    ? ` · ${catalogCopy[locale].required}`
+                    : ""}
                 </span>
               </header>
               <pre tabIndex={0}>{JSON.stringify(item, null, 2)}</pre>
@@ -692,6 +971,7 @@ function SchemaDocument({
 
 function DetailPanel({
   state,
+  locale,
   activeExample,
   onExampleChange,
   onClose,
@@ -701,6 +981,7 @@ function DetailPanel({
   headingRef,
 }: {
   state: Exclude<DetailState, { status: "idle" }>;
+  locale: Locale;
   activeExample: ExampleLanguage;
   onExampleChange: (language: ExampleLanguage) => void;
   onClose: () => void;
@@ -709,12 +990,14 @@ function DetailPanel({
   copyFeedback: CopyFeedback | null;
   headingRef: RefObject<HTMLHeadingElement | null>;
 }) {
+  const c = catalogCopy[locale];
   const endpoint =
     state.status === "ready" ? state.data.endpoint : state.endpoint;
-  const title =
-    endpoint.summary?.trim() ||
-    endpoint.path.split("/").filter(Boolean).at(-1) ||
-    "数据产品详情";
+  const title = localizedSourceText(
+    endpoint.summary,
+    locale,
+    endpointDisplayName(endpoint.path) || c.detailFallback,
+  );
 
   return (
     <aside
@@ -736,7 +1019,7 @@ function DetailPanel({
             {title}
           </h2>
         </div>
-        <button type="button" onClick={onClose} aria-label="关闭 API 详情">
+        <button type="button" onClick={onClose} aria-label={c.closeDetail}>
           ×
         </button>
       </header>
@@ -744,16 +1027,16 @@ function DetailPanel({
       {state.status === "loading" ? (
         <div className="marketplace-detail-loading" role="status">
           <span aria-hidden="true" />
-          <p>正在读取参数、响应状态与调用示例…</p>
+          <p>{c.loadingDetail}</p>
         </div>
       ) : null}
 
       {state.status === "error" ? (
         <div className="marketplace-detail-error" role="alert">
-          <strong>详情暂时不可用</strong>
+          <strong>{c.detailUnavailable}</strong>
           <p>{state.message}</p>
           <button type="button" onClick={onRetry}>
-            重新加载
+            {c.reload}
           </button>
         </div>
       ) : null}
@@ -768,18 +1051,18 @@ function DetailPanel({
                   : "is-pending"
               }`}
             >
-              {endpoint.method ?? "待确认"}
+              {endpoint.method ?? c.methodPending}
             </span>
             <span
               className={`marketplace-availability is-${endpoint.availability}`}
             >
-              {availabilityLabel(endpoint.availability)}
+              {availabilityLabel(endpoint.availability, locale)}
             </span>
-            <span>{surfaceLabel(endpoint.surface)}</span>
+            <span>{surfaceLabel(endpoint.surface, locale)}</span>
             <span>
               {endpoint.documentationStatus === "complete"
-                ? "规范完整"
-                : "规范待补齐"}
+                ? c.specComplete
+                : c.specPending}
             </span>
           </div>
 
@@ -788,29 +1071,29 @@ function DetailPanel({
             <button
               type="button"
               onClick={() => onCopy("detail-path", endpoint.path)}
-              aria-label={`复制接口路径 ${endpoint.path}`}
+              aria-label={`${c.copyPath} ${endpoint.path}`}
             >
               {copyFeedback?.id === "detail-path"
                 ? copyFeedback.status === "success"
-                  ? "已复制"
-                  : "复制失败"
-                : "复制"}
+                  ? c.copied
+                  : c.copyFailed
+                : c.copy}
             </button>
           </div>
 
           <dl className="marketplace-detail-taxonomy">
             <div>
-              <dt>RelayBase 归一化类型</dt>
+              <dt>{c.normalizedType}</dt>
               <dd>{endpoint.dataType}</dd>
             </div>
             <div>
-              <dt>产品 ID</dt>
+              <dt>{c.productId}</dt>
               <dd>
                 <code>{endpoint.id}</code>
               </dd>
             </div>
             <div>
-              <dt>能力分类</dt>
+              <dt>{c.capabilityCategories}</dt>
               <dd>
                 {state.data.endpoint.categories.length > 0 ? (
                   <span className="marketplace-detail-tags">
@@ -819,7 +1102,7 @@ function DetailPanel({
                     ))}
                   </span>
                 ) : (
-                  "未声明"
+                  c.notDeclared
                 )}
               </dd>
             </div>
@@ -827,54 +1110,60 @@ function DetailPanel({
 
           <div className="marketplace-detail-price">
             <div>
-              <span>每次请求价格</span>
+              <span>{c.perRequestPrice}</span>
               <strong>
-                {formatPrice(endpoint.pricing.amountUsdMicros)}
+                {formatPrice(endpoint.pricing.amountUsdMicros, locale)}
               </strong>
               <small>
-                {endpoint.pricing.verified ? "已核价" : "价格待核验"}
+                {endpoint.pricing.verified
+                  ? c.verifiedPrice
+                  : c.priceVerificationPending}
               </small>
             </div>
             <div>
-              <span>速率上限</span>
+              <span>{c.rateLimit}</span>
               <strong>
                 {endpoint.rateLimitRps
                   ? `${endpoint.rateLimitRps.toLocaleString()} RPS`
-                  : "按账户策略"}
+                  : c.accountPolicy}
               </strong>
             </div>
           </div>
 
           <section aria-labelledby="marketplace-description-title">
-            <h3 id="marketplace-description-title">产品说明</h3>
+            <h3 id="marketplace-description-title">{c.description}</h3>
             <p className="marketplace-description">
-              {state.data.endpoint.description ||
-                endpoint.summary ||
-                "该数据产品暂未提供补充说明，请以参数结构和响应示例为准。"}
+              {localizedSourceText(
+                state.data.endpoint.description || endpoint.summary,
+                locale,
+                c.descriptionFallback,
+              )}
             </p>
           </section>
 
           <section aria-labelledby="marketplace-parameters-title">
-            <h3 id="marketplace-parameters-title">请求参数</h3>
+            <h3 id="marketplace-parameters-title">{c.parameters}</h3>
             <SchemaDocument
               value={state.data.endpoint.input.parameters}
+              locale={locale}
               emptyLabel={
                 endpoint.documentationStatus === "pending"
-                  ? "参数规范待补齐。"
-                  : "此接口没有额外的 URL 参数。"
+                  ? c.parameterSpecPending
+                  : c.noUrlParameters
               }
             />
           </section>
 
           {endpoint.method !== "GET" ? (
             <section aria-labelledby="marketplace-body-title">
-              <h3 id="marketplace-body-title">请求体</h3>
+              <h3 id="marketplace-body-title">{c.requestBody}</h3>
               <SchemaDocument
                 value={state.data.endpoint.input.requestBody}
+                locale={locale}
                 emptyLabel={
                   endpoint.documentationStatus === "pending"
-                    ? "请求体规范待补齐。"
-                    : "此数据产品没有声明请求体结构。"
+                    ? c.bodySpecPending
+                    : c.noRequestBody
                 }
               />
             </section>
@@ -884,22 +1173,26 @@ function DetailPanel({
             className="marketplace-response-section"
             aria-labelledby="marketplace-response-title"
           >
-            <h3 id="marketplace-response-title">响应格式</h3>
+            <h3 id="marketplace-response-title">{c.responseFormat}</h3>
             <div className="marketplace-response-card">
               <dl>
                 <div>
-                  <dt>内容类型</dt>
+                  <dt>{c.contentType}</dt>
                   <dd>
                     <code>{state.data.endpoint.response.contentType}</code>
                   </dd>
                 </div>
                 <div>
-                  <dt>响应模式</dt>
-                  <dd>RelayBase JSON 包装</dd>
+                  <dt>{c.responseMode}</dt>
+                  <dd>{c.responseEnvelope}</dd>
                 </div>
               </dl>
               <p>
-                {state.data.endpoint.response.description}
+                {localizedSourceText(
+                  state.data.endpoint.response.description,
+                  locale,
+                  c.responseFallback,
+                )}
               </p>
             </div>
           </section>
@@ -913,7 +1206,7 @@ function DetailPanel({
             ) ? (
               <>
                 <div className="marketplace-examples-head">
-                  <h3 id="marketplace-examples-title">调用示例</h3>
+                  <h3 id="marketplace-examples-title">{c.examples}</h3>
                   <button
                     type="button"
                     onClick={() =>
@@ -928,15 +1221,15 @@ function DetailPanel({
                   >
                     {copyFeedback?.id === `example-${activeExample}`
                       ? copyFeedback.status === "success"
-                        ? "已复制"
-                        : "复制失败"
-                      : "复制代码"}
+                        ? c.copied
+                        : c.copyFailed
+                      : c.copyCode}
                   </button>
                 </div>
                 <div
                   className="marketplace-example-tabs"
                   role="group"
-                  aria-label="选择示例语言"
+                  aria-label={c.selectExampleLanguage}
                 >
                   {exampleLanguages.map((language) => (
                     <button
@@ -959,16 +1252,16 @@ function DetailPanel({
               </>
             ) : (
               <>
-                <h3 id="marketplace-examples-title">调用示例</h3>
+                <h3 id="marketplace-examples-title">{c.examples}</h3>
                 <p className="marketplace-schema-empty">
-                  请求方法确认后生成调用示例。
+                  {c.examplesPending}
                 </p>
               </>
             )}
           </section>
 
           <Link className="marketplace-detail-cta" href="/console">
-            创建访问 Key
+            {c.createKey}
             <span aria-hidden="true">→</span>
           </Link>
         </div>
@@ -977,7 +1270,8 @@ function DetailPanel({
   );
 }
 
-export default function CatalogClient() {
+export default function CatalogClient({ locale }: { locale: Locale }) {
+  const c = catalogCopy[locale];
   const [searchInput, setSearchInput] = useState("");
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<Filters>(initialFilters);
@@ -1032,7 +1326,13 @@ export default function CatalogClient() {
     }
 
     async function loadMarketplace() {
-      setState({ status: "loading" });
+      setState((current) =>
+        current.status === "ready" || current.status === "refreshing"
+          ? { status: "refreshing", data: current.data }
+          : current.status === "error" && current.data
+            ? { status: "refreshing", data: current.data }
+            : { status: "loading" },
+      );
       try {
         const response = await fetch(`/api/marketplace?${parameters}`, {
           cache: "no-store",
@@ -1056,15 +1356,24 @@ export default function CatalogClient() {
         }
         setState({ status: "ready", data: payload });
       } catch (error) {
-        if (controller.signal.aborted && !timedOut) return;
+        if (
+          !timedOut &&
+          (controller.signal.aborted ||
+            (error instanceof DOMException && error.name === "AbortError"))
+        ) {
+          return;
+        }
         console.error("Unable to load the API marketplace", error);
-        setState({
+        setState((current) => ({
           status: "error",
-          message:
-            timedOut
-              ? "数据市场读取超时，请稍后重试。你的账户、访问 Key 与余额不会受到影响。"
-              : "数据市场暂时无法读取。你的账户、访问 Key 与余额不会受到影响。",
-        });
+          message: timedOut ? c.timeoutMarket : c.unavailableMarket,
+          data:
+            current.status === "ready" ||
+            current.status === "refreshing" ||
+            (current.status === "error" && current.data)
+              ? current.data
+              : undefined,
+        }));
       } finally {
         window.clearTimeout(timeoutId);
       }
@@ -1075,12 +1384,16 @@ export default function CatalogClient() {
       window.clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [filters, offset, query, requestVersion]);
+  }, [c.timeoutMarket, c.unavailableMarket, filters, offset, query, requestVersion]);
 
   const selectedEndpoint =
     detailState.status === "idle" ? null : detailState.endpoint;
   const selectedCatalog =
-    state.status === "ready" ? state.data.catalog : null;
+    state.status === "ready" || state.status === "refreshing"
+      ? state.data.catalog
+      : state.status === "error" && state.data
+        ? state.data.catalog
+        : null;
 
   useEffect(() => {
     if (selectedEndpoint === null || selectedCatalog === null) return;
@@ -1138,14 +1451,18 @@ export default function CatalogClient() {
             });
         });
       } catch (error) {
-        if (controller.signal.aborted && !timedOut) return;
+        if (
+          !timedOut &&
+          (controller.signal.aborted ||
+            (error instanceof DOMException && error.name === "AbortError"))
+        ) {
+          return;
+        }
         console.error("Unable to load marketplace endpoint detail", error);
         setDetailState({
           status: "error",
           endpoint,
-          message: timedOut
-            ? "产品详情读取超时，请稍后重试。"
-            : "无法验证该数据产品的详情，请稍后重试。",
+          message: timedOut ? c.timeoutDetail : c.invalidDetail,
         });
       } finally {
         window.clearTimeout(timeoutId);
@@ -1157,7 +1474,7 @@ export default function CatalogClient() {
       window.clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [detailVersion, selectedCatalog, selectedEndpoint]);
+  }, [c.invalidDetail, c.timeoutDetail, detailVersion, selectedCatalog, selectedEndpoint]);
 
   useEffect(
     () => () => {
@@ -1166,14 +1483,24 @@ export default function CatalogClient() {
     [],
   );
 
-  const marketplace = state.status === "ready" ? state.data : null;
+  const marketplace =
+    state.status === "ready" || state.status === "refreshing"
+      ? state.data
+      : state.status === "error" && state.data
+        ? state.data
+        : null;
+  const isRefreshing = state.status === "refreshing";
   const facets = marketplace?.facets ?? null;
   const filtersActive =
     query.length > 0 ||
     Object.values(filters).some((value) => value.length > 0);
-  const advancedFilterCount = Object.values(filters).filter(
-    (value) => value.length > 0,
-  ).length;
+  const advancedFilterCount = [
+    filters.category,
+    filters.dataType,
+    filters.method,
+    filters.surface,
+    filters.availability,
+  ].filter((value) => value.length > 0).length;
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
   const totalPages = marketplace
     ? Math.max(1, Math.ceil(marketplace.total / PAGE_SIZE))
@@ -1246,11 +1573,13 @@ export default function CatalogClient() {
   function renderEndpointCard(endpoint: MarketplaceEndpoint) {
     const selected = selectedEndpoint?.id === endpoint.id;
     const platformLabel = facets
-      ? facetLabel(facets.platforms, endpoint.platform)
+      ? localizedFacetLabel(facets.platforms, endpoint.platform, locale)
       : endpoint.platform;
     const dataTypeLabel = facets
-      ? facetLabel(facets.dataTypes, endpoint.dataType)
-      : endpoint.dataType;
+      ? localizedFacetLabel(facets.dataTypes, endpoint.dataType, locale)
+      : locale === "en"
+        ? humanizeFacet(endpoint.dataType)
+        : endpoint.dataType;
     return (
       <article
         className={`marketplace-card ${selected ? "is-selected" : ""}`}
@@ -1274,16 +1603,16 @@ export default function CatalogClient() {
                   : "is-pending"
               }`}
             >
-              {endpoint.method ?? "待确认"}
+              {endpoint.method ?? c.methodPending}
             </span>
             <span
               className={`marketplace-availability is-${endpoint.availability}`}
             >
-              {availabilityLabel(endpoint.availability)}
+              {availabilityLabel(endpoint.availability, locale)}
             </span>
             {endpoint.documentationStatus === "pending" ? (
               <span className="marketplace-availability is-pending">
-                文档待补
+                {c.specPending}
               </span>
             ) : null}
           </div>
@@ -1291,8 +1620,11 @@ export default function CatalogClient() {
         <div className="marketplace-card-body">
           <h3>{endpointDisplayName(endpoint.path)}</h3>
           <p>
-            {endpoint.summary ||
-              `${platformLabel} ${dataTypeLabel} 数据产品`}
+            {localizedSourceText(
+              endpoint.summary,
+              locale,
+              `${platformLabel} ${dataTypeLabel} ${c.productFallback}`,
+            )}
           </p>
           <code title={endpoint.path}>{endpoint.path}</code>
         </div>
@@ -1302,15 +1634,15 @@ export default function CatalogClient() {
               className={`is-${endpoint.availability}`}
               aria-hidden="true"
             />
-            {surfaceLabel(endpoint.surface)} ·{" "}
+            {surfaceLabel(endpoint.surface, locale)} ·{" "}
             {endpoint.rateLimitRps
               ? `${endpoint.rateLimitRps.toLocaleString()} RPS`
-              : "按策略限流"}
+              : c.rateByPolicy}
           </span>
           <strong>
-            {formatPrice(endpoint.pricing.amountUsdMicros)}
+            {formatPrice(endpoint.pricing.amountUsdMicros, locale)}
             <small>
-              {endpoint.pricing.verified ? " / 次" : " · 待核价"}
+              {endpoint.pricing.verified ? c.perRequest : c.pricingPending}
             </small>
           </strong>
         </div>
@@ -1321,7 +1653,7 @@ export default function CatalogClient() {
           aria-expanded={selected}
           aria-controls="marketplace-detail-panel"
         >
-          查看产品详情
+          {c.viewDetail}
           <span aria-hidden="true">→</span>
         </button>
       </article>
@@ -1336,24 +1668,24 @@ export default function CatalogClient() {
       >
         <div className="marketplace-masthead-copy">
           <p className="section-kicker">RELAYBASE / DATA MARKETPLACE</p>
-          <h1 id="marketplace-title">多平台数据市场</h1>
-          <p>
-            按平台发现、比较并调用经过审核的数据产品。先选择数据来源，再进入平台
-            查看类型、价格与可用能力。
-          </p>
-          <dl className="marketplace-market-facts" aria-label="市场概览">
+          <h1 id="marketplace-title">{c.mastheadTitle}</h1>
+          <p>{c.mastheadBody}</p>
+          <dl className="marketplace-market-facts" aria-label={c.marketOverview}>
             <div>
-              <dt>数据产品</dt>
+              <dt>{c.dataProducts}</dt>
               <dd>
-                {formatMarketplaceTotal(marketplace?.catalog.serviceCount)}
+                {formatMarketplaceTotal(
+                  marketplace?.catalog.serviceCount,
+                  locale,
+                )}
               </dd>
             </div>
             <div>
-              <dt>来源平台</dt>
+              <dt>{c.sourcePlatforms}</dt>
               <dd>{marketplace?.stats.platforms ?? "—"}</dd>
             </div>
             <div>
-              <dt>当前结果</dt>
+              <dt>{c.currentResults}</dt>
               <dd>{marketplace?.total.toLocaleString() ?? "—"}</dd>
             </div>
           </dl>
@@ -1368,22 +1700,20 @@ export default function CatalogClient() {
           <div>
             <div>
               <p className="section-kicker">DISCOVER / PLATFORMS</p>
-              <h2 id="marketplace-results-title">
-                按平台浏览数据产品
-              </h2>
-              <p className="marketplace-results-intro">
-                平台是数据供给的一级入口；进入平台后，再按数据类型继续筛选。
-              </p>
+              <h2 id="marketplace-results-title">{c.browseTitle}</h2>
+              <p className="marketplace-results-intro">{c.browseIntro}</p>
             </div>
           </div>
           <p aria-live="polite">
             {marketplace ? (
               <>
-                <strong>{marketplace.total.toLocaleString()}</strong> 项 · 第{" "}
-                {currentPage} / {totalPages} 页
+                <strong>{marketplace.total.toLocaleString()}</strong>{" "}
+                {marketplace.total === 1 ? c.item : c.items} ·{" "}
+                {locale === "zh" ? "第 " : ""}
+                {currentPage} / {totalPages} {locale === "zh" ? "页" : ""}
               </>
             ) : (
-              "正在统计结果"
+              c.calculating
             )}
           </p>
         </header>
@@ -1394,7 +1724,7 @@ export default function CatalogClient() {
             role="search"
             onSubmit={submitSearch}
           >
-            <label htmlFor="marketplace-query">搜索数据产品</label>
+            <label htmlFor="marketplace-query">{c.searchLabel}</label>
             <div>
               <span aria-hidden="true">⌕</span>
               <input
@@ -1402,18 +1732,18 @@ export default function CatalogClient() {
                 type="search"
                 value={searchInput}
                 onChange={(event) => setSearchInput(event.target.value)}
-                placeholder="搜索平台、数据分类、产品名称或 /v1/ 路径"
+                placeholder={c.searchPlaceholder}
                 maxLength={160}
                 autoComplete="off"
               />
-              <button type="submit">搜索</button>
+              <button type="submit">{c.search}</button>
             </div>
           </form>
 
           <details className="marketplace-filter-disclosure">
             <summary>
               <span>
-                更多筛选
+                {c.moreFilters}
                 {advancedFilterCount > 0 ? (
                   <b>{advancedFilterCount}</b>
                 ) : null}
@@ -1422,23 +1752,27 @@ export default function CatalogClient() {
             </summary>
             <div className="marketplace-filters">
               <label>
-                <span>数据分类</span>
+                <span>{c.category}</span>
                 <select
                   value={filters.category}
                   onChange={(event) =>
                     updateFilter("category", event.target.value)
                   }
                 >
-                  <option value="">全部数据分类</option>
+                  <option value="">{c.allCategories}</option>
                   {facets?.categories.map((option) => (
                     <option value={option.value} key={option.value}>
-                      {option.label} · {option.count}
+                      {localizedFacetLabel(
+                        facets.categories,
+                        option.value,
+                        locale,
+                      )} · {option.count}
                     </option>
                   ))}
                 </select>
               </label>
               <label>
-                <span>方法</span>
+                <span>{c.method}</span>
                 <select
                   value={filters.method}
                   onChange={(event) =>
@@ -1457,7 +1791,7 @@ export default function CatalogClient() {
                 </select>
               </label>
               <label>
-                <span>调用表面</span>
+                <span>{c.surface}</span>
                 <select
                   value={filters.surface}
                   onChange={(event) =>
@@ -1470,13 +1804,13 @@ export default function CatalogClient() {
                   <option value="">APP + WEB</option>
                   {facets?.surfaces.map((option) => (
                     <option value={option.value} key={option.value}>
-                      {option.label} · {option.count}
+                      {surfaceLabel(option.value, locale)} · {option.count}
                     </option>
                   ))}
                 </select>
               </label>
               <label>
-                <span>可用状态</span>
+                <span>{c.availabilityLabel}</span>
                 <select
                   value={filters.availability}
                   onChange={(event) =>
@@ -1486,10 +1820,10 @@ export default function CatalogClient() {
                     )
                   }
                 >
-                  <option value="">全部状态</option>
+                  <option value="">{c.allStatuses}</option>
                   {facets?.availability.map((option) => (
                     <option value={option.value} key={option.value}>
-                      {option.label} · {option.count}
+                      {availabilityLabel(option.value, locale)} · {option.count}
                     </option>
                   ))}
                 </select>
@@ -1500,7 +1834,7 @@ export default function CatalogClient() {
                 onClick={clearFilters}
                 disabled={!filtersActive}
               >
-                清除筛选
+                {c.clearFilters}
               </button>
             </div>
           </details>
@@ -1510,14 +1844,14 @@ export default function CatalogClient() {
           <div className="marketplace-error" role="alert">
             <span aria-hidden="true">!</span>
             <div>
-              <strong>数据市场连接失败</strong>
+              <strong>{c.marketConnectionFailed}</strong>
               <p>{state.message}</p>
             </div>
             <button
               type="button"
               onClick={() => setRequestVersion((version) => version + 1)}
             >
-              重新加载
+              {c.reload}
             </button>
           </div>
         ) : null}
@@ -1525,14 +1859,14 @@ export default function CatalogClient() {
         <div className="marketplace-platform-browser">
           <aside
             className="marketplace-platform-directory"
-            aria-label="数据平台目录"
+            aria-label={c.platformDirectory}
           >
             <header>
               <span>PLATFORMS</span>
-              <strong>选择平台</strong>
-              <small>{facets?.platforms.length ?? "—"} 个数据平台</small>
+              <strong>{c.choosePlatform}</strong>
+              <small>{facets?.platforms.length ?? "—"} {c.platformCount}</small>
             </header>
-            <nav aria-label="按平台浏览 API">
+            <nav aria-label={c.browseByPlatform}>
               <button
                 className={filters.platform === "" ? "is-active" : ""}
                 type="button"
@@ -1544,8 +1878,8 @@ export default function CatalogClient() {
                   className="marketplace-platform-code"
                 />
                 <span>
-                  <strong>全部平台</strong>
-                  <small>完整数据市场</small>
+                  <strong>{c.allPlatforms}</strong>
+                  <small>{c.fullMarket}</small>
                 </span>
                 <b>{platformCatalogTotal.toLocaleString()}</b>
               </button>
@@ -1565,7 +1899,7 @@ export default function CatalogClient() {
                   />
                   <span>
                     <strong>{option.label}</strong>
-                    <small>数据产品</small>
+                    <small>{c.dataProduct}</small>
                   </span>
                   <b>{option.count.toLocaleString()}</b>
                 </button>
@@ -1574,31 +1908,59 @@ export default function CatalogClient() {
           </aside>
 
           <div className="marketplace-platform-content">
+            {isRefreshing ? (
+              <div
+                className="marketplace-refresh-indicator"
+                role="status"
+                aria-live="polite"
+              >
+                <span aria-hidden="true" />
+                <em>{c.updating}</em>
+              </div>
+            ) : null}
             <header className="marketplace-platform-summary">
               <PlatformIcon
                 platform={activePlatform?.value ?? "all"}
                 className="marketplace-platform-hero-code"
               />
               <div>
-                <small>SELECTED PLATFORM</small>
-                <h3>{activePlatform?.label ?? "全部平台"}</h3>
+                <small>{c.selectedPlatform}</small>
+                <h3>
+                  {activePlatform
+                    ? localizedFacetLabel(
+                        facets?.platforms ?? [],
+                        activePlatform.value,
+                        locale,
+                      )
+                    : c.allPlatformTitle}
+                </h3>
                 <p>
                   {activePlatform
-                    ? `浏览 ${activePlatform.label} 的全部数据产品、调用能力与价格。`
-                    : "从平台开始发现数据供给，并在平台内继续筛选产品能力。"}
+                    ? c.activePlatformBody(
+                        localizedFacetLabel(
+                          facets?.platforms ?? [],
+                          activePlatform.value,
+                          locale,
+                        ),
+                      )
+                    : c.allPlatformBody}
                 </p>
               </div>
               <strong>
                 {marketplace
-                  ? `${marketplace.total.toLocaleString()} 项产品`
-                  : "统计中"}
+                  ? `${marketplace.total.toLocaleString()} ${
+                      marketplace.total === 1
+                        ? c.productCountSingle
+                        : c.productCount
+                    }`
+                  : c.calculating}
               </strong>
             </header>
 
             {facets && facets.dataTypes.length > 0 ? (
               <div className="marketplace-type-chips">
-                <span>数据类型</span>
-                <div role="group" aria-label="按数据类型筛选">
+                <span>{c.dataType}</span>
+                <div role="group" aria-label={c.filterByType}>
                   <button
                     className={
                       filters.dataType === "" ? "is-active" : ""
@@ -1607,7 +1969,7 @@ export default function CatalogClient() {
                     onClick={() => updateFilter("dataType", "")}
                     aria-pressed={filters.dataType === ""}
                   >
-                    全部能力
+                    {c.allCapabilities}
                   </button>
                   {facets.dataTypes.map((option) => (
                     <button
@@ -1628,7 +1990,11 @@ export default function CatalogClient() {
                       aria-pressed={filters.dataType === option.value}
                       key={option.value}
                     >
-                      {option.label}
+                      {localizedFacetLabel(
+                        facets.dataTypes,
+                        option.value,
+                        locale,
+                      )}
                     </button>
                   ))}
                 </div>
@@ -1642,9 +2008,13 @@ export default function CatalogClient() {
             >
               <div
                 className="marketplace-results-column"
-                aria-busy={state.status === "loading"}
+                aria-busy={
+                  state.status === "loading" || state.status === "refreshing"
+                }
               >
-                {state.status === "loading" ? <LoadingCards /> : null}
+                {state.status === "loading" ? (
+                  <LoadingCards locale={locale} />
+                ) : null}
 
                 {marketplace && marketplace.endpoints.length > 0 ? (
                   <ul className="marketplace-grid">
@@ -1667,20 +2037,20 @@ export default function CatalogClient() {
                       </p>
                       <h3>
                         {filtersActive
-                          ? "这个平台下暂时没有符合条件的数据产品。"
-                          : "数据市场正在准备供给目录。"}
+                          ? c.noMatchTitle
+                          : c.emptyTitle}
                       </h3>
                       <p>
                         {filtersActive
-                          ? "试试切换平台、减少数据类型或其他筛选条件。"
-                          : "完成目录同步、安全核验和价格复核后，数据产品会在这里出现。"}
+                          ? c.noMatchBody
+                          : c.emptyBody}
                       </p>
                       {filtersActive ? (
                         <button type="button" onClick={clearFilters}>
-                          查看全部数据产品
+                          {c.viewAll}
                         </button>
                       ) : (
-                        <Link href="/docs">先阅读调用文档</Link>
+                        <Link href="/docs">{c.readDocs}</Link>
                       )}
                     </div>
                   </div>
@@ -1689,7 +2059,7 @@ export default function CatalogClient() {
                 {marketplace && marketplace.total > 0 ? (
                   <nav
                     className="marketplace-pagination"
-                    aria-label="数据产品分页"
+                    aria-label={c.pagination}
                   >
                     <button
                       type="button"
@@ -1700,10 +2070,13 @@ export default function CatalogClient() {
                       disabled={offset === 0}
                     >
                       <span aria-hidden="true">←</span>
-                      上一页
+                      {c.previous}
                     </button>
                     <span>
-                      第 <strong>{currentPage}</strong> 页，共 {totalPages} 页
+                      {locale === "zh" ? "第" : ""}{" "}
+                      <strong>{currentPage}</strong>{" "}
+                      {locale === "zh" ? `页，${c.of}` : c.of} {totalPages}{" "}
+                      {locale === "zh" ? "页" : ""}
                     </span>
                     <button
                       type="button"
@@ -1714,7 +2087,7 @@ export default function CatalogClient() {
                       }}
                       disabled={marketplace.nextOffset === null}
                     >
-                      下一页
+                      {c.next}
                       <span aria-hidden="true">→</span>
                     </button>
                   </nav>
@@ -1724,6 +2097,7 @@ export default function CatalogClient() {
               {detailState.status !== "idle" ? (
                 <DetailPanel
                   state={detailState}
+                  locale={locale}
                   activeExample={activeExample}
                   onExampleChange={setActiveExample}
                   onClose={closeDetail}
@@ -1742,8 +2116,8 @@ export default function CatalogClient() {
         <p className="marketplace-copy-status" aria-live="polite">
           {copyFeedback
             ? copyFeedback.status === "success"
-              ? "内容已复制到剪贴板。"
-              : "复制失败，请手动选择内容。"
+              ? c.copySuccess
+              : c.copyError
             : ""}
         </p>
       </section>
@@ -1752,14 +2126,12 @@ export default function CatalogClient() {
         <div>
           <span aria-hidden="true">R/</span>
           <div>
-            <strong>一个访问 Key，消费已审核开放的数据产品。</strong>
-            <p>
-              只有状态为“可调用”的数据产品会进入真实代理；待开放与受限产品仅用于供给发现。
-            </p>
+            <strong>{c.footerTitle}</strong>
+            <p>{c.footerBody}</p>
           </div>
         </div>
         <Link className="button button-lime" href="/pricing">
-          查看透明定价
+          {c.transparentPricing}
           <span aria-hidden="true">↗</span>
         </Link>
       </section>

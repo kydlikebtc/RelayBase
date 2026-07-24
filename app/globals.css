@@ -220,6 +220,36 @@ strong,
   gap: 16px;
 }
 
+.language-switch {
+  min-width: 42px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--ink-2);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+
+.language-switch:hover {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.language-switch:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.mobile-menu-panel .language-switch {
+  width: 100%;
+  margin-top: 4px;
+  text-align: left;
+}
+
 .system-status,
 .footer-status {
   display: inline-flex;
