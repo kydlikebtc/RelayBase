@@ -2777,7 +2777,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "'tikhub'"
+          "default": "'primary'"
         },
         "label": {
           "name": "label",

@@ -27,7 +27,7 @@ const workflow = [
   {
     number: "02",
     title: "请求统一入口",
-    body: "公开端点原样透传上游 JSON；只需要保持 Bearer 鉴权并切换 /v1 后的平台与能力路径。",
+    body: "公开端点统一返回 RelayBase JSON 包装；只需要保持 Bearer 鉴权并切换 /v1 后的平台与能力路径。",
     accent: "lime",
   },
   {
@@ -131,14 +131,14 @@ export default async function Home() {
               </code>
             </pre>
             <div className="response-label">
-              <span>UPSTREAM JSON · 200</span>
+              <span>RELAYBASE JSON · 200</span>
               <span>482 ms</span>
             </div>
             <pre className="response-code">
               <code>
                 {"{"}
-                {"\n"} &nbsp;<span className="code-blue">&quot;code&quot;</span>:{" "}
-                <span className="code-number">200</span>,
+                {"\n"} &nbsp;<span className="code-blue">&quot;success&quot;</span>:{" "}
+                <span className="code-lime">true</span>,
                 {"\n"} &nbsp;<span className="code-blue">&quot;data&quot;</span>:{" "}
                 {"{"}
                 {"\n"} &nbsp;&nbsp;
@@ -156,9 +156,9 @@ export default async function Home() {
               ↳
             </span>
             <p>
-              <b>公开端点原样透传上游 JSON。</b>
+              <b>公开端点统一返回 RelayBase JSON。</b>
               <br />
-              鉴权、计费与错误体由 RelayBase 统一。
+              外部服务控制字段不会暴露给客户。
             </p>
           </div>
         </div>

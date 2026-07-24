@@ -2,9 +2,16 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 
 const filesIn = (path) =>
-  readdirSync(path, { withFileTypes: true })
-    .filter((entry) => entry.isFile())
-    .map((entry) => `${path}/${entry.name}`);
+  (() => {
+    try {
+      return readdirSync(path, { withFileTypes: true })
+        .filter((entry) => entry.isFile())
+        .map((entry) => `${path}/${entry.name}`);
+    } catch (error) {
+      if (error?.code === "ENOENT") return [];
+      throw error;
+    }
+  })();
 const presentArtifacts = [
   ...filesIn("data").filter((path) => /catalog.*\.json$/i.test(path)),
   ...filesIn("scripts").filter((path) =>

@@ -3,7 +3,6 @@
 import Link from "next/link";
 import {
   useEffect,
-  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -26,12 +25,18 @@ type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 type JsonContainer = JsonValue[] | { [key: string]: JsonValue };
 
-type MarketplaceSource = {
-  provider: string;
-  openApiVersion: string | null;
-  snapshotHash: string | null;
-  generatedAt: string | null;
-  operationCount: number;
+type MarketplaceCatalog = {
+  revision: string;
+  updatedAt: string | null;
+  complete: boolean;
+  serviceCount: number;
+};
+
+type MarketplacePricing = {
+  amountUsdMicros: number | null;
+  currency: "USD";
+  unit: "request";
+  verified: boolean;
 };
 
 type MarketplaceStats = {
@@ -52,7 +57,7 @@ type FacetOption<T extends string = string> = {
 
 type MarketplaceFacets = {
   platforms: FacetOption[];
-  tags: FacetOption[];
+  categories: FacetOption[];
   dataTypes: FacetOption[];
   methods: FacetOption<HttpMethod>[];
   surfaces: FacetOption<MarketplaceSurface>[];
@@ -60,19 +65,21 @@ type MarketplaceFacets = {
 };
 
 type MarketplaceEndpoint = {
+  id: string;
   path: string;
   platform: string;
   dataType: string;
-  method: HttpMethod;
+  method: HttpMethod | null;
   surface: MarketplaceSurface;
   availability: Availability;
   summary: string | null;
-  priceUsdMicros: number | null;
-  rateLimitRpm: number | null;
+  pricing: MarketplacePricing;
+  rateLimitRps: number | null;
+  documentationStatus: "complete" | "pending";
 };
 
 type MarketplaceResponse = {
-  source: MarketplaceSource;
+  catalog: MarketplaceCatalog;
   stats: MarketplaceStats;
   facets: MarketplaceFacets;
   endpoints: MarketplaceEndpoint[];
@@ -84,15 +91,21 @@ type MarketplaceResponse = {
 
 type MarketplaceDetailEndpoint = MarketplaceEndpoint & {
   description: string | null;
-  tags: string[];
-  operationId: string | null;
-  parameters: JsonContainer | null;
-  requestBody: JsonContainer | null;
-  response: JsonContainer | null;
+  categories: string[];
+  input: {
+    parameters: JsonContainer | null;
+    requestBody: JsonContainer | null;
+  };
+  response: {
+    contentType: "application/json";
+    mode: "relaybase_envelope";
+    schema: null;
+    description: string;
+  };
 };
 
 type MarketplaceDetailResponse = {
-  source: MarketplaceSource;
+  catalog: MarketplaceCatalog;
   endpoint: MarketplaceDetailEndpoint;
   examples: Record<ExampleLanguage, string>;
 };
@@ -123,7 +136,7 @@ type CopyFeedback = {
 
 type Filters = {
   platform: string;
-  tag: string;
+  category: string;
   dataType: string;
   method: "" | HttpMethod;
   surface: "" | MarketplaceSurface;
@@ -132,7 +145,7 @@ type Filters = {
 
 const initialFilters: Filters = {
   platform: "",
-  tag: "",
+  category: "",
   dataType: "",
   method: "",
   surface: "",
@@ -263,16 +276,14 @@ function isAvailability(value: unknown): value is Availability {
   );
 }
 
-function isMarketplaceSource(value: unknown): value is MarketplaceSource {
+function isMarketplaceCatalog(value: unknown): value is MarketplaceCatalog {
   if (!isPlainRecord(value)) return false;
   return (
-    isSafeText(value.provider, 120) &&
-    isNullableText(value.openApiVersion, 160) &&
-    (value.snapshotHash === null ||
-      (typeof value.snapshotHash === "string" &&
-        /^[0-9a-f]{64}$/.test(value.snapshotHash))) &&
-    isIsoDateOrNull(value.generatedAt) &&
-    isSafeIntegerInRange(value.operationCount, 0, 1_000_000)
+    isSafeText(value.revision, 160) &&
+    /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(value.revision) &&
+    isIsoDateOrNull(value.updatedAt) &&
+    typeof value.complete === "boolean" &&
+    isSafeIntegerInRange(value.serviceCount, 0, 1_000_000)
   );
 }
 
@@ -321,20 +332,20 @@ function hasUniqueFacetValues<T extends string>(
 function isMarketplaceFacets(value: unknown): value is MarketplaceFacets {
   if (!isPlainRecord(value)) return false;
   const platforms = value.platforms;
-  const tags = value.tags;
+  const categories = value.categories;
   const dataTypes = value.dataTypes;
   const methods = value.methods;
   const surfaces = value.surfaces;
   const availability = value.availability;
   if (
     !Array.isArray(platforms) ||
-    !Array.isArray(tags) ||
+    !Array.isArray(categories) ||
     !Array.isArray(dataTypes) ||
     !Array.isArray(methods) ||
     !Array.isArray(surfaces) ||
     !Array.isArray(availability) ||
     platforms.length > MAX_FACET_OPTIONS ||
-    tags.length > MAX_FACET_OPTIONS ||
+    categories.length > MAX_FACET_OPTIONS ||
     dataTypes.length > MAX_FACET_OPTIONS ||
     methods.length > 2 ||
     surfaces.length > 4 ||
@@ -346,7 +357,7 @@ function isMarketplaceFacets(value: unknown): value is MarketplaceFacets {
     !platforms.every((option) =>
       isFacetOption(option, isOpenFacetValue),
     ) ||
-    !tags.every((option) =>
+    !categories.every((option) =>
       isFacetOption(option, isOpenFacetValue),
     ) ||
     !dataTypes.every((option) =>
@@ -362,7 +373,7 @@ function isMarketplaceFacets(value: unknown): value is MarketplaceFacets {
   }
   return (
     hasUniqueFacetValues(platforms) &&
-    hasUniqueFacetValues(tags) &&
+    hasUniqueFacetValues(categories) &&
     hasUniqueFacetValues(dataTypes) &&
     hasUniqueFacetValues(methods) &&
     hasUniqueFacetValues(surfaces) &&
@@ -374,20 +385,30 @@ function isMarketplaceEndpoint(
   value: unknown,
 ): value is MarketplaceEndpoint {
   if (!isPlainRecord(value)) return false;
+  const pricing = value.pricing;
   return (
+    isSafeText(value.id, 160) &&
+    /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/.test(value.id) &&
     isSafeText(value.path, 600) &&
     value.path.startsWith("/v1/") &&
     !/\s/.test(value.path) &&
     isSafeText(value.platform, 160) &&
     isSafeText(value.dataType, 160) &&
-    isHttpMethod(value.method) &&
+    (value.method === null || isHttpMethod(value.method)) &&
     isSurface(value.surface) &&
     isAvailability(value.availability) &&
     isNullableText(value.summary, 1_000) &&
-    (value.priceUsdMicros === null ||
-      isSafeIntegerInRange(value.priceUsdMicros, 0, 100_000_000)) &&
-    (value.rateLimitRpm === null ||
-      isSafeIntegerInRange(value.rateLimitRpm, 1, 1_000_000))
+    isPlainRecord(pricing) &&
+    (pricing.amountUsdMicros === null ||
+      isSafeIntegerInRange(pricing.amountUsdMicros, 0, 100_000_000)) &&
+    pricing.currency === "USD" &&
+    pricing.unit === "request" &&
+    typeof pricing.verified === "boolean" &&
+    (!pricing.verified || pricing.amountUsdMicros !== null) &&
+    (value.rateLimitRps === null ||
+      isSafeIntegerInRange(value.rateLimitRps, 1, 1_000_000)) &&
+    (value.documentationStatus === "complete" ||
+      value.documentationStatus === "pending")
   );
 }
 
@@ -397,7 +418,7 @@ function isMarketplaceResponse(
 ): value is MarketplaceResponse {
   if (!isPlainRecord(value)) return false;
   if (
-    !isMarketplaceSource(value.source) ||
+    !isMarketplaceCatalog(value.catalog) ||
     !isMarketplaceStats(value.stats) ||
     !isMarketplaceFacets(value.facets) ||
     !Array.isArray(value.endpoints) ||
@@ -408,14 +429,12 @@ function isMarketplaceResponse(
     !isSafeIntegerInRange(value.offset, 0, 1_000_000) ||
     value.offset !== expectedOffset ||
     value.stats.total < value.total ||
-    value.source.operationCount < value.stats.total
+    value.catalog.serviceCount < value.stats.total
   ) {
     return false;
   }
 
-  const endpointKeys = value.endpoints.map(
-    (endpoint) => `${endpoint.method}:${endpoint.path}`,
-  );
+  const endpointKeys = value.endpoints.map((endpoint) => endpoint.id);
   if (new Set(endpointKeys).size !== endpointKeys.length) return false;
 
   const expectedNext =
@@ -481,54 +500,54 @@ function isBoundedJsonContainer(value: unknown): value is JsonContainer {
 function isMarketplaceDetailResponse(
   value: unknown,
   selected: MarketplaceEndpoint,
-  expectedSource: MarketplaceSource,
+  expectedCatalog: MarketplaceCatalog,
 ): value is MarketplaceDetailResponse {
   if (!isPlainRecord(value) || !isPlainRecord(value.endpoint)) return false;
   const endpoint = value.endpoint;
   if (
-    !isMarketplaceSource(value.source) ||
-    !marketplaceSourcesMatch(value.source, expectedSource) ||
+    !isMarketplaceCatalog(value.catalog) ||
+    !marketplaceCatalogsMatch(value.catalog, expectedCatalog) ||
     !isMarketplaceEndpoint(endpoint) ||
-    endpoint.path !== selected.path ||
-    endpoint.method !== selected.method ||
+    endpoint.id !== selected.id ||
     !isNullableText(value.endpoint.description, 20_000) ||
-    !Array.isArray(value.endpoint.tags) ||
-    value.endpoint.tags.length > 100 ||
-    !value.endpoint.tags.every(isOpenFacetValue) ||
-    new Set(value.endpoint.tags).size !== value.endpoint.tags.length ||
-    !isNullableText(value.endpoint.operationId, 500) ||
+    !Array.isArray(value.endpoint.categories) ||
+    value.endpoint.categories.length > 100 ||
+    !value.endpoint.categories.every(isOpenFacetValue) ||
+    new Set(value.endpoint.categories).size !==
+      value.endpoint.categories.length ||
+    !isPlainRecord(value.endpoint.input) ||
     !(
-      value.endpoint.parameters === null ||
-      isBoundedJsonContainer(value.endpoint.parameters)
+      value.endpoint.input.parameters === null ||
+      isBoundedJsonContainer(value.endpoint.input.parameters)
     ) ||
     !(
-      value.endpoint.requestBody === null ||
-      isBoundedJsonContainer(value.endpoint.requestBody)
+      value.endpoint.input.requestBody === null ||
+      isBoundedJsonContainer(value.endpoint.input.requestBody)
     ) ||
-    !(
-      value.endpoint.response === null ||
-      isBoundedJsonContainer(value.endpoint.response)
-    )
+    !isPlainRecord(value.endpoint.response) ||
+    value.endpoint.response.contentType !== "application/json" ||
+    value.endpoint.response.mode !== "relaybase_envelope" ||
+    value.endpoint.response.schema !== null ||
+    !isSafeText(value.endpoint.response.description, 2_000)
   ) {
     return false;
   }
   if (!isPlainRecord(value.examples)) return false;
   const examples = value.examples;
   return exampleLanguages.every((language) =>
-    isSafeText(examples[language], 100_000),
+    isSafeText(examples[language], 100_000, true),
   );
 }
 
-function marketplaceSourcesMatch(
-  left: MarketplaceSource,
-  right: MarketplaceSource,
+function marketplaceCatalogsMatch(
+  left: MarketplaceCatalog,
+  right: MarketplaceCatalog,
 ): boolean {
   return (
-    left.provider === right.provider &&
-    left.openApiVersion === right.openApiVersion &&
-    left.snapshotHash === right.snapshotHash &&
-    left.generatedAt === right.generatedAt &&
-    left.operationCount === right.operationCount
+    left.revision === right.revision &&
+    left.updatedAt === right.updatedAt &&
+    left.complete === right.complete &&
+    left.serviceCount === right.serviceCount
   );
 }
 
@@ -541,7 +560,7 @@ function formatPrice(micros: number | null): string {
   return `$${value || "0"}`;
 }
 
-function formatSourceDate(value: string | null): string {
+function formatCatalogDate(value: string | null): string {
   if (!value) return "等待运行时同步";
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
   const date = new Date(value);
@@ -749,9 +768,13 @@ function DetailPanel({
         <div className="marketplace-detail-content">
           <div className="marketplace-detail-meta">
             <span
-              className={`marketplace-method is-${endpoint.method.toLowerCase()}`}
+              className={`marketplace-method ${
+                endpoint.method
+                  ? `is-${endpoint.method.toLowerCase()}`
+                  : "is-pending"
+              }`}
             >
-              {endpoint.method}
+              {endpoint.method ?? "待确认"}
             </span>
             <span
               className={`marketplace-availability is-${endpoint.availability}`}
@@ -759,6 +782,11 @@ function DetailPanel({
               {availabilityLabel(endpoint.availability)}
             </span>
             <span>{surfaceLabel(endpoint.surface)}</span>
+            <span>
+              {endpoint.documentationStatus === "complete"
+                ? "规范完整"
+                : "规范待补齐"}
+            </span>
           </div>
 
           <div className="marketplace-detail-path">
@@ -782,20 +810,18 @@ function DetailPanel({
               <dd>{endpoint.dataType}</dd>
             </div>
             <div>
-              <dt>RelayBase 能力 ID</dt>
+              <dt>服务 ID</dt>
               <dd>
-                <code>
-                  {state.data.endpoint.operationId || "未声明"}
-                </code>
+                <code>{endpoint.id}</code>
               </dd>
             </div>
             <div>
               <dt>能力分类</dt>
               <dd>
-                {state.data.endpoint.tags.length > 0 ? (
+                {state.data.endpoint.categories.length > 0 ? (
                   <span className="marketplace-detail-tags">
-                    {state.data.endpoint.tags.map((tag) => (
-                      <span key={tag}>{tag}</span>
+                    {state.data.endpoint.categories.map((category) => (
+                      <span key={category}>{category}</span>
                     ))}
                   </span>
                 ) : (
@@ -807,14 +833,19 @@ function DetailPanel({
 
           <div className="marketplace-detail-price">
             <div>
-              <span>成功请求参考价</span>
-              <strong>{formatPrice(endpoint.priceUsdMicros)}</strong>
+              <span>每次请求价格</span>
+              <strong>
+                {formatPrice(endpoint.pricing.amountUsdMicros)}
+              </strong>
+              <small>
+                {endpoint.pricing.verified ? "已核价" : "价格待核验"}
+              </small>
             </div>
             <div>
-              <span>建议速率</span>
+              <span>速率上限</span>
               <strong>
-                {endpoint.rateLimitRpm
-                  ? `${endpoint.rateLimitRpm.toLocaleString()} RPM`
+                {endpoint.rateLimitRps
+                  ? `${endpoint.rateLimitRps.toLocaleString()} RPS`
                   : "按账户策略"}
               </strong>
             </div>
@@ -832,17 +863,23 @@ function DetailPanel({
           <section aria-labelledby="marketplace-parameters-title">
             <h3 id="marketplace-parameters-title">请求参数</h3>
             <SchemaDocument
-              value={state.data.endpoint.parameters}
-              emptyLabel="此接口没有额外的 URL 参数。"
+              value={state.data.endpoint.input.parameters}
+              emptyLabel={
+                endpoint.documentationStatus === "pending"
+                  ? "参数规范待补齐。"
+                  : "此接口没有额外的 URL 参数。"
+              }
             />
           </section>
 
           <section aria-labelledby="marketplace-body-title">
             <h3 id="marketplace-body-title">请求体</h3>
             <SchemaDocument
-              value={state.data.endpoint.requestBody}
+              value={state.data.endpoint.input.requestBody}
               emptyLabel={
-                endpoint.method === "GET"
+                endpoint.documentationStatus === "pending"
+                  ? "请求体规范待补齐。"
+                  : endpoint.method === "GET"
                   ? "GET 服务不需要请求体。"
                   : "此服务没有声明请求体结构。"
               }
@@ -850,57 +887,85 @@ function DetailPanel({
           </section>
 
           <section aria-labelledby="marketplace-response-title">
-            <h3 id="marketplace-response-title">
-              响应状态与上游 Schema 标识
-            </h3>
-            <SchemaDocument
-              value={state.data.endpoint.response}
-              emptyLabel="当前 RelayBase 契约未公开响应 Schema。"
-            />
+            <h3 id="marketplace-response-title">响应格式</h3>
+            <dl className="marketplace-detail-taxonomy">
+              <div>
+                <dt>内容类型</dt>
+                <dd>
+                  <code>{state.data.endpoint.response.contentType}</code>
+                </dd>
+              </div>
+              <div>
+                <dt>响应模式</dt>
+                <dd>RelayBase JSON 包装</dd>
+              </div>
+            </dl>
+            <p className="marketplace-description">
+              {state.data.endpoint.response.description}
+            </p>
           </section>
 
           <section
             className="marketplace-examples"
             aria-labelledby="marketplace-examples-title"
           >
-            <div className="marketplace-examples-head">
-              <h3 id="marketplace-examples-title">调用示例</h3>
-              <button
-                type="button"
-                onClick={() =>
-                  onCopy(
-                    `example-${activeExample}`,
-                    state.data.examples[activeExample],
-                  )
-                }
-              >
-                {copyFeedback?.id === `example-${activeExample}`
-                  ? copyFeedback.status === "success"
-                    ? "已复制"
-                    : "复制失败"
-                  : "复制代码"}
-              </button>
-            </div>
-            <div
-              className="marketplace-example-tabs"
-              role="group"
-              aria-label="选择示例语言"
-            >
-              {exampleLanguages.map((language) => (
-                <button
-                  type="button"
-                  className={activeExample === language ? "is-active" : ""}
-                  aria-pressed={activeExample === language}
-                  onClick={() => onExampleChange(language)}
-                  key={language}
+            {exampleLanguages.some(
+              (language) => state.data.examples[language].trim().length > 0,
+            ) ? (
+              <>
+                <div className="marketplace-examples-head">
+                  <h3 id="marketplace-examples-title">调用示例</h3>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onCopy(
+                        `example-${activeExample}`,
+                        state.data.examples[activeExample],
+                      )
+                    }
+                    disabled={
+                      state.data.examples[activeExample].trim().length === 0
+                    }
+                  >
+                    {copyFeedback?.id === `example-${activeExample}`
+                      ? copyFeedback.status === "success"
+                        ? "已复制"
+                        : "复制失败"
+                      : "复制代码"}
+                  </button>
+                </div>
+                <div
+                  className="marketplace-example-tabs"
+                  role="group"
+                  aria-label="选择示例语言"
                 >
-                  {exampleLabels[language]}
-                </button>
-              ))}
-            </div>
-            <pre tabIndex={0}>
-              <code>{state.data.examples[activeExample]}</code>
-            </pre>
+                  {exampleLanguages.map((language) => (
+                    <button
+                      type="button"
+                      className={activeExample === language ? "is-active" : ""}
+                      aria-pressed={activeExample === language}
+                      onClick={() => onExampleChange(language)}
+                      disabled={
+                        state.data.examples[language].trim().length === 0
+                      }
+                      key={language}
+                    >
+                      {exampleLabels[language]}
+                    </button>
+                  ))}
+                </div>
+                <pre tabIndex={0}>
+                  <code>{state.data.examples[activeExample]}</code>
+                </pre>
+              </>
+            ) : (
+              <>
+                <h3 id="marketplace-examples-title">调用示例</h3>
+                <p className="marketplace-schema-empty">
+                  请求方法确认后生成调用示例。
+                </p>
+              </>
+            )}
           </section>
 
           <Link className="marketplace-detail-cta" href="/console">
@@ -959,7 +1024,7 @@ export default function CatalogClient() {
     });
     if (query) parameters.set("q", query);
     if (filters.platform) parameters.set("platform", filters.platform);
-    if (filters.tag) parameters.set("tag", filters.tag);
+    if (filters.category) parameters.set("category", filters.category);
     if (filters.dataType) parameters.set("dataType", filters.dataType);
     if (filters.method) parameters.set("method", filters.method);
     if (filters.surface) parameters.set("surface", filters.surface);
@@ -1015,23 +1080,21 @@ export default function CatalogClient() {
 
   const selectedEndpoint =
     detailState.status === "idle" ? null : detailState.endpoint;
-  const selectedSource =
-    state.status === "ready" ? state.data.source : null;
+  const selectedCatalog =
+    state.status === "ready" ? state.data.catalog : null;
 
   useEffect(() => {
-    if (selectedEndpoint === null || selectedSource === null) return;
+    if (selectedEndpoint === null || selectedCatalog === null) return;
     const endpoint: MarketplaceEndpoint = selectedEndpoint;
-    const expectedSource: MarketplaceSource = selectedSource;
+    const expectedCatalog: MarketplaceCatalog = selectedCatalog;
     const controller = new AbortController();
     let timedOut = false;
     const timeoutId = window.setTimeout(() => {
       timedOut = true;
       controller.abort();
     }, MARKETPLACE_REQUEST_TIMEOUT_MS);
-    const parameters = new URLSearchParams({
-      path: endpoint.path,
-      method: endpoint.method,
-    });
+    const parameters = new URLSearchParams({ path: endpoint.path });
+    if (endpoint.method) parameters.set("method", endpoint.method);
 
     async function loadDetail() {
       setDetailState({ status: "loading", endpoint });
@@ -1052,7 +1115,7 @@ export default function CatalogClient() {
           !isMarketplaceDetailResponse(
             payload,
             endpoint,
-            expectedSource,
+            expectedCatalog,
           )
         ) {
           throw new Error("marketplace_detail_shape_invalid");
@@ -1095,7 +1158,7 @@ export default function CatalogClient() {
       window.clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [detailVersion, selectedEndpoint, selectedSource]);
+  }, [detailVersion, selectedCatalog, selectedEndpoint]);
 
   useEffect(
     () => () => {
@@ -1114,17 +1177,13 @@ export default function CatalogClient() {
     ? Math.max(1, Math.ceil(marketplace.total / PAGE_SIZE))
     : 1;
 
-  const sourceSummary = useMemo(() => {
-    if (!marketplace) return null;
-    return {
-      provider: marketplace.source.provider,
-      version: marketplace.source.openApiVersion ?? "版本待确认",
-      snapshot: marketplace.source.snapshotHash
-        ? marketplace.source.snapshotHash.slice(0, 10)
-        : "未生成",
-      generatedAt: formatSourceDate(marketplace.source.generatedAt),
-    };
-  }, [marketplace]);
+  const catalogSummary = marketplace
+    ? {
+        revision: marketplace.catalog.revision,
+        completeness: marketplace.catalog.complete ? "目录完整" : "同步进行中",
+        updatedAt: formatCatalogDate(marketplace.catalog.updatedAt),
+      }
+    : null;
 
   function updateFilter<Key extends keyof Filters>(
     key: Key,
@@ -1217,16 +1276,16 @@ export default function CatalogClient() {
           <strong>RelayBase Curated Catalog</strong>
           <dl>
             <div>
-              <dt>来源</dt>
-              <dd>管理后台运行时同步</dd>
+              <dt>目录版本</dt>
+              <dd>{catalogSummary?.revision ?? "读取中"}</dd>
             </div>
             <div>
-              <dt>公开范围</dt>
-              <dd>审核后的 RelayBase 契约</dd>
+              <dt>完整性</dt>
+              <dd>{catalogSummary?.completeness ?? "读取中"}</dd>
             </div>
             <div>
               <dt>最近更新</dt>
-              <dd>{sourceSummary?.generatedAt ?? "读取中"}</dd>
+              <dd>{catalogSummary?.updatedAt ?? "读取中"}</dd>
             </div>
           </dl>
         </aside>
@@ -1235,7 +1294,9 @@ export default function CatalogClient() {
       <section className="marketplace-stat-strip" aria-label="API 市场统计">
         <article>
           <span>API 服务</span>
-          <strong>{formatMarketplaceTotal(marketplace?.stats.total)}</strong>
+          <strong>
+            {formatMarketplaceTotal(marketplace?.catalog.serviceCount)}
+          </strong>
           <small>当前运行时目录</small>
         </article>
         <article>
@@ -1301,13 +1362,13 @@ export default function CatalogClient() {
             <label>
               <span>能力分类</span>
               <select
-                value={filters.tag}
+                value={filters.category}
                 onChange={(event) =>
-                  updateFilter("tag", event.target.value)
+                  updateFilter("category", event.target.value)
                 }
               >
                 <option value="">全部能力分类</option>
-                {facets?.tags.map((option) => (
+                {facets?.categories.map((option) => (
                   <option value={option.value} key={option.value}>
                     {option.label} · {option.count}
                   </option>
@@ -1448,11 +1509,9 @@ export default function CatalogClient() {
             {marketplace && marketplace.endpoints.length > 0 ? (
               <ul className="marketplace-grid">
                 {marketplace.endpoints.map((endpoint) => {
-                  const selected =
-                    selectedEndpoint?.path === endpoint.path &&
-                    selectedEndpoint.method === endpoint.method;
+                  const selected = selectedEndpoint?.id === endpoint.id;
                   return (
-                    <li key={`${endpoint.method}:${endpoint.path}`}>
+                    <li key={endpoint.id}>
                       <article
                         className={`marketplace-card ${
                           selected ? "is-selected" : ""
@@ -1461,15 +1520,24 @@ export default function CatalogClient() {
                         <header>
                           <div>
                             <span
-                              className={`marketplace-method is-${endpoint.method.toLowerCase()}`}
+                              className={`marketplace-method ${
+                                endpoint.method
+                                  ? `is-${endpoint.method.toLowerCase()}`
+                                  : "is-pending"
+                              }`}
                             >
-                              {endpoint.method}
+                              {endpoint.method ?? "待确认"}
                             </span>
                             <span
                               className={`marketplace-availability is-${endpoint.availability}`}
                             >
                               {availabilityLabel(endpoint.availability)}
                             </span>
+                            {endpoint.documentationStatus === "pending" ? (
+                              <span className="marketplace-availability is-pending">
+                                规范待补齐
+                              </span>
+                            ) : null}
                           </div>
                           <span className="marketplace-surface">
                             {surfaceLabel(endpoint.surface)}
@@ -1506,14 +1574,21 @@ export default function CatalogClient() {
                         </p>
                         <dl>
                           <div>
-                            <dt>成功请求参考价</dt>
-                            <dd>{formatPrice(endpoint.priceUsdMicros)}</dd>
+                            <dt>每次请求价格</dt>
+                            <dd>
+                              {formatPrice(endpoint.pricing.amountUsdMicros)}
+                              <small>
+                                {endpoint.pricing.verified
+                                  ? " · 已核价"
+                                  : " · 待核价"}
+                              </small>
+                            </dd>
                           </div>
                           <div>
                             <dt>速率</dt>
                             <dd>
-                              {endpoint.rateLimitRpm
-                                ? `${endpoint.rateLimitRpm.toLocaleString()} RPM`
+                              {endpoint.rateLimitRps
+                                ? `${endpoint.rateLimitRps.toLocaleString()} RPS`
                                 : "按策略"}
                             </dd>
                           </div>

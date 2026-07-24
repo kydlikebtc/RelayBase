@@ -13,6 +13,21 @@ const workerUrl = new URL("../dist/server/index.js", import.meta.url);
 workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
 const { default: worker } = await import(workerUrl.href);
 
+const TEST_UPSTREAM_ORIGIN = "https://source.example";
+const TEST_UPSTREAM_SOURCE_CONFIG = Object.freeze({
+  enabled: true,
+  sourceOrigin: TEST_UPSTREAM_ORIGIN,
+  apiPathPrefix: "/api",
+  openApiPath: "/openapi.json",
+  catalogPath: "/api/v1/control/catalog",
+  credentialPath: "/api/v1/control/credential",
+  catalogAuthMode: "optional",
+  publicExcludedPrefixes: ["/v1/control/"],
+});
+const TEST_UPSTREAM_SOURCE_CONFIG_HASH = createHash("sha256")
+  .update(JSON.stringify(TEST_UPSTREAM_SOURCE_CONFIG))
+  .digest("hex");
+
 class D1Statement {
   constructor(database, sql) {
     this.database = database;
@@ -134,6 +149,7 @@ function baseEnv(overrides = {}) {
     },
     PUBLIC_APP_URL: "http://localhost",
     TRUST_SITES_IDENTITY_HEADERS: "true",
+    UPSTREAM_ALLOWED_ORIGINS: TEST_UPSTREAM_ORIGIN,
     ...overrides,
   };
 }
@@ -164,6 +180,7 @@ const migrationFiles = [
   "drizzle/0011_eminent_molten_man.sql",
   "drizzle/0012_mute_wasp.sql",
   "drizzle/0013_overrated_thunderball.sql",
+  "drizzle/0014_reflective_firestar.sql",
 ];
 
 async function migrate(db, names = migrationFiles) {
@@ -173,6 +190,43 @@ async function migrate(db, names = migrationFiles) {
       if (statement.trim()) db.raw.exec(statement);
     }
   }
+  if (names === migrationFiles) configureUpstreamSource(db);
+}
+
+function configureUpstreamSource(db) {
+  db.raw
+    .prepare(
+      `INSERT INTO upstream_source_config
+       (id, enabled, version, config_hash, source_origin,
+        api_path_prefix, openapi_path, catalog_path, credential_path,
+        catalog_auth_mode, public_excluded_prefixes_json, updated_at)
+       VALUES (1, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(id) DO UPDATE SET
+         enabled = excluded.enabled,
+         version = excluded.version,
+         config_hash = excluded.config_hash,
+         source_origin = excluded.source_origin,
+         api_path_prefix = excluded.api_path_prefix,
+         openapi_path = excluded.openapi_path,
+         catalog_path = excluded.catalog_path,
+         credential_path = excluded.credential_path,
+         catalog_auth_mode = excluded.catalog_auth_mode,
+         public_excluded_prefixes_json =
+           excluded.public_excluded_prefixes_json,
+         updated_at = CURRENT_TIMESTAMP`,
+    )
+    .run(
+      TEST_UPSTREAM_SOURCE_CONFIG_HASH,
+      TEST_UPSTREAM_SOURCE_CONFIG.sourceOrigin,
+      TEST_UPSTREAM_SOURCE_CONFIG.apiPathPrefix,
+      TEST_UPSTREAM_SOURCE_CONFIG.openApiPath,
+      TEST_UPSTREAM_SOURCE_CONFIG.catalogPath,
+      TEST_UPSTREAM_SOURCE_CONFIG.credentialPath,
+      TEST_UPSTREAM_SOURCE_CONFIG.catalogAuthMode,
+      JSON.stringify(
+        TEST_UPSTREAM_SOURCE_CONFIG.publicExcludedPrefixes,
+      ),
+    );
 }
 
 const TEST_CATALOG_GENERATION = "sync_test_complete_0001";
@@ -183,6 +237,7 @@ function enableCatalogEndpoint(
   customerPriceUsdMicros = 2000,
   upstreamApiKey = "upstream-key",
 ) {
+  configureUpstreamSource(db);
   const generation = TEST_CATALOG_GENERATION;
   const surface = path.split("/").includes("web") ? "web" : "other";
   const dataType = path.includes("profile") ? "profile_creator" : "other";
@@ -201,18 +256,28 @@ function enableCatalogEndpoint(
     .update(upstreamApiKey)
     .digest("hex")
     .slice(0, 16);
+  const credentialStateVersion = Number(
+    db.raw
+      .prepare(
+        `SELECT version
+         FROM upstream_credential_state
+         WHERE provider = 'primary'`,
+      )
+      .get()?.version ?? 0,
+  );
   db.raw
     .prepare(
       `INSERT INTO catalog_sync_state
        (id, last_success_generation, credential_source, credential_id,
         credential_fingerprint, credential_state_version,
+        source_config_version, source_config_hash,
         openapi_operation_count, raw_price_row_count,
         normalized_price_count, openapi_price_mapped_count,
         price_only_count, openapi_only_count, scope_excluded_count,
         matched_price_count,
         positive_price_count, zero_price_count, awaiting_price_count,
         openapi_snapshot_hash, price_snapshot_hash, synced_at)
-       VALUES (1, ?, 'environment', NULL, ?, 0,
+       VALUES (1, ?, 'environment', NULL, ?, ?, 1, ?,
                1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, ?, ?,
                CURRENT_TIMESTAMP)
        ON CONFLICT(id) DO UPDATE SET
@@ -221,6 +286,8 @@ function enableCatalogEndpoint(
          credential_id = excluded.credential_id,
          credential_fingerprint = excluded.credential_fingerprint,
          credential_state_version = excluded.credential_state_version,
+         source_config_version = excluded.source_config_version,
+         source_config_hash = excluded.source_config_hash,
          openapi_operation_count = excluded.openapi_operation_count,
          raw_price_row_count = excluded.raw_price_row_count,
          normalized_price_count = excluded.normalized_price_count,
@@ -240,6 +307,8 @@ function enableCatalogEndpoint(
     .run(
       generation,
       credentialFingerprint,
+      credentialStateVersion,
+      TEST_UPSTREAM_SOURCE_CONFIG_HASH,
       "a".repeat(64),
       "b".repeat(64),
     );
@@ -344,11 +413,16 @@ test("returns an empty provider-neutral marketplace before runtime sync", async 
   assert.equal(marketplace.status, 200);
   assert.equal(marketplace.headers.get("cache-control"), "no-store");
   const data = await marketplace.json();
-  assert.equal(data.source.provider, "Configured upstream");
-  assert.equal(data.source.openApiVersion, null);
-  assert.equal(data.source.snapshotHash, null);
-  assert.equal(data.source.operationCount, 0);
+  assert.deepEqual(data.catalog, {
+    revision: "cat_pending",
+    updatedAt: null,
+    complete: false,
+    serviceCount: 0,
+  });
   assert.equal(data.stats.total, 0);
+  assert.equal(data.stats.available, 0);
+  assert.equal(data.stats.pending, 0);
+  assert.equal(data.stats.restricted, 0);
   assert.deepEqual(data.endpoints, []);
   assert.equal(data.total, 0);
   assert.equal(data.nextOffset, null);
@@ -385,12 +459,21 @@ test("publishes only the runtime catalog with provider-neutral public metadata",
   const marketplace = await fetchWorker("/api/marketplace", {}, env);
   assert.equal(marketplace.status, 200);
   const marketplaceData = await marketplace.json();
-  assert.equal(marketplaceData.source.provider, "Configured upstream");
-  assert.equal(marketplaceData.source.openApiVersion, null);
-  assert.equal(marketplaceData.source.snapshotHash, null);
-  assert.equal(marketplaceData.source.operationCount, 1);
+  assert.equal(marketplaceData.catalog.revision, TEST_CATALOG_GENERATION);
+  assert.equal(marketplaceData.catalog.complete, true);
+  assert.equal(marketplaceData.catalog.serviceCount, 1);
+  assert.ok(Date.parse(marketplaceData.catalog.updatedAt));
   assert.equal(marketplaceData.total, 1);
-  assert.doesNotMatch(JSON.stringify(marketplaceData), /tikhub/i);
+  assert.equal(marketplaceData.stats.available, 1);
+  assert.equal(marketplaceData.endpoints[0].documentationStatus, "complete");
+  assert.equal(
+    marketplaceData.endpoints[0].pricing.amountUsdMicros,
+    2000,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(marketplaceData),
+    /source\.example|\/api\/v1\/control\//i,
+  );
 
   const detail = await fetchWorker(
     "/api/marketplace/detail?path=%2Fv1%2Ftiktok%2Fweb%2Ffetch_user_profile&method=GET",
@@ -400,13 +483,21 @@ test("publishes only the runtime catalog with provider-neutral public metadata",
   assert.equal(detail.status, 200);
   const available = await detail.json();
   assert.equal(available.endpoint.availability, "available");
-  assert.equal(available.endpoint.priceUsdMicros, 2000);
-  assert.deepEqual(available.endpoint.tags, ["profile_creator", "web"]);
-  assert.equal(available.endpoint.operationId, null);
-  assert.equal(available.endpoint.response, null);
+  assert.equal(available.endpoint.pricing.amountUsdMicros, 2000);
+  assert.deepEqual(available.endpoint.categories, [
+    "profile_creator",
+    "web",
+  ]);
+  assert.equal(available.endpoint.documentationStatus, "complete");
+  assert.deepEqual(available.endpoint.input.parameters, []);
+  assert.equal(available.endpoint.input.requestBody, null);
+  assert.equal(available.endpoint.response.mode, "relaybase_envelope");
   assert.match(available.endpoint.summary, /Fetch User Profile/);
   assert.match(available.endpoint.description, /RelayBase/);
-  assert.doesNotMatch(JSON.stringify(available), /tikhub/i);
+  assert.doesNotMatch(
+    JSON.stringify(available),
+    /source\.example|\/api\/v1\/control\//i,
+  );
   assert.match(
     available.examples.curl,
     /X-RelayBase-Max-Cost-Usd-Micros: 2000/,
@@ -722,7 +813,7 @@ test("upgrades populated payment events through the auth and review migrations",
     .prepare(
       `SELECT managed_enabled, active_credential_id, version
        FROM upstream_credential_state
-       WHERE provider = 'tikhub'`,
+       WHERE provider = 'primary'`,
     )
     .get();
   assert.equal(credentialState.managed_enabled, 0);
@@ -1308,8 +1399,8 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
   await migrate(db);
 
   const adminSecret = "managed-upstream-admin-secret-32-minimum";
-  const managedApiKey = "tikhub-managed-secret-value-0001";
-  const legacyApiKey = "tikhub-legacy-environment-secret";
+  const managedApiKey = "managed-source-secret-value-0001";
+  const legacyApiKey = "legacy-source-environment-secret";
   const encryptionKey = Buffer.alloc(32, 7).toString("base64url");
   const env = baseEnv({
     DB: db,
@@ -1336,7 +1427,7 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
   const initialData = await initialList.json();
   assert.equal(initialData.activeSource, "environment");
   assert.equal(initialData.managedEnabled, false);
-  assert.equal(initialData.stateVersion, 0);
+  assert.equal(initialData.stateVersion, 1);
   assert.doesNotMatch(JSON.stringify(initialData), new RegExp(legacyApiKey));
 
   const createdResponse = await fetchWorker(
@@ -1348,7 +1439,7 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
         label: "Synthetic Provider production",
         apiKey: managedApiKey,
         activate: false,
-        expectedVersion: 0,
+        expectedVersion: 1,
       }),
     },
     env,
@@ -1380,7 +1471,7 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
       typeof input === "string" || input instanceof URL ? input : input.url,
     );
     upstreamAuthorizations.push(new Headers(init?.headers).get("authorization"));
-    if (url.pathname === "/api/v1/tikhub/user/get_user_info") {
+    if (url.pathname === "/api/v1/control/credential") {
       credentialVerificationAttempts += 1;
       if (credentialVerificationAttempts < 3) {
         return Response.json(
@@ -1394,7 +1485,7 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
           .prepare(
             `UPDATE upstream_credential_state
              SET version = version + 1
-             WHERE provider = 'tikhub'`,
+             WHERE provider = 'primary'`,
           )
           .run();
       }
@@ -1418,7 +1509,7 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
         },
       });
     }
-    if (url.pathname === "/api/v1/tikhub/user/get_all_endpoints_info") {
+    if (url.pathname === "/api/v1/control/catalog") {
       return Response.json({
         data: [
           {
@@ -1461,7 +1552,7 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
       body: JSON.stringify({
         id: created.credential.id,
         action: "activate",
-        expectedVersion: 0,
+        expectedVersion: 1,
       }),
     },
     env,
@@ -1482,7 +1573,7 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
       body: JSON.stringify({
         id: created.credential.id,
         action: "activate",
-        expectedVersion: 0,
+        expectedVersion: 1,
       }),
     },
     env,
@@ -1503,10 +1594,10 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
   );
   assert.equal(synced.status, 200);
   assert.equal((await synced.json()).priced, 1);
-  assert.equal(
-    upstreamAuthorizations.at(-2),
+  assert.deepEqual(upstreamAuthorizations.slice(-2), [
     `Bearer ${managedApiKey}`,
-  );
+    `Bearer ${managedApiKey}`,
+  ]);
 
   const managedList = await fetchWorker(
     "/api/admin/upstream-credentials",
@@ -1518,7 +1609,7 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
   assert.equal(managedList.status, 200);
   const managedData = await managedList.json();
   assert.equal(managedData.activeSource, "managed");
-  assert.equal(managedData.stateVersion, 1);
+  assert.equal(managedData.stateVersion, 2);
   assert.equal(managedData.credentials[0].status, "active");
   const managedListText = JSON.stringify(managedData);
   assert.doesNotMatch(managedListText, new RegExp(managedApiKey));
@@ -1532,9 +1623,9 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
       headers: adminHeaders,
       body: JSON.stringify({
         label: "Synthetic Provider standby",
-        apiKey: "tikhub-managed-secret-value-0002",
+        apiKey: "managed-source-secret-value-0002",
         activate: false,
-        expectedVersion: 1,
+        expectedVersion: 2,
       }),
     },
     env,
@@ -1550,7 +1641,7 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
       body: JSON.stringify({
         id: standby.credential.id,
         action: "activate",
-        expectedVersion: 1,
+        expectedVersion: 2,
       }),
     },
     env,
@@ -1628,7 +1719,7 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
       body: JSON.stringify({
         id: created.credential.id,
         action: "revoke",
-        expectedVersion: 2,
+        expectedVersion: 3,
       }),
     },
     env,
@@ -1649,7 +1740,7 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
   assert.equal(afterRevokeData.activeSource, "none");
   assert.equal(afterRevokeData.activeCredentialId, null);
   assert.equal(afterRevokeData.activeFingerprint, null);
-  assert.equal(afterRevokeData.stateVersion, 3);
+  assert.equal(afterRevokeData.stateVersion, 4);
 
   const failClosedReadiness = await fetchWorker("/api/readiness", {}, env);
   assert.equal(failClosedReadiness.status, 503);
@@ -2664,7 +2755,6 @@ test("creates hashed customer keys and proxies with idempotent billing", async (
     LEGAL_REVIEW_CONFIRMED: "true",
     UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
     UPSTREAM_API_KEY: "upstream-secret",
-    UPSTREAM_BASE_URL: "https://api.tikhub.io/api/v1",
     API_RATE_LIMIT_RPM: "4",
     RECONCILIATION_SECRET: "reconcile-secret-32-characters-minimum",
   });
@@ -2727,19 +2817,30 @@ test("creates hashed customer keys and proxies with idempotent billing", async (
 
   const nativeFetch = globalThis.fetch;
   let upstreamCalls = 0;
+  const privateUpstreamMarkers = [
+    "ExampleSourceBrand",
+    "https://private-source.example",
+    "source-request-id-should-not-leak",
+  ];
   globalThis.fetch = async (input) => {
     upstreamCalls += 1;
     const url = new URL(
       typeof input === "string" || input instanceof URL ? input : input.url,
     );
-    assert.equal(url.origin, "https://api.tikhub.io");
+    assert.equal(url.origin, TEST_UPSTREAM_ORIGIN);
     assert.equal(
       url.pathname,
       "/api/v1/tiktok/web/fetch_user_profile",
     );
     if (url.searchParams.get("uniqueId") === "missing") {
       return Response.json(
-        { code: 404, message: "not found" },
+        {
+          code: 404,
+          message:
+            `${privateUpstreamMarkers[0]} at ` +
+            `${privateUpstreamMarkers[1]} could not find the resource`,
+          request_id: privateUpstreamMarkers[2],
+        },
         { status: 404 },
       );
     }
@@ -2749,7 +2850,13 @@ test("creates hashed customer keys and proxies with idempotent billing", async (
         headers: { "content-type": "text/html; charset=utf-8" },
       });
     }
-    return Response.json({ code: 200, data: { uniqueId: "test" } });
+    return Response.json({
+      code: 200,
+      message: `${privateUpstreamMarkers[0]} request succeeded`,
+      docs: privateUpstreamMarkers[1],
+      request_id: privateUpstreamMarkers[2],
+      data: { uniqueId: "test" },
+    });
   };
   t.after(() => {
     globalThis.fetch = nativeFetch;
@@ -2849,6 +2956,15 @@ test("creates hashed customer keys and proxies with idempotent billing", async (
     success.headers.get("x-relaybase-balance-usd-micros"),
     "998000",
   );
+  const successBody = await success.clone().json();
+  assert.deepEqual(successBody, {
+    success: true,
+    data: { uniqueId: "test" },
+  });
+  const publicSuccess = JSON.stringify(successBody);
+  for (const marker of privateUpstreamMarkers) {
+    assert.equal(publicSuccess.includes(marker), false, marker);
+  }
   assert.equal(upstreamCalls, 1);
 
   const duplicate = await fetchWorker(
@@ -2871,7 +2987,17 @@ test("creates hashed customer keys and proxies with idempotent billing", async (
     env,
   );
   assert.equal(failed.status, 404);
-  assert.equal((await failed.clone().json()).error.code, "upstream_error");
+  const failedBody = await failed.clone().json();
+  assert.equal(failedBody.error.code, "upstream_error");
+  assert.match(failedBody.error.message, /数据服务/);
+  const publicFailure = JSON.stringify(failedBody);
+  for (const marker of privateUpstreamMarkers) {
+    assert.equal(publicFailure.includes(marker), false, marker);
+  }
+  assert.notEqual(
+    failedBody.error.requestId,
+    privateUpstreamMarkers[2],
+  );
   assert.equal(failed.headers.get("x-relaybase-cost-usd-micros"), "0");
   assert.equal(
     failed.headers.get("x-relaybase-balance-usd-micros"),
@@ -5123,7 +5249,7 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
     }
     assert.equal(
       url.href,
-      "https://api.tikhub.io/api/v1/tikhub/user/get_all_endpoints_info",
+      `${TEST_UPSTREAM_ORIGIN}/api/v1/control/catalog`,
     );
     return Response.json({
       data: [
@@ -5287,7 +5413,10 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
     publicData.endpoints[0].path,
     "/v1/youtube/web/fetch_video",
   );
-  assert.deepEqual(publicData.endpoints[0].tags, ["YouTube-Web-API"]);
+  assert.deepEqual(publicData.endpoints[0].categories, [
+    "content",
+    "web",
+  ]);
 
   youtubeTags = ["YouTube-Web-V2-API"];
   const taxonomyChanged = await sync();
@@ -5306,6 +5435,192 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
     revision: currentRevision + 2,
     tags_json: '["YouTube-Web-V2-API"]',
   });
+});
+
+test("normalizes a custom API prefix and anonymously publishes an optional-auth catalog without an active managed key", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+
+  const adminSecret = "custom-source-admin-secret-32-minimum";
+  const catalogSecret = "custom-source-catalog-secret-32-minimum";
+  const env = baseEnv({
+    DB: db,
+    ADMIN_MASTER_SECRET: adminSecret,
+    CATALOG_SYNC_SECRET: catalogSecret,
+  });
+  const configured = await fetchWorker(
+    "/api/admin/upstream-config",
+    {
+      method: "PUT",
+      headers: {
+        authorization: `Bearer ${adminSecret}`,
+        origin: "http://localhost",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        expectedVersion: 1,
+        enabled: true,
+        sourceOrigin: TEST_UPSTREAM_ORIGIN,
+        apiPathPrefix: "/gateway/api/",
+        openApiPath: "/gateway/openapi.json/",
+        catalogPath: "/gateway/api/v1/control/catalog/",
+        credentialPath: "/gateway/api/v1/control/credential/",
+        catalogAuthMode: "optional",
+        publicExcludedPrefixes: [],
+      }),
+    },
+    env,
+  );
+  assert.equal(configured.status, 200, await configured.clone().text());
+  const configuredData = await configured.json();
+  assert.equal(configuredData.config.version, 2);
+  assert.equal(configuredData.config.apiPathPrefix, "/gateway/api");
+  assert.equal(configuredData.config.openApiPath, "/gateway/openapi.json");
+  assert.equal(
+    configuredData.config.catalogPath,
+    "/gateway/api/v1/control/catalog",
+  );
+  assert.deepEqual(
+    configuredData.config.publicExcludedPrefixes,
+    ["/v1/control/"],
+  );
+
+  db.raw
+    .prepare(
+      `UPDATE upstream_credential_state
+       SET managed_enabled = 1, active_credential_id = NULL
+       WHERE provider = 'primary'`,
+    )
+    .run();
+
+  const upstreamRequests = [];
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(
+      typeof input === "string" || input instanceof URL ? input : input.url,
+    );
+    upstreamRequests.push({
+      path: url.pathname,
+      authorization: new Headers(init?.headers).get("authorization"),
+    });
+    if (url.pathname === "/gateway/api/v1/control/catalog") {
+      return Response.json({
+        code: 200,
+        data: [
+          {
+            endpoint_uri:
+              "/gateway/api/v1/example/web/fetch_profile",
+            endpoint_cost: 0.001,
+          },
+        ],
+      });
+    }
+    if (url.pathname === "/gateway/openapi.json") {
+      return Response.json({
+        openapi: "3.1.0",
+        info: { version: "custom-prefix-test" },
+        paths: {
+          "/gateway/api/v1/example/web/fetch_profile": {
+            get: {
+              summary: "Fetch a public profile",
+              parameters: [],
+            },
+          },
+        },
+      });
+    }
+    throw new Error(`Unexpected upstream URL ${url.href}`);
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const synced = await fetchWorker(
+    "/api/admin/catalog/sync",
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${catalogSecret}` },
+    },
+    env,
+  );
+  assert.equal(synced.status, 200, await synced.clone().text());
+  assert.equal((await synced.json()).synced, 1);
+  assert.deepEqual(upstreamRequests, [
+    {
+      path: "/gateway/api/v1/control/catalog",
+      authorization: null,
+    },
+    {
+      path: "/gateway/openapi.json",
+      authorization: null,
+    },
+  ]);
+
+  const normalizedEndpoint = db.raw
+    .prepare(
+      `SELECT path, platform
+       FROM endpoint_catalog
+       WHERE path = '/v1/example/web/fetch_profile'`,
+    )
+    .get();
+  assert.deepEqual({ ...normalizedEndpoint }, {
+    path: "/v1/example/web/fetch_profile",
+    platform: "example",
+  });
+  const syncState = db.raw
+    .prepare(
+      `SELECT credential_source, credential_id,
+              source_config_version, source_config_hash
+       FROM catalog_sync_state
+       WHERE id = 1`,
+    )
+    .get();
+  assert.equal(syncState.credential_source, null);
+  assert.equal(syncState.credential_id, null);
+  assert.equal(syncState.source_config_version, 2);
+  assert.equal(
+    syncState.source_config_hash,
+    db.raw
+      .prepare(
+        `SELECT config_hash
+         FROM upstream_source_config
+         WHERE id = 1`,
+      )
+      .get().config_hash,
+  );
+
+  db.raw
+    .prepare(
+      `UPDATE endpoint_catalog
+       SET enabled = 1, read_only = 1, reviewed_at = CURRENT_TIMESTAMP
+       WHERE path = '/v1/example/web/fetch_profile'`,
+    )
+    .run();
+  const published = await fetchWorker("/api/catalog", {}, env);
+  assert.equal(published.status, 200);
+  const publishedData = await published.json();
+  assert.equal(publishedData.catalog.complete, true);
+  assert.equal(publishedData.count, 1);
+  assert.equal(
+    publishedData.endpoints[0].path,
+    "/v1/example/web/fetch_profile",
+  );
+
+  db.raw
+    .prepare(
+      `UPDATE catalog_sync_state
+       SET source_config_hash = ?
+       WHERE id = 1`,
+    )
+    .run("0".repeat(64));
+  const invalidStateCatalog = await fetchWorker("/api/catalog", {}, env);
+  assert.equal(invalidStateCatalog.status, 200);
+  const invalidStateData = await invalidStateCatalog.json();
+  assert.equal(invalidStateData.catalog.complete, false);
+  assert.equal(invalidStateData.catalog.revision, "cat_pending");
+  assert.deepEqual(invalidStateData.endpoints, []);
+  assert.equal(invalidStateData.total, 0);
 });
 
 test("syncs the real Synthetic Provider price shape, verifies zero cost and deduplicates identical rows", async (t) => {
@@ -5357,7 +5672,7 @@ test("syncs the real Synthetic Provider price shape, verifies zero cost and dedu
     }
     assert.equal(
       url.href,
-      "https://api.tikhub.io/api/v1/tikhub/user/get_all_endpoints_info",
+      `${TEST_UPSTREAM_ORIGIN}/api/v1/control/catalog`,
     );
     const youtubePrice = {
       endpoint_uri: "/api/v1/youtube/web/fetch_video",
@@ -5407,6 +5722,7 @@ test("syncs the real Synthetic Provider price shape, verifies zero cost and dedu
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.equal(result.synced, 3);
+  assert.equal(result.pendingDocumentation, 1);
   assert.equal(result.openApiVersion, "test-5.3.2");
   assert.equal(result.openApiOperations, 3);
   assert.equal(result.rawPriceRows, 4);
@@ -5421,6 +5737,98 @@ test("syncs the real Synthetic Provider price shape, verifies zero cost and dedu
   assert.equal(result.awaitingPrice, 1);
   assert.match(result.openApiSnapshotHash, /^[a-f0-9]{64}$/);
   assert.match(result.priceSnapshotHash, /^[a-f0-9]{64}$/);
+
+  const marketplace = await fetchWorker(
+    "/api/marketplace?q=fetch_price_only",
+    {},
+    env,
+  );
+  assert.equal(marketplace.status, 200);
+  const marketplaceData = await marketplace.json();
+  assert.equal(marketplaceData.catalog.complete, true);
+  assert.equal(marketplaceData.catalog.serviceCount, 4);
+  assert.equal(marketplaceData.total, 1);
+  assert.deepEqual(marketplaceData.endpoints[0], {
+    id: marketplaceData.endpoints[0].id,
+    path: "/v1/legacy/web/fetch_price_only",
+    platform: "legacy",
+    dataType: "other",
+    method: null,
+    surface: "web",
+    availability: "pending",
+    summary: "Fetch Price Only",
+    pricing: {
+      amountUsdMicros: 2600,
+      currency: "USD",
+      unit: "request",
+      verified: true,
+    },
+    rateLimitRps: 5,
+    documentationStatus: "pending",
+  });
+  assert.doesNotMatch(
+    JSON.stringify(marketplaceData),
+    /source\.example|\/api\/v1\/control\//i,
+  );
+
+  const pendingDocumentation = await fetchWorker(
+    "/api/marketplace/detail?path=" +
+      encodeURIComponent("/v1/legacy/web/fetch_price_only"),
+    {},
+    env,
+  );
+  assert.equal(pendingDocumentation.status, 200);
+  const pendingDocumentationData = await pendingDocumentation.json();
+  assert.equal(
+    pendingDocumentationData.endpoint.documentationStatus,
+    "pending",
+  );
+  assert.equal(pendingDocumentationData.endpoint.method, null);
+  assert.equal(pendingDocumentationData.endpoint.input.parameters, null);
+  assert.equal(pendingDocumentationData.endpoint.input.requestBody, null);
+  assert.deepEqual(pendingDocumentationData.examples, {
+    curl: "",
+    javascript: "",
+    python: "",
+  });
+
+  const pendingAdmin = await fetchWorker(
+    "/api/admin/catalog/pending?limit=500&offset=0",
+    {
+      headers: { authorization: `Bearer ${catalogSecret}` },
+    },
+    env,
+  );
+  assert.equal(pendingAdmin.status, 200);
+  const pendingAdminData = await pendingAdmin.json();
+  assert.equal(pendingAdminData.total, 1);
+  assert.equal(pendingAdminData.endpoints[0].callable, false);
+  assert.equal(
+    pendingAdminData.endpoints[0].documentationStatus,
+    "pending",
+  );
+  const pendingReprice = await fetchWorker(
+    "/api/admin/catalog/pending",
+    {
+      method: "PATCH",
+      headers: {
+        authorization: `Bearer ${catalogSecret}`,
+        origin: "http://localhost",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        path: "/v1/legacy/web/fetch_price_only",
+        customerPriceUsdMicros: 3_000,
+        expectedUpdatedAt: pendingAdminData.endpoints[0].updatedAt,
+      }),
+    },
+    env,
+  );
+  assert.equal(pendingReprice.status, 200);
+  assert.equal(
+    (await pendingReprice.json()).customerPriceUsdMicros,
+    3_000,
+  );
 
   const rows = db.raw
     .prepare(
@@ -5666,7 +6074,7 @@ test("classifies Synthetic Provider data reads without trusting mutation or cred
         },
       });
     }
-    if (url.pathname === "/api/v1/tikhub/user/get_all_endpoints_info") {
+    if (url.pathname === "/api/v1/control/catalog") {
       return Response.json({
         data: [
           {
@@ -6101,6 +6509,54 @@ test("resolves bounded local OpenAPI refs before classifying inputs", async (t) 
   );
   assert.doesNotMatch(
     sensitive.parameter_schema_json,
+    /(?:sk-this-value|runtime-(?:csrf|plural|invalid))/,
+  );
+
+  const safeDocumentation = await fetchWorker(
+    "/api/marketplace/detail?path=" +
+      encodeURIComponent("/v1/youtube/web/fetch_video_details") +
+      "&method=POST",
+    {},
+    env,
+  );
+  assert.equal(safeDocumentation.status, 200);
+  const safeDocumentationData = await safeDocumentation.json();
+  const safeMedia =
+    safeDocumentationData.endpoint.input.requestBody.content[
+      "application/json"
+    ];
+  assert.equal(safeMedia.schema.type, "object");
+  assert.deepEqual(
+    new Set(Object.keys(safeMedia.schema.properties)),
+    new Set(["video_id", "cursor"]),
+  );
+  assert.equal(safeMedia.schema.properties.video_id.type, "string");
+
+  const sensitiveDocumentation = await fetchWorker(
+    "/api/marketplace/detail?path=" +
+      encodeURIComponent("/v1/instagram/v3/fetch_private_profile") +
+      "&method=POST",
+    {},
+    env,
+  );
+  assert.equal(sensitiveDocumentation.status, 200);
+  const sensitiveDocumentationData =
+    await sensitiveDocumentation.json();
+  const sensitiveMedia =
+    sensitiveDocumentationData.endpoint.input.requestBody.content[
+      "application/json"
+    ];
+  assert.equal(sensitiveMedia.schema.type, "object");
+  assert.equal(
+    Object.hasOwn(sensitiveMedia.schema.properties, "x-api-key"),
+    false,
+  );
+  assert.deepEqual(
+    sensitiveMedia.schema.properties.public_payload,
+    { type: "object" },
+  );
+  assert.doesNotMatch(
+    JSON.stringify(sensitiveDocumentationData),
     /(?:sk-this-value|runtime-(?:csrf|plural|invalid))/,
   );
 
@@ -6606,6 +7062,15 @@ test("keeps the live catalog when the same Synthetic Provider credential returns
     .update(upstreamKey)
     .digest("hex")
     .slice(0, 16);
+  const credentialStateVersion = Number(
+    db.raw
+      .prepare(
+        `SELECT version
+         FROM upstream_credential_state
+         WHERE provider = 'primary'`,
+      )
+      .get().version,
+  );
   const paths = Array.from(
     { length: 20 },
     (_, index) => `/v1/youtube/web/fetch_video_${index}`,
@@ -6626,17 +7091,24 @@ test("keeps the live catalog when the same Synthetic Provider credential returns
       `INSERT INTO catalog_sync_state
        (id, last_success_generation, credential_source, credential_id,
         credential_fingerprint, credential_state_version,
+        source_config_version, source_config_hash,
         openapi_operation_count, raw_price_row_count,
         normalized_price_count, openapi_price_mapped_count,
         price_only_count, openapi_only_count, scope_excluded_count,
         matched_price_count, positive_price_count, zero_price_count,
         awaiting_price_count, openapi_snapshot_hash,
         price_snapshot_hash, synced_at)
-       VALUES (1, 'sync-full-prices', 'environment', NULL, ?, 0,
+       VALUES (1, 'sync-full-prices', 'environment', NULL, ?, ?, 1, ?,
                20, 20, 20, 20, 0, 0, 0, 20, 20, 0, 0, ?, ?,
                CURRENT_TIMESTAMP)`,
     )
-    .run(credentialFingerprint, "a".repeat(64), "b".repeat(64));
+    .run(
+      credentialFingerprint,
+      credentialStateVersion,
+      TEST_UPSTREAM_SOURCE_CONFIG_HASH,
+      "a".repeat(64),
+      "b".repeat(64),
+    );
 
   const catalogSecret = "catalog-partial-price-secret-32-minimum";
   const env = baseEnv({
@@ -6884,16 +7356,20 @@ test("publishes reviewed catalog prices and creates idempotent recoverable payme
   const catalogData = await catalog.json();
   assert.equal(catalogData.count, 1);
   assert.deepEqual(catalogData.endpoints[0], {
+    id: catalogData.endpoints[0].id,
     path: "/v1/tiktok/web/fetch_user_profile",
     platform: "tiktok",
-    method: "GET",
-    summary: null,
     dataType: "profile_creator",
-    tags: ["TikTok-Web-API"],
+    categories: ["profile_creator", "web"],
     surface: "web",
-    operationId:
-      "fetch_user_profile_api_v1_tiktok_web_fetch_user_profile_get",
-    priceUsdMicros: 2500,
+    method: "GET",
+    summary: "Fetch User Profile",
+    pricing: {
+      amountUsdMicros: 2500,
+      currency: "USD",
+      unit: "request",
+      verified: true,
+    },
     updatedAt: catalogData.endpoints[0].updatedAt,
   });
 

@@ -21,7 +21,6 @@ const SESSION_COOKIE = "rb_session";
 const OAUTH_STATE_COOKIE = "rb_oauth_state";
 const MAX_DASHBOARD_BODY_BYTES = 16 * 1024;
 const MAX_WEBHOOK_BODY_BYTES = 64 * 1024;
-const MAX_UPSTREAM_ERROR_BODY_BYTES = 32 * 1024;
 const MAX_PROVIDER_RESPONSE_BYTES = 256 * 1024;
 const MAX_CATALOG_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_OPENAPI_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -34,6 +33,7 @@ const MAX_OPENAPI_REFERENCE_ITEMS = 1_000;
 const MAX_OPENAPI_REFERENCES = 512;
 const MAX_PROXY_BODY_BYTES = 256 * 1024;
 const CATALOG_SAFETY_POLICY_VERSION = 1;
+const PRIMARY_UPSTREAM_PROVIDER = "primary";
 const MAX_CATALOG_BATCH_TARGETS = 2_000;
 const MAX_CATALOG_BATCH_PUBLISH_TARGETS = 500;
 const CATALOG_BATCH_TTL_MINUTES = 30;
@@ -125,7 +125,7 @@ export interface PlatformEnv {
   DB?: D1Database;
   UPSTREAM_API_KEY?: string;
   UPSTREAM_CREDENTIALS_ENCRYPTION_KEY?: string;
-  UPSTREAM_BASE_URL?: string;
+  UPSTREAM_ALLOWED_ORIGINS?: string;
   RESELLER_AUTHORIZED?: string;
   PAYMENT_PROVIDER?: string;
   NOWPAYMENTS_API_KEY?: string;
@@ -211,29 +211,29 @@ type CatalogDataType =
   | "utility"
   | "other";
 type MarketplaceAvailability = "available" | "pending" | "restricted";
+type MarketplaceDocumentationStatus = "complete" | "pending";
 
 type MarketplaceReferenceEndpoint = {
+  id: string;
   path: string;
   platform: string;
   dataType: string;
-  method: "GET" | "POST";
+  method: "GET" | "POST" | null;
   surface: MarketplaceSurface;
-  tags: string[];
+  categories: string[];
   summary: string | null;
   description: string | null;
-  operationId: string | null;
   parameters: Record<string, unknown>[];
   requestBody: Record<string, unknown> | null;
-  response: Record<string, unknown> | null;
+  documentationStatus: MarketplaceDocumentationStatus;
 };
 
 type MarketplaceReference = {
-  source: {
-    provider: string;
-    openApiVersion: string | null;
-    snapshotHash: string | null;
-    generatedAt: string | null;
-    operationCount: number;
+  catalog: {
+    revision: string | null;
+    updatedAt: string | null;
+    complete: boolean;
+    serviceCount: number;
   };
   stats: {
     total: number;
@@ -265,6 +265,72 @@ type MarketplaceCatalogOverlay = {
   updated_at: string;
   catalog_openapi_snapshot_hash: string | null;
   catalog_openapi_operation_count: number | null;
+  catalog_price_only_count: number | null;
+  catalog_generation: string | null;
+};
+
+type MarketplaceUnresolvedOverlay = {
+  path: string;
+  platform: string;
+  data_type: CatalogDataType;
+  surface: MarketplaceSurface;
+  summary: string | null;
+  customer_price_usd_micros: number;
+  price_verified: number;
+  rate_limit_rps: number | null;
+  updated_at: string;
+  sync_generation: string;
+};
+
+type MarketplaceOverlayRow = {
+  path: string;
+  platform: string;
+  httpMethod: "GET" | "POST" | null;
+  dataType: CatalogDataType;
+  tags: string[];
+  surface: MarketplaceSurface;
+  operationId: string | null;
+  summary: string | null;
+  description: string | null;
+  parameterSchema: unknown;
+  customerPriceUsdMicros: number;
+  priceVerified: boolean;
+  enabled: boolean;
+  readOnly: boolean;
+  safetyClassification: CatalogSafetyClassification;
+  safetyPolicyVersion: number;
+  rateLimitRps: number | null;
+  updatedAt: string;
+  documentationStatus: MarketplaceDocumentationStatus;
+};
+
+type UpstreamSourceConfigRecord = {
+  id: number;
+  enabled: number;
+  version: number;
+  config_hash: string;
+  source_origin: string;
+  api_path_prefix: string;
+  openapi_path: string;
+  catalog_path: string;
+  credential_path: string;
+  catalog_auth_mode: "none" | "optional" | "required";
+  public_excluded_prefixes_json: string;
+  updated_at: string;
+};
+
+type UpstreamSourceConfig = {
+  enabled: boolean;
+  version: number;
+  hash: string;
+  origin: string;
+  apiPathPrefix: string;
+  openApiPath: string;
+  catalogPath: string;
+  credentialPath: string;
+  catalogAuthMode: "none" | "optional" | "required";
+  publicExcludedPrefixes: string[];
+  updatedAt: string;
 };
 
 type CatalogSafetyClassification =
@@ -388,6 +454,7 @@ type ManagedUpstreamCredentialRecord = {
   encrypted_secret: string;
   secret_hash: string;
   verified_scopes_json: string | null;
+  verified_config_hash: string | null;
   expires_at: string | null;
   status: "active" | "standby" | "revoked";
   verified_at: string | null;
@@ -404,11 +471,13 @@ type ResolvedUpstreamProviderCredential = {
   scopes: string[] | null;
   expiresAt: string | null;
   stateVersion: number;
+  configHash: string;
 };
 
 type UpstreamProviderCredentialVerification = {
   scopes: string[];
   expiresAt: string | null;
+  configHash: string;
 };
 
 type NowPaymentsPayment = {
@@ -586,6 +655,20 @@ export async function handlePlatformRequest(
     }
 
     if (
+      url.pathname === "/api/admin/upstream-config" &&
+      request.method === "GET"
+    ) {
+      return await handleUpstreamConfigGet(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/admin/upstream-config" &&
+      request.method === "PUT"
+    ) {
+      return await handleUpstreamConfigPut(request, env, requestId);
+    }
+
+    if (
       url.pathname === "/api/admin/catalog/sync" &&
       request.method === "POST"
     ) {
@@ -620,6 +703,24 @@ export async function handlePlatformRequest(
       request.method === "GET"
     ) {
       return await handleCatalogList(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/admin/catalog/pending" &&
+      request.method === "GET"
+    ) {
+      return await handlePendingCatalogList(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/admin/catalog/pending" &&
+      request.method === "PATCH"
+    ) {
+      return await handlePendingCatalogPriceUpdate(
+        request,
+        env,
+        requestId,
+      );
     }
 
     if (
@@ -3461,7 +3562,12 @@ async function handleProxyRequest(
       );
     }
   }
-  const upstreamCredential = await resolveUpstreamProviderCredential(env, db);
+  const sourceConfig = await loadUpstreamSourceConfig(db, env, true);
+  const upstreamCredential = await resolveUpstreamProviderCredential(
+    env,
+    db,
+    sourceConfig,
+  );
   if (!upstreamCredential) {
     throw new PlatformError(
       503,
@@ -3473,6 +3579,7 @@ async function handleProxyRequest(
     !upstreamProviderCredentialAllowsPath(
       upstreamCredential.scopes,
       url.pathname,
+      sourceConfig.apiPathPrefix,
     )
   ) {
     throw new PlatformError(
@@ -3490,6 +3597,8 @@ async function handleProxyRequest(
            AND credential_id IS ?
            AND credential_fingerprint = ?
            AND credential_state_version = ?
+           AND source_config_version = ?
+           AND source_config_hash = ?
        ) AS matches_current`,
     )
     .bind(
@@ -3498,6 +3607,8 @@ async function handleProxyRequest(
       upstreamCredential.id,
       upstreamCredential.fingerprint,
       upstreamCredential.stateVersion,
+      sourceConfig.version,
+      sourceConfig.hash,
     )
     .first<{ matches_current: number }>();
   if (Number(currentCatalogCredential?.matches_current ?? 0) !== 1) {
@@ -3666,10 +3777,13 @@ async function handleProxyRequest(
   }
   await markProxyRequest(db, requestId, "charged", null);
 
-  const upstreamBase = normalizeUpstreamBase(env.UPSTREAM_BASE_URL);
   const upstreamUrl = new URL(
-    `${upstreamBase}${url.pathname.slice("/v1".length)}${url.search}`,
+    upstreamConfigUrl(
+      sourceConfig,
+      `${sourceConfig.apiPathPrefix}${url.pathname}`,
+    ),
   );
+  upstreamUrl.search = url.search;
   const upstreamHeaders = new Headers({
     authorization: `Bearer ${upstreamCredential.secret}`,
     accept: request.headers.get("accept") ?? "application/json",
@@ -3686,10 +3800,10 @@ async function handleProxyRequest(
         .prepare(
           `UPDATE upstream_credentials
            SET last_used_at = CURRENT_TIMESTAMP
-           WHERE id = ? AND provider = 'tikhub' AND revoked_at IS NULL
+           WHERE id = ? AND provider = 'primary' AND revoked_at IS NULL
              AND EXISTS (
                SELECT 1 FROM upstream_credential_state
-               WHERE provider = 'tikhub'
+               WHERE provider = 'primary'
                  AND active_credential_id = upstream_credentials.id
              )`,
         )
@@ -3734,7 +3848,7 @@ async function handleProxyRequest(
     );
   }
 
-  let successfulBodyText: string | null = null;
+  let successfulPayload: unknown = null;
   if (upstreamResponse.status === 200) {
     try {
       const contentType =
@@ -3746,7 +3860,7 @@ async function handleProxyRequest(
       ) {
         throw new Error("upstream success was not JSON");
       }
-      successfulBodyText = await readResponseText(
+      const successfulBodyText = await readResponseText(
         upstreamResponse,
         clampInteger(
           env.UPSTREAM_MAX_RESPONSE_BYTES,
@@ -3760,6 +3874,14 @@ async function handleProxyRequest(
       if (!isPlainRecord(parsed) && !Array.isArray(parsed)) {
         throw new Error("upstream JSON must be an object or array");
       }
+      successfulPayload =
+        isPlainRecord(parsed) &&
+        Object.hasOwn(parsed, "data") &&
+        (Object.hasOwn(parsed, "code") ||
+          Object.hasOwn(parsed, "request_id") ||
+          Object.hasOwn(parsed, "requestId"))
+          ? parsed.data
+          : parsed;
     } catch {
       await refundRequest(
         db,
@@ -3786,7 +3908,7 @@ async function handleProxyRequest(
       const balance = await currentBalance(db, key.user_id);
       return upstreamErrorResponse(
         502,
-        "上游返回了不完整、超限或非 JSON 的响应，本次未扣费。",
+        "数据服务返回了不完整、超限或非 JSON 的响应，本次未扣费。",
         requestId,
         new Headers({
           "x-relaybase-cost-usd-micros": "0",
@@ -3852,11 +3974,8 @@ async function handleProxyRequest(
   responseHeaders.set("x-content-type-options", "nosniff");
 
   if (upstreamResponse.status !== 200) {
-    const upstreamMessage = await safeUpstreamErrorMessage(
-      upstreamResponse,
-      MAX_UPSTREAM_ERROR_BODY_BYTES,
-      [upstreamCredential.secret],
-    );
+    const upstreamMessage =
+      await providerNeutralUpstreamErrorMessage(upstreamResponse);
     return upstreamErrorResponse(
       upstreamResponse.status,
       upstreamMessage,
@@ -3865,28 +3984,31 @@ async function handleProxyRequest(
     );
   }
 
-  return new Response(successfulBodyText, {
-    status: upstreamResponse.status,
-    statusText: upstreamResponse.statusText,
-    headers: responseHeaders,
-  });
+  return jsonResponse(
+    {
+      success: true,
+      data: successfulPayload,
+    },
+    200,
+    requestId,
+    responseHeaders,
+  );
 }
 
 const marketplaceReferenceSafetyCache = new Map<
   string,
   ReturnType<typeof classifyCatalogSafety>
 >();
-const EMPTY_MARKETPLACE_SOURCE: MarketplaceReference["source"] = {
-  provider: "Configured upstream",
-  openApiVersion: null,
-  snapshotHash: null,
-  generatedAt: null,
-  operationCount: 0,
+const EMPTY_MARKETPLACE_CATALOG: MarketplaceReference["catalog"] = {
+  revision: "cat_pending",
+  updatedAt: null,
+  complete: false,
+  serviceCount: 0,
 };
 type MarketplaceOverlay = {
-  rows: Map<string, MarketplaceCatalogOverlay>;
+  rows: Map<string, MarketplaceOverlayRow>;
   catalogReady: boolean;
-  source: MarketplaceReference["source"];
+  catalog: MarketplaceReference["catalog"];
 };
 const marketplaceOverlayCache = new WeakMap<
   object,
@@ -3910,6 +4032,22 @@ function marketplaceGeneratedSummary(path: string): string {
     : "Data query";
 }
 
+function marketplaceServiceId(
+  method: "GET" | "POST" | null,
+  path: string,
+): string {
+  const input = `${method ?? "UNKNOWN"}:${path}`;
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  const hint = (path.split("/").pop() ?? "service")
+    .replace(/[^A-Za-z0-9_-]+/g, "_")
+    .slice(0, 48);
+  return `svc_${hash.toString(36)}_${hint || "service"}`;
+}
+
 function marketplaceGeneratedDescription(
   platform: string,
   dataType: CatalogDataType,
@@ -3920,34 +4058,84 @@ function marketplaceGeneratedDescription(
 function marketplacePublicInputSchema(
   value: unknown,
   depth = 0,
+  context: "default" | "properties" | "content" = "default",
 ): unknown {
   if (depth > 32) return null;
   if (Array.isArray(value)) {
-    return value.map((item) =>
-      marketplacePublicInputSchema(item, depth + 1),
-    );
+    return value
+      .slice(0, 200)
+      .map((item) =>
+        marketplacePublicInputSchema(item, depth + 1, "default"),
+      );
   }
-  if (!isPlainRecord(value)) return value;
-  const omitted = new Set([
-    "$ref",
-    "description",
-    "example",
-    "examples",
-    "externalDocs",
-    "title",
+  if (typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string") {
+    if (
+      value.length > 160 ||
+      /https?:\/\/|[\u0000-\u001F\u007F]/i.test(value)
+    ) {
+      return null;
+    }
+    return value;
+  }
+  if (!isPlainRecord(value)) return null;
+  const allowed = new Set([
+    "name",
+    "in",
+    "required",
+    "deprecated",
+    "schema",
+    "content",
+    "type",
+    "format",
+    "enum",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "minLength",
+    "maxLength",
+    "minItems",
+    "maxItems",
+    "items",
+    "properties",
+    "additionalProperties",
+    "nullable",
+    "oneOf",
+    "anyOf",
+    "allOf",
   ]);
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter(
-        ([key]) =>
-          !omitted.has(key) &&
-          !key.toLowerCase().startsWith("x-"),
-      )
-      .map(([key, child]) => [
-        key,
-        marketplacePublicInputSchema(child, depth + 1),
-      ]),
-  );
+  const entries: Array<[string, unknown]> = [];
+  for (const [key, child] of Object.entries(value)) {
+    if (entries.length >= 200) continue;
+    let childContext: "default" | "properties" | "content" =
+      "default";
+    if (context === "properties") {
+      if (
+        !/^[A-Za-z_][A-Za-z0-9_.-]{0,119}$/.test(key) ||
+        catalogInputFieldRisk(key) !== null
+      ) {
+        continue;
+      }
+    } else if (context === "content") {
+      if (
+        !/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i.test(key)
+      ) {
+        continue;
+      }
+    } else {
+      if (!allowed.has(key)) continue;
+      if (key === "properties") childContext = "properties";
+      if (key === "content") childContext = "content";
+    }
+    const sanitized = marketplacePublicInputSchema(
+      child,
+      depth + 1,
+      childContext,
+    );
+    if (sanitized !== null) entries.push([key, sanitized]);
+  }
+  return Object.fromEntries(entries);
 }
 
 async function loadMarketplaceCatalogOverlay(
@@ -3957,7 +4145,7 @@ async function loadMarketplaceCatalogOverlay(
     return {
       rows: new Map(),
       catalogReady: false,
-      source: EMPTY_MARKETPLACE_SOURCE,
+      catalog: EMPTY_MARKETPLACE_CATALOG,
     };
   }
   const readiness = await operationalReadiness(env);
@@ -3965,11 +4153,20 @@ async function loadMarketplaceCatalogOverlay(
     return {
       rows: new Map(),
       catalogReady: false,
-      source: EMPTY_MARKETPLACE_SOURCE,
+      catalog: EMPTY_MARKETPLACE_CATALOG,
     };
   }
   try {
-    const catalogResult = await env.DB.prepare(
+    const config = await loadUpstreamSourceConfig(env.DB, env, false);
+    if (!config) {
+      return {
+        rows: new Map(),
+        catalogReady: false,
+        catalog: EMPTY_MARKETPLACE_CATALOG,
+      };
+    }
+    const [catalogResult, unresolvedResult, stateRow] = await Promise.all([
+      env.DB.prepare(
       `SELECT endpoint.path, endpoint.platform, endpoint.http_method,
               endpoint.data_type, endpoint.tags_json, endpoint.surface,
               endpoint.operation_id,
@@ -3982,49 +4179,144 @@ async function loadMarketplaceCatalogOverlay(
               state.openapi_snapshot_hash
                 AS catalog_openapi_snapshot_hash,
               state.openapi_operation_count
-                AS catalog_openapi_operation_count
+                AS catalog_openapi_operation_count,
+              state.price_only_count AS catalog_price_only_count,
+              state.last_success_generation AS catalog_generation
        FROM endpoint_catalog AS endpoint
        JOIN catalog_sync_state AS state
          ON state.id = 1
         AND endpoint.sync_generation = state.last_success_generation
-       ORDER BY endpoint.path ASC
-       LIMIT 5000`,
-    ).all();
+        AND state.source_config_version = ?
+        AND state.source_config_hash = ?
+       ORDER BY endpoint.path ASC`,
+      )
+        .bind(config.version, config.hash)
+        .all(),
+      env.DB.prepare(
+        `SELECT unresolved.path, unresolved.platform,
+                unresolved.data_type, unresolved.surface,
+                unresolved.summary,
+                unresolved.customer_price_usd_micros,
+                unresolved.price_verified, unresolved.rate_limit_rps,
+                unresolved.updated_at, unresolved.sync_generation
+         FROM catalog_unresolved_endpoints AS unresolved
+         JOIN catalog_sync_state AS state
+           ON state.id = 1
+          AND unresolved.sync_generation = state.last_success_generation
+          AND state.source_config_version = ?
+          AND state.source_config_hash = ?
+         ORDER BY unresolved.path ASC`,
+      )
+        .bind(config.version, config.hash)
+        .all(),
+      env.DB.prepare(
+        `SELECT last_success_generation, openapi_operation_count,
+                price_only_count, openapi_snapshot_hash,
+                price_snapshot_hash, synced_at
+         FROM catalog_sync_state
+         WHERE id = 1 AND source_config_version = ?
+           AND source_config_hash = ?`,
+      )
+        .bind(config.version, config.hash)
+        .first<{
+          last_success_generation: string;
+          openapi_operation_count: number;
+          price_only_count: number;
+          openapi_snapshot_hash: string;
+          price_snapshot_hash: string;
+          synced_at: string;
+        }>(),
+    ]);
     const catalogRows =
       resultRows<MarketplaceCatalogOverlay>(catalogResult);
-    const publicRows = catalogRows.filter(
-      (row) =>
-        row.platform.toLowerCase() !== "tikhub" &&
-        !/^\/v1\/tikhub(?:\/|$)/i.test(row.path),
+    const unresolvedRows =
+      resultRows<MarketplaceUnresolvedOverlay>(unresolvedResult);
+    const excluded = (path: string) =>
+      config.publicExcludedPrefixes.some((prefix) => {
+        const exact = prefix.replace(/\/$/, "");
+        return path === exact || path.startsWith(prefix);
+      });
+    const publicCatalogRows = catalogRows.filter(
+      (row) => !excluded(row.path),
     );
-    const rows = new Map(
-      publicRows.map((row) => [
-        `${row.http_method.toUpperCase()}:${row.path}`,
+    const publicUnresolvedRows = unresolvedRows.filter(
+      (row) => !excluded(row.path),
+    );
+    const rows = new Map<string, MarketplaceOverlayRow>();
+    for (const row of publicCatalogRows) {
+      const method = row.http_method.toUpperCase();
+      if (method !== "GET" && method !== "POST") {
+        throw new Error("unsupported catalog method");
+      }
+      const taxonomy = strictStoredCatalogTaxonomy(
         row,
-      ]),
-    );
+        500,
+        "marketplace_overlay_taxonomy_invalid",
+        "实时目录分类元数据无效，API 市场已停止发布。",
+      );
+      rows.set(`${method}:${row.path}`, {
+        path: row.path,
+        platform: row.platform,
+        httpMethod: method,
+        dataType: taxonomy.dataType,
+        tags: taxonomy.tags,
+        surface: taxonomy.surface,
+        operationId: taxonomy.operationId,
+        summary: row.summary,
+        description: row.description,
+        parameterSchema: safeStoredJson(row.parameter_schema_json),
+        customerPriceUsdMicros: Number(row.customer_price_usd_micros),
+        priceVerified: Number(row.price_verified) === 1,
+        enabled: Number(row.enabled) === 1,
+        readOnly: Number(row.read_only) === 1,
+        safetyClassification: row.safety_classification,
+        safetyPolicyVersion: Number(row.safety_policy_version),
+        rateLimitRps: null,
+        updatedAt: row.updated_at,
+        documentationStatus: "complete",
+      });
+    }
+    for (const row of publicUnresolvedRows) {
+      rows.set(`UNKNOWN:${row.path}`, {
+        path: row.path,
+        platform: row.platform,
+        httpMethod: null,
+        dataType: row.data_type,
+        tags: [],
+        surface: row.surface,
+        operationId: null,
+        summary: row.summary,
+        description: null,
+        parameterSchema: null,
+        customerPriceUsdMicros: Number(row.customer_price_usd_micros),
+        priceVerified: Number(row.price_verified) === 1,
+        enabled: false,
+        readOnly: false,
+        safetyClassification: "ambiguous",
+        safetyPolicyVersion: CATALOG_SAFETY_POLICY_VERSION,
+        rateLimitRps:
+          row.rate_limit_rps == null ? null : Number(row.rate_limit_rps),
+        updatedAt: row.updated_at,
+        documentationStatus: "pending",
+      });
+    }
     const stateOperationCount = Number(
-      catalogRows[0]?.catalog_openapi_operation_count ?? 0,
+      stateRow?.openapi_operation_count ?? 0,
     );
-    const stateSnapshotHash =
-      catalogRows[0]?.catalog_openapi_snapshot_hash ?? null;
+    const statePriceOnlyCount = Number(stateRow?.price_only_count ?? 0);
     const catalogStateMatches =
-      catalogRows.length > 0 &&
+      stateRow != null &&
+      stateOperationCount > 0 &&
       catalogRows.length === stateOperationCount &&
+      unresolvedRows.length === statePriceOnlyCount &&
       new Set(
         catalogRows.map(
           (row) => `${row.http_method.toUpperCase()}:${row.path}`,
         ),
       ).size === catalogRows.length &&
-      typeof stateSnapshotHash === "string" &&
-      /^[0-9a-f]{64}$/.test(stateSnapshotHash) &&
-      catalogRows.every(
-        (row) =>
-          Number(row.catalog_openapi_operation_count) ===
-            stateOperationCount &&
-          row.catalog_openapi_snapshot_hash === stateSnapshotHash,
-      );
-    const latestUpdate = publicRows
+      /^[0-9a-f]{64}$/.test(stateRow.openapi_snapshot_hash) &&
+      /^[0-9a-f]{64}$/.test(stateRow.price_snapshot_hash);
+    const latestUpdate = [...publicCatalogRows, ...publicUnresolvedRows]
       .map((row) => row.updated_at)
       .filter((value) => typeof value === "string" && value.length > 0)
       .sort()
@@ -4037,12 +4329,11 @@ async function loadMarketplaceCatalogOverlay(
         readiness.capabilities.proxyEnabled &&
         readiness.capabilities.reconciliationConfigured &&
         readiness.capabilities.reconciliationRecent,
-      source: {
-        provider: "Configured upstream",
-        openApiVersion: null,
-        snapshotHash: null,
-        generatedAt: latestUpdate ?? null,
-        operationCount: publicRows.length,
+      catalog: {
+        revision: stateRow?.last_success_generation ?? null,
+        updatedAt: latestUpdate ?? stateRow?.synced_at ?? null,
+        complete: catalogStateMatches,
+        serviceCount: rows.size,
       },
     };
   } catch (error) {
@@ -4052,7 +4343,7 @@ async function loadMarketplaceCatalogOverlay(
     return {
       rows: new Map(),
       catalogReady: false,
-      source: EMPTY_MARKETPLACE_SOURCE,
+      catalog: EMPTY_MARKETPLACE_CATALOG,
     };
   }
 }
@@ -4080,20 +4371,17 @@ function mergedMarketplaceEndpoints(
 ): Array<
   MarketplaceReferenceEndpoint & {
     availability: MarketplaceAvailability;
-    priceUsdMicros: number | null;
-    rateLimitRpm: number | null;
+    pricing: {
+      amountUsdMicros: number | null;
+      currency: "USD";
+      unit: "request";
+      verified: boolean;
+    };
+    rateLimitRps: number | null;
     updatedAt: string | null;
   }
 > {
   return [...overlay.rows.values()].map((row) => {
-    const method = row.http_method.toUpperCase();
-    if (method !== "GET" && method !== "POST") {
-      throw new PlatformError(
-        500,
-        "marketplace_catalog_invalid",
-        "运行时目录包含不支持的请求方法。",
-      );
-    }
     const path = normalizeCatalogPath(row.path);
     if (row.platform !== path.split("/")[2]) {
       throw new PlatformError(
@@ -4102,13 +4390,7 @@ function mergedMarketplaceEndpoints(
         "运行时目录的平台分类无效。",
       );
     }
-    const taxonomy = strictStoredCatalogTaxonomy(
-      row,
-      500,
-      "marketplace_overlay_taxonomy_invalid",
-      "实时目录分类元数据无效，API 市场已停止发布。",
-    );
-    const schema = safeStoredJson(row.parameter_schema_json);
+    const schema = row.parameterSchema;
     const parameters =
       isPlainRecord(schema) &&
       Array.isArray(schema.parameters) &&
@@ -4126,30 +4408,30 @@ function mergedMarketplaceEndpoints(
         : null;
     const endpoint: MarketplaceReferenceEndpoint = {
       path,
+      id: marketplaceServiceId(row.httpMethod, path),
       platform: row.platform,
-      dataType: taxonomy.dataType,
-      method,
-      surface: taxonomy.surface,
-      tags: [taxonomy.dataType, taxonomy.surface].sort(),
+      dataType: row.dataType,
+      method: row.httpMethod,
+      surface: row.surface,
+      categories: [row.dataType, row.surface].sort(),
       summary: marketplaceGeneratedSummary(path),
       description: marketplaceGeneratedDescription(
         row.platform,
-        taxonomy.dataType,
+        row.dataType,
       ),
-      operationId: null,
       parameters,
       requestBody,
-      response: null,
+      documentationStatus: row.documentationStatus,
     };
-    const key = `${endpoint.method}:${endpoint.path}`;
+    const key = `${endpoint.method ?? "UNKNOWN"}:${endpoint.path}`;
     let staticSafety = marketplaceReferenceSafetyCache.get(key);
-    if (!staticSafety) {
+    if (!staticSafety && endpoint.method !== null) {
       staticSafety = classifyCatalogSafety(
         endpoint.path,
         endpoint.method,
         {
           summary: endpoint.summary,
-          operationId: taxonomy.operationId,
+          operationId: row.operationId,
           parameters: endpoint.parameters,
           requestBody: endpoint.requestBody,
         },
@@ -4157,16 +4439,17 @@ function mergedMarketplaceEndpoints(
       marketplaceReferenceSafetyCache.set(key, staticSafety);
     }
     const restricted =
-      row.safety_classification === "prohibited" ||
-      staticSafety.classification === "prohibited";
+      row.safetyClassification === "prohibited" ||
+      staticSafety?.classification === "prohibited";
     const available =
       !restricted &&
+      endpoint.method !== null &&
       overlay.catalogReady &&
-      row.enabled === 1 &&
-      row.read_only === 1 &&
-      row.price_verified === 1 &&
-      row.safety_classification === "safe_data_read" &&
-      row.safety_policy_version === CATALOG_SAFETY_POLICY_VERSION;
+      row.enabled &&
+      row.readOnly &&
+      row.priceVerified &&
+      row.safetyClassification === "safe_data_read" &&
+      row.safetyPolicyVersion === CATALOG_SAFETY_POLICY_VERSION;
     return {
       ...endpoint,
       availability: available
@@ -4174,11 +4457,16 @@ function mergedMarketplaceEndpoints(
         : restricted
           ? ("restricted" as const)
           : ("pending" as const),
-      priceUsdMicros: available
-        ? Math.max(0, Number(row.customer_price_usd_micros))
-        : null,
-      rateLimitRpm: null,
-      updatedAt: row.updated_at ?? null,
+      pricing: {
+        amountUsdMicros: row.priceVerified
+          ? Math.max(0, row.customerPriceUsdMicros)
+          : null,
+        currency: "USD" as const,
+        unit: "request" as const,
+        verified: row.priceVerified,
+      },
+      rateLimitRps: row.rateLimitRps,
+      updatedAt: row.updatedAt ?? null,
     };
   });
 }
@@ -4228,7 +4516,7 @@ function marketplaceFilters(url: URL) {
   };
   const q = single("q", 160);
   const platform = single("platform", 64)?.toLowerCase() ?? null;
-  const tag = single("tag", 160)?.toLowerCase() ?? null;
+  const category = single("category", 160)?.toLowerCase() ?? null;
   const dataType = single("dataType", 80)?.toLowerCase() ?? null;
   const methodRaw = single("method", 8)?.toUpperCase() ?? null;
   const surfaceRaw = single("surface", 16)?.toLowerCase() ?? null;
@@ -4282,7 +4570,7 @@ function marketplaceFilters(url: URL) {
   return {
     q: q?.normalize("NFKC").toLowerCase() ?? null,
     platform,
-    tag,
+    category,
     dataType,
     method: methodRaw as "GET" | "POST" | null,
     surface: surfaceRaw as MarketplaceSurface | null,
@@ -4297,6 +4585,7 @@ function marketplacePublicEndpoint(
   endpoint: ReturnType<typeof mergedMarketplaceEndpoints>[number],
 ) {
   return {
+    id: endpoint.id,
     path: endpoint.path,
     platform: endpoint.platform,
     dataType: endpoint.dataType,
@@ -4304,15 +4593,15 @@ function marketplacePublicEndpoint(
     surface: endpoint.surface,
     availability: endpoint.availability,
     summary: endpoint.summary,
-    priceUsdMicros: endpoint.priceUsdMicros,
-    rateLimitRpm: endpoint.rateLimitRpm,
-    updatedAt: endpoint.updatedAt,
+    pricing: endpoint.pricing,
+    rateLimitRps: endpoint.rateLimitRps,
+    documentationStatus: endpoint.documentationStatus,
   };
 }
 
 function marketplaceResponseShape(
   endpoints: ReturnType<typeof mergedMarketplaceEndpoints>,
-  source: MarketplaceReference["source"],
+  catalog: MarketplaceReference["catalog"],
 ) {
   const total = endpoints.length;
   const available = endpoints.filter(
@@ -4322,7 +4611,7 @@ function marketplaceResponseShape(
     (endpoint) => endpoint.availability === "restricted",
   ).length;
   return {
-    source,
+    catalog,
     stats: {
       total,
       available,
@@ -4331,7 +4620,7 @@ function marketplaceResponseShape(
       platforms: new Set(endpoints.map((endpoint) => endpoint.platform))
         .size,
       categories: new Set(
-        endpoints.flatMap((endpoint) => endpoint.tags),
+        endpoints.flatMap((endpoint) => endpoint.categories),
       ).size,
       dataTypes: new Set(endpoints.map((endpoint) => endpoint.dataType))
         .size,
@@ -4388,11 +4677,15 @@ function marketplaceResponseShape(
           utility: "工具 / Utility",
         },
       ),
-      tags: marketplaceFacet(
-        endpoints.flatMap((endpoint) => endpoint.tags),
+      categories: marketplaceFacet(
+        endpoints.flatMap((endpoint) => endpoint.categories),
       ),
       methods: marketplaceFacet(
-        endpoints.map((endpoint) => endpoint.method),
+        endpoints
+          .map((endpoint) => endpoint.method)
+          .filter(
+            (method): method is "GET" | "POST" => method !== null,
+          ),
       ),
       surfaces: marketplaceFacet(
         endpoints.map((endpoint) => endpoint.surface),
@@ -4424,7 +4717,7 @@ async function handleMarketplace(
   const filters = marketplaceFilters(url);
   const overlay = await marketplaceCatalogOverlay(env);
   const endpoints = mergedMarketplaceEndpoints(overlay);
-  const summary = marketplaceResponseShape(endpoints, overlay.source);
+  const summary = marketplaceResponseShape(endpoints, overlay.catalog);
   const filtered = endpoints.filter((endpoint) => {
     if (
       filters.platform &&
@@ -4439,9 +4732,9 @@ async function handleMarketplace(
       return false;
     }
     if (
-      filters.tag &&
-      !endpoint.tags.some(
-        (tag) => tag.toLowerCase() === filters.tag,
+      filters.category &&
+      !endpoint.categories.some(
+        (category) => category.toLowerCase() === filters.category,
       )
     ) {
       return false;
@@ -4461,7 +4754,7 @@ async function handleMarketplace(
         endpoint.dataType,
         endpoint.summary ?? "",
         endpoint.description ?? "",
-        ...endpoint.tags,
+        ...endpoint.categories,
       ]
         .join(" ")
         .normalize("NFKC")
@@ -4616,6 +4909,9 @@ function marketplaceCodeExamples(
   request: Request,
   endpoint: ReturnType<typeof mergedMarketplaceEndpoints>[number],
 ) {
+  if (endpoint.method === null) {
+    return { curl: "", javascript: "", python: "" };
+  }
   const origin = new URL(request.url).origin;
   const queryParameters = endpoint.parameters
     .filter(
@@ -4640,9 +4936,9 @@ function marketplaceCodeExamples(
     `  '${url}' \\`,
     "  --header 'Authorization: Bearer rb_live_YOUR_KEY' \\",
     "  --header 'Idempotency-Key: marketplace-example-001' \\",
-    ...(endpoint.priceUsdMicros !== null
+    ...(endpoint.pricing.amountUsdMicros !== null
       ? [
-          `  --header 'X-RelayBase-Max-Cost-Usd-Micros: ${endpoint.priceUsdMicros}' \\`,
+          `  --header 'X-RelayBase-Max-Cost-Usd-Micros: ${endpoint.pricing.amountUsdMicros}' \\`,
         ]
       : []),
     ...(hasBody
@@ -4658,8 +4954,8 @@ function marketplaceCodeExamples(
     Authorization: "Bearer rb_live_YOUR_KEY",
     "Idempotency-Key": "marketplace-example-001",
     ${
-      endpoint.priceUsdMicros !== null
-        ? `"X-RelayBase-Max-Cost-Usd-Micros": "${endpoint.priceUsdMicros}",`
+      endpoint.pricing.amountUsdMicros !== null
+        ? `"X-RelayBase-Max-Cost-Usd-Micros": "${endpoint.pricing.amountUsdMicros}",`
         : ""
     }
     Accept: "application/json",${
@@ -4685,8 +4981,8 @@ response = requests.${endpoint.method.toLowerCase()}(
         "Authorization": "Bearer rb_live_YOUR_KEY",
         "Idempotency-Key": "marketplace-example-001",
         ${
-          endpoint.priceUsdMicros !== null
-            ? `"X-RelayBase-Max-Cost-Usd-Micros": "${endpoint.priceUsdMicros}",`
+          endpoint.pricing.amountUsdMicros !== null
+            ? `"X-RelayBase-Max-Cost-Usd-Micros": "${endpoint.pricing.amountUsdMicros}",`
             : ""
         }
         "Accept": "application/json",
@@ -4714,7 +5010,7 @@ async function handleMarketplaceDetail(
   const url = new URL(request.url);
   if (
     url.searchParams.getAll("path").length !== 1 ||
-    url.searchParams.getAll("method").length !== 1
+    url.searchParams.getAll("method").length > 1
   ) {
     throw new PlatformError(
       400,
@@ -4723,8 +5019,9 @@ async function handleMarketplaceDetail(
     );
   }
   const path = normalizeCatalogPath(url.searchParams.get("path") ?? "");
-  const method = (url.searchParams.get("method") ?? "").toUpperCase();
-  if (method !== "GET" && method !== "POST") {
+  const rawMethod = url.searchParams.get("method");
+  const method = rawMethod?.toUpperCase() ?? null;
+  if (method !== null && method !== "GET" && method !== "POST") {
     throw new PlatformError(
       400,
       "invalid_marketplace_endpoint",
@@ -4734,7 +5031,10 @@ async function handleMarketplaceDetail(
   const overlay = await marketplaceCatalogOverlay(env);
   const endpoint = mergedMarketplaceEndpoints(overlay).find(
     (candidate) =>
-      candidate.path === path && candidate.method === method,
+      candidate.path === path &&
+      (method === null
+        ? candidate.method === null
+        : candidate.method === method),
   );
   if (!endpoint) {
     throw new PlatformError(
@@ -4745,15 +5045,28 @@ async function handleMarketplaceDetail(
   }
   return jsonResponse(
     {
-      source: overlay.source,
+      catalog: overlay.catalog,
       endpoint: {
         ...marketplacePublicEndpoint(endpoint),
-        tags: endpoint.tags,
+        categories: endpoint.categories,
         description: endpoint.description,
-        operationId: endpoint.operationId,
-        parameters: endpoint.parameters,
-        requestBody: endpoint.requestBody,
-        response: endpoint.response,
+        input: {
+          parameters:
+            endpoint.documentationStatus === "complete"
+              ? endpoint.parameters
+              : null,
+          requestBody:
+            endpoint.documentationStatus === "complete"
+              ? endpoint.requestBody
+              : null,
+        },
+        response: {
+          contentType: "application/json",
+          mode: "relaybase_envelope",
+          schema: null,
+          description:
+            "成功时返回 RelayBase 的 { success: true, data } JSON 包装；外部服务控制字段不会透传。",
+        },
       },
       examples: marketplaceCodeExamples(request, endpoint),
     },
@@ -4967,6 +5280,7 @@ async function handlePublicCatalog(
 ): Promise<Response> {
   const db = requireDb(env);
   const url = new URL(request.url);
+  const sourceConfig = await loadUpstreamSourceConfig(db, env, false);
   const filters = normalizeCatalogListFilters(url, {
     admin: false,
     defaultLimit: 200,
@@ -4974,6 +5288,27 @@ async function handlePublicCatalog(
     maxOffset: 5_000,
   });
   await assertStoredCatalogTaxonomyIntegrity(db);
+  if (!sourceConfig) {
+    const readiness = await operationalReadiness(env);
+    return jsonResponse(
+      {
+        mode: readiness.mode,
+        catalog: {
+          revision: "cat_pending",
+          updatedAt: null,
+          complete: false,
+        },
+        endpoints: [],
+        count: 0,
+        total: 0,
+        offset: filters.offset,
+        nextOffset: null,
+      },
+      200,
+      requestId,
+      { "cache-control": "public, max-age=30, s-maxage=60" },
+    );
+  }
   const clauses = [
     "endpoint_catalog.enabled = 1",
     "endpoint_catalog.read_only = 1",
@@ -4990,9 +5325,20 @@ async function handlePublicCatalog(
     `EXISTS (
        SELECT 1 FROM catalog_sync_state
        WHERE id = 1 AND ${CATALOG_COVERAGE_WHERE}
+         AND source_config_version = ?
+         AND source_config_hash = ?
      )`,
   ];
-  const bindings: unknown[] = [];
+  const bindings: unknown[] = [
+    sourceConfig.version,
+    sourceConfig.hash,
+  ];
+  for (const prefix of sourceConfig.publicExcludedPrefixes) {
+    clauses.push(
+      "endpoint_catalog.path != ? AND endpoint_catalog.path NOT LIKE ?",
+    );
+    bindings.push(prefix.replace(/\/$/, ""), `${prefix}%`);
+  }
   appendCatalogTaxonomyFilters(clauses, bindings, filters);
   const where = clauses.join(" AND ");
   const query = db
@@ -5027,19 +5373,42 @@ async function handlePublicCatalog(
   const endpoints = (rows.results ?? []).map((row) => {
     const taxonomy = strictStoredCatalogTaxonomy(row);
     return {
+      id: marketplaceServiceId(
+        row.http_method as "GET" | "POST",
+        row.path,
+      ),
       path: row.path,
       platform: row.platform,
       dataType: taxonomy.dataType,
-      tags: taxonomy.tags,
+      categories: [taxonomy.dataType, taxonomy.surface].sort(),
       surface: taxonomy.surface,
-      operationId: taxonomy.operationId,
       method: row.http_method,
-      summary: row.summary,
-      priceUsdMicros: row.customer_price_usd_micros,
+      summary: marketplaceGeneratedSummary(row.path),
+      pricing: {
+        amountUsdMicros: row.customer_price_usd_micros,
+        currency: "USD",
+        unit: "request",
+        verified: true,
+      },
       updatedAt: row.updated_at,
     };
   });
   const countRow = await countQuery.first<{ count: number }>();
+  const catalogState = await db
+    .prepare(
+      `SELECT last_success_generation, synced_at,
+              CASE WHEN ${CATALOG_COVERAGE_WHERE}
+                   THEN 1 ELSE 0 END AS complete
+       FROM catalog_sync_state
+       WHERE id = 1 AND source_config_version = ?
+         AND source_config_hash = ?`,
+    )
+    .bind(sourceConfig.version, sourceConfig.hash)
+    .first<{
+      last_success_generation: string;
+      synced_at: string;
+      complete: number;
+    }>();
   const total = Number(countRow?.count ?? 0);
   const nextOffset =
     filters.offset + endpoints.length < total &&
@@ -5051,6 +5420,18 @@ async function handlePublicCatalog(
   return jsonResponse(
     {
       mode: readiness.mode,
+      catalog: {
+        revision:
+          catalogState?.last_success_generation ?? "cat_pending",
+        updatedAt:
+          endpoints
+            .map((endpoint) => endpoint.updatedAt)
+            .sort()
+            .at(-1) ??
+          catalogState?.synced_at ??
+          null,
+        complete: Number(catalogState?.complete ?? 0) === 1,
+      },
       endpoints,
       count: endpoints.length,
       total,
@@ -5277,6 +5658,296 @@ async function handleCatalogList(
                 : null,
           }
         : null,
+    },
+    200,
+    requestId,
+  );
+}
+
+async function handlePendingCatalogList(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  requireAdminSecret(request, env, "catalog");
+  const db = requireDb(env);
+  const url = new URL(request.url);
+  const single = (name: string, maxLength: number): string => {
+    if (url.searchParams.getAll(name).length > 1) {
+      throw new PlatformError(
+        400,
+        "invalid_catalog_filter",
+        `待补全文档目录筛选参数 ${name} 重复。`,
+      );
+    }
+    const value = url.searchParams.get(name)?.trim() ?? "";
+    if (
+      value.length > maxLength ||
+      /[\u0000-\u001F\u007F]/.test(value)
+    ) {
+      throw new PlatformError(
+        400,
+        "invalid_catalog_filter",
+        `待补全文档目录筛选参数 ${name} 无效。`,
+      );
+    }
+    return value;
+  };
+  const limit = Number(single("limit", 4) || "200");
+  const offset = Number(single("offset", 6) || "0");
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 500 ||
+    !Number.isSafeInteger(offset) ||
+    offset < 0 ||
+    offset > 100_000
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_pagination",
+      "待补全文档目录分页参数无效。",
+    );
+  }
+  const q = single("q", 160).normalize("NFKC").toLowerCase();
+  const platform = single("platform", 80).toLowerCase();
+  const dataType = single("dataType", 80).toLowerCase();
+  const surface = single("surface", 16).toLowerCase();
+  if (dataType && !PROVIDER_DATA_TYPES.includes(dataType)) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_filter",
+      "待补全文档目录数据类型筛选无效。",
+    );
+  }
+  if (surface && !PROVIDER_SURFACES.includes(surface)) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_filter",
+      "待补全文档目录入口筛选无效。",
+    );
+  }
+  const clauses = [
+    `sync_generation = (
+       SELECT last_success_generation
+       FROM catalog_sync_state
+       WHERE id = 1
+     )`,
+  ];
+  const bindings: unknown[] = [];
+  if (platform) {
+    clauses.push("platform = ?");
+    bindings.push(platform);
+  }
+  if (dataType) {
+    clauses.push("data_type = ?");
+    bindings.push(dataType);
+  }
+  if (surface) {
+    clauses.push("surface = ?");
+    bindings.push(surface);
+  }
+  if (q) {
+    const escaped = q
+      .replaceAll("\\", "\\\\")
+      .replaceAll("%", "\\%")
+      .replaceAll("_", "\\_");
+    clauses.push(
+      `(lower(path) LIKE ? ESCAPE '\\' OR
+        lower(platform) LIKE ? ESCAPE '\\' OR
+        lower(data_type) LIKE ? ESCAPE '\\' OR
+        lower(COALESCE(summary, '')) LIKE ? ESCAPE '\\')`,
+    );
+    for (let index = 0; index < 4; index += 1) {
+      bindings.push(`%${escaped}%`);
+    }
+  }
+  const where = clauses.join(" AND ");
+  const [rowsResult, countResult] = await db.batch([
+    db
+      .prepare(
+        `SELECT path, platform, data_type, surface, summary,
+                upstream_price_usd_micros,
+                customer_price_usd_micros, price_verified,
+                rate_limit_raw, rate_limit_rps, updated_at
+         FROM catalog_unresolved_endpoints
+         WHERE ${where}
+         ORDER BY platform ASC, path ASC
+         LIMIT ? OFFSET ?`,
+      )
+      .bind(...bindings, limit, offset),
+    db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM catalog_unresolved_endpoints
+         WHERE ${where}`,
+      )
+      .bind(...bindings),
+  ]);
+  const endpoints = resultRows<{
+    path: string;
+    platform: string;
+    data_type: CatalogDataType;
+    surface: MarketplaceSurface;
+    summary: string | null;
+    upstream_price_usd_micros: number;
+    customer_price_usd_micros: number;
+    price_verified: number;
+    rate_limit_raw: string | null;
+    rate_limit_rps: number | null;
+    updated_at: string;
+  }>(rowsResult).map((row) => ({
+    id: marketplaceServiceId(null, row.path),
+    path: row.path,
+    platform: row.platform,
+    dataType: row.data_type,
+    surface: row.surface,
+    method: null,
+    summary: marketplaceGeneratedSummary(row.path),
+    upstreamPriceUsdMicros: Number(row.upstream_price_usd_micros),
+    customerPriceUsdMicros: Number(row.customer_price_usd_micros),
+    priceVerified: Number(row.price_verified) === 1,
+    rateLimit: row.rate_limit_raw,
+    rateLimitRps:
+      row.rate_limit_rps == null ? null : Number(row.rate_limit_rps),
+    documentationStatus: "pending" as const,
+    callable: false,
+    updatedAt: row.updated_at,
+  }));
+  const total = Number(
+    firstResult<{ count: number }>(countResult)?.count ?? 0,
+  );
+  return jsonResponse(
+    {
+      endpoints,
+      count: endpoints.length,
+      total,
+      offset,
+      nextOffset:
+        offset + endpoints.length < total
+          ? offset + endpoints.length
+          : null,
+    },
+    200,
+    requestId,
+  );
+}
+
+async function handlePendingCatalogPriceUpdate(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  assertSameOrigin(request, env);
+  requireAdminSecret(request, env, "catalog");
+  const body = await readJsonBody<{
+    path?: unknown;
+    customerPriceUsdMicros?: unknown;
+    expectedUpdatedAt?: unknown;
+  }>(request, MAX_DASHBOARD_BODY_BYTES);
+  if (
+    typeof body.path !== "string" ||
+    typeof body.expectedUpdatedAt !== "string" ||
+    !Number.isFinite(Date.parse(body.expectedUpdatedAt))
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_pending_catalog_update",
+      "待补全文档目录更新参数无效。",
+    );
+  }
+  const path = normalizeCatalogPath(body.path);
+  const customerPriceUsdMicros =
+    typeof body.customerPriceUsdMicros === "number"
+      ? body.customerPriceUsdMicros
+      : Number.NaN;
+  if (
+    !Number.isSafeInteger(customerPriceUsdMicros) ||
+    customerPriceUsdMicros < 0 ||
+    customerPriceUsdMicros > 100_000_000
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_endpoint_price",
+      "客户价格必须是 0–100 美元的微单位整数。",
+    );
+  }
+  const db = requireDb(env);
+  const updatedAt = new Date().toISOString();
+  const audit = await prepareAdminAuditStatement(db, request, {
+    action: "catalog.pending_repriced",
+    targetType: "catalog_pending_endpoint",
+    targetId: path,
+    details: { customerPriceUsdMicros, updatedAt },
+    pendingCatalogPriceUpdate: {
+      path,
+      customerPriceUsdMicros,
+      updatedAt,
+    },
+  });
+  const results = await db.batch([
+    db.prepare(
+      `UPDATE catalog_unresolved_endpoints
+       SET customer_price_usd_micros = ?, updated_at = ?
+       WHERE path = ? AND updated_at = ?
+         AND upstream_price_usd_micros <= ?
+         AND sync_generation = (
+           SELECT last_success_generation
+           FROM catalog_sync_state
+           WHERE id = 1
+         )`,
+    ).bind(
+      customerPriceUsdMicros,
+      updatedAt,
+      path,
+      body.expectedUpdatedAt,
+      customerPriceUsdMicros,
+    ),
+    audit,
+  ]);
+  if (
+    Number(results[0]?.meta?.changes ?? 0) !== 1 ||
+    Number(results[1]?.meta?.changes ?? 0) !== 1
+  ) {
+    const current = await db
+      .prepare(
+        `SELECT upstream_price_usd_micros
+         FROM catalog_unresolved_endpoints
+         WHERE path = ?`,
+      )
+      .bind(path)
+      .first<{ upstream_price_usd_micros: number }>();
+    if (!current) {
+      throw new PlatformError(
+        404,
+        "pending_endpoint_not_found",
+        "未找到这个待补全文档服务。",
+      );
+    }
+    if (
+      customerPriceUsdMicros <
+      Number(current.upstream_price_usd_micros)
+    ) {
+      throw new PlatformError(
+        400,
+        "price_below_upstream",
+        "客户价格不能低于当前上游成本。",
+      );
+    }
+    throw new PlatformError(
+      409,
+      "pending_endpoint_update_conflict",
+      "待补全文档服务已发生变化，请刷新后重试。",
+    );
+  }
+  return jsonResponse(
+    {
+      ok: true,
+      path,
+      customerPriceUsdMicros,
+      updatedAt,
+      callable: false,
+      documentationStatus: "pending",
     },
     200,
     requestId,
@@ -6837,6 +7508,11 @@ async function handleAdminOverview(
   requireAdminSecret(request, env, "platform");
   const db = requireDb(env);
   const readiness = await operationalReadiness(env);
+  const upstreamConfig = await loadUpstreamSourceConfig(
+    db,
+    env,
+    false,
+  );
   const upstreamSnapshot = await managedUpstreamProviderCredentialsSnapshot(db);
   const activeManagedCredential =
     upstreamSnapshot.credentials.find(
@@ -6994,9 +7670,9 @@ async function handleAdminOverview(
         encryptionConfigured: hasValidUpstreamProviderCredentialsEncryptionKey(
           env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY,
         ),
-        baseUrl: hasValidRuntimeConfiguration(env)
-          ? normalizeUpstreamBase(env.UPSTREAM_BASE_URL)
-          : null,
+        sourceConfigured: upstreamConfig !== null,
+        sourceEnabled: upstreamConfig?.enabled ?? false,
+        sourceVersion: upstreamConfig?.version ?? null,
       },
       generatedAt: new Date().toISOString(),
     },
@@ -8098,6 +8774,245 @@ async function handleAdminAuditList(
   );
 }
 
+async function handleUpstreamConfigGet(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  requireAdminSecret(request, env, "platform");
+  const config = await loadUpstreamSourceConfig(requireDb(env), env, false);
+  return jsonResponse(
+    {
+      configured: config !== null,
+      config: config
+        ? {
+            enabled: config.enabled,
+            version: config.version,
+            sourceOrigin: config.origin,
+            apiPathPrefix: config.apiPathPrefix,
+            openApiPath: config.openApiPath,
+            catalogPath: config.catalogPath,
+            credentialPath: config.credentialPath,
+            catalogAuthMode: config.catalogAuthMode,
+            publicExcludedPrefixes: config.publicExcludedPrefixes,
+            updatedAt: config.updatedAt,
+          }
+        : null,
+      originAllowlistConfigured:
+        parseUpstreamAllowedOrigins(env.UPSTREAM_ALLOWED_ORIGINS).size > 0,
+    },
+    200,
+    requestId,
+  );
+}
+
+async function handleUpstreamConfigPut(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  assertSameOrigin(request, env);
+  requireAdminSecret(request, env, "platform");
+  const body = await readJsonBody<Record<string, unknown>>(
+    request,
+    MAX_DASHBOARD_BODY_BYTES,
+  );
+  const expectedVersion =
+    typeof body.expectedVersion === "number"
+      ? body.expectedVersion
+      : Number.NaN;
+  if (
+    !Number.isSafeInteger(expectedVersion) ||
+    expectedVersion < 0 ||
+    expectedVersion > 2_147_483_647
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_upstream_config_version",
+      "保存数据源配置时必须提供当前版本。",
+    );
+  }
+  const normalized = normalizeUpstreamSourceConfigInput(body, env);
+  const configHash = await sha256Hex(
+    JSON.stringify({
+      enabled: normalized.enabled,
+      sourceOrigin: normalized.origin,
+      apiPathPrefix: normalized.apiPathPrefix,
+      openApiPath: normalized.openApiPath,
+      catalogPath: normalized.catalogPath,
+      credentialPath: normalized.credentialPath,
+      catalogAuthMode: normalized.catalogAuthMode,
+      publicExcludedPrefixes: normalized.publicExcludedPrefixes,
+    }),
+  );
+  const db = requireDb(env);
+  const current = await db
+    .prepare(`SELECT version FROM upstream_source_config WHERE id = 1`)
+    .first<{ version: number }>();
+  const currentVersion = Number(current?.version ?? 0);
+  if (currentVersion !== expectedVersion) {
+    throw new PlatformError(
+      409,
+      "upstream_config_update_conflict",
+      "数据源配置已被其他操作更新，请刷新后重试。",
+    );
+  }
+  const nextVersion = expectedVersion + 1;
+  const mutationDigits = Array.from(
+    crypto.getRandomValues(new Uint8Array(6)),
+    (byte) => String(byte % 10),
+  ).join("");
+  const configUpdatedAt = new Date()
+    .toISOString()
+    .replace(/Z$/, `${mutationDigits}Z`);
+  const audit = await prepareAdminAuditStatement(db, request, {
+    action: "upstream_config.updated",
+    targetType: "upstream_config",
+    targetId: "primary",
+    upstreamConfigUpdate: {
+      version: nextVersion,
+      configHash,
+      updatedAt: configUpdatedAt,
+    },
+    details: {
+      enabled: normalized.enabled,
+      version: nextVersion,
+      publicExcludedPrefixCount:
+        normalized.publicExcludedPrefixes.length,
+    },
+  });
+  const results = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO upstream_source_config
+         (id, enabled, version, config_hash, source_origin,
+          api_path_prefix, openapi_path, catalog_path, credential_path,
+          catalog_auth_mode, public_excluded_prefixes_json, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           enabled = excluded.enabled,
+           version = excluded.version,
+           config_hash = excluded.config_hash,
+           source_origin = excluded.source_origin,
+           api_path_prefix = excluded.api_path_prefix,
+           openapi_path = excluded.openapi_path,
+           catalog_path = excluded.catalog_path,
+           credential_path = excluded.credential_path,
+           catalog_auth_mode = excluded.catalog_auth_mode,
+           public_excluded_prefixes_json =
+             excluded.public_excluded_prefixes_json,
+           updated_at = excluded.updated_at
+         WHERE upstream_source_config.version = ?`,
+      )
+      .bind(
+        normalized.enabled ? 1 : 0,
+        nextVersion,
+        configHash,
+        normalized.origin,
+        normalized.apiPathPrefix,
+        normalized.openApiPath,
+        normalized.catalogPath,
+        normalized.credentialPath,
+        normalized.catalogAuthMode,
+        JSON.stringify(normalized.publicExcludedPrefixes),
+        configUpdatedAt,
+        expectedVersion,
+      ),
+    db
+      .prepare(
+        `DELETE FROM catalog_sync_state
+         WHERE id = 1
+           AND EXISTS (
+             SELECT 1 FROM upstream_source_config
+             WHERE id = 1 AND version = ? AND config_hash = ?
+               AND updated_at = ?
+           )`,
+      )
+      .bind(nextVersion, configHash, configUpdatedAt),
+    db.prepare(
+      `UPDATE endpoint_catalog
+       SET enabled = 0, read_only = 0, reviewed_at = NULL,
+           sync_generation = NULL, revision = revision + 1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE EXISTS (
+         SELECT 1 FROM upstream_source_config
+         WHERE id = 1 AND version = ? AND config_hash = ?
+           AND updated_at = ?
+       )`,
+    ).bind(nextVersion, configHash, configUpdatedAt),
+    db
+      .prepare(
+        `DELETE FROM catalog_unresolved_endpoints
+         WHERE EXISTS (
+           SELECT 1 FROM upstream_source_config
+           WHERE id = 1 AND version = ? AND config_hash = ?
+             AND updated_at = ?
+         )`,
+      )
+      .bind(nextVersion, configHash, configUpdatedAt),
+    db.prepare(
+      `UPDATE upstream_credentials
+       SET verified_scopes_json = NULL, verified_config_hash = NULL,
+           verified_at = NULL, expires_at = NULL
+       WHERE revoked_at IS NULL
+         AND EXISTS (
+           SELECT 1 FROM upstream_source_config
+           WHERE id = 1 AND version = ? AND config_hash = ?
+             AND updated_at = ?
+         )`,
+    ).bind(nextVersion, configHash, configUpdatedAt),
+    db.prepare(
+      `UPDATE upstream_credential_state
+       SET active_credential_id = NULL, version = version + 1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE EXISTS (
+         SELECT 1 FROM upstream_source_config
+         WHERE id = 1 AND version = ? AND config_hash = ?
+           AND updated_at = ?
+       )`,
+    ).bind(nextVersion, configHash, configUpdatedAt),
+    audit,
+  ]);
+  if (
+    Number(results[0]?.meta?.changes ?? 0) !== 1 ||
+    Number(results[6]?.meta?.changes ?? 0) !== 1
+  ) {
+    throw new PlatformError(
+      409,
+      "upstream_config_update_conflict",
+      "数据源配置已发生变化，请刷新后重试。",
+    );
+  }
+  const saved = await loadUpstreamSourceConfig(db, env, false);
+  if (!saved) {
+    throw new PlatformError(
+      500,
+      "upstream_config_write_failed",
+      "数据源配置保存后无法读取。",
+    );
+  }
+  return jsonResponse(
+    {
+      config: {
+        enabled: saved.enabled,
+        version: saved.version,
+        sourceOrigin: saved.origin,
+        apiPathPrefix: saved.apiPathPrefix,
+        openApiPath: saved.openApiPath,
+        catalogPath: saved.catalogPath,
+        credentialPath: saved.credentialPath,
+        catalogAuthMode: saved.catalogAuthMode,
+        publicExcludedPrefixes: saved.publicExcludedPrefixes,
+        updatedAt: saved.updatedAt,
+      },
+      catalogInvalidated: true,
+      credentialsRequireVerification: true,
+    },
+    200,
+    requestId,
+  );
+}
+
 async function handleUpstreamCredentialsList(
   request: Request,
   env: PlatformEnv,
@@ -8187,6 +9102,9 @@ async function handleUpstreamCredentialCreate(
   }
 
   const db = requireDb(env);
+  const sourceConfig = body.activate
+    ? await loadUpstreamSourceConfig(db, env, true)
+    : null;
   if (body.activate) {
     const currentState = await upstreamCredentialState(db);
     if (currentState.version !== expectedVersion) {
@@ -8198,7 +9116,11 @@ async function handleUpstreamCredentialCreate(
     }
   }
   const verification = body.activate
-    ? await verifyUpstreamProviderApiKey(apiKey, env)
+    ? await verifyUpstreamProviderApiKey(
+        apiKey,
+        env,
+        sourceConfig as UpstreamSourceConfig,
+      )
     : null;
 
   const id = `upc_${randomBase64Url(18)}`;
@@ -8212,18 +9134,19 @@ async function handleUpstreamCredentialCreate(
   const createStatement = db.prepare(
       `INSERT INTO upstream_credentials
        (id, provider, label, encrypted_secret, secret_hash,
-        verified_scopes_json, expires_at, verified_at, created_at)
-       SELECT ?, 'tikhub', ?, ?, ?, ?, ?,
+        verified_scopes_json, verified_config_hash, expires_at,
+        verified_at, created_at)
+       SELECT ?, 'primary', ?, ?, ?, ?, ?, ?,
               CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
               CURRENT_TIMESTAMP
        WHERE NOT EXISTS (
          SELECT 1 FROM upstream_credentials
-         WHERE provider = 'tikhub' AND secret_hash = ?
+         WHERE provider = 'primary' AND secret_hash = ?
        )
        AND (
          SELECT COUNT(*)
          FROM upstream_credentials
-         WHERE provider = 'tikhub' AND revoked_at IS NULL
+         WHERE provider = 'primary' AND revoked_at IS NULL
        ) < 100`,
     )
     .bind(
@@ -8232,6 +9155,7 @@ async function handleUpstreamCredentialCreate(
       encryptedSecret,
       secretHash,
       verification ? JSON.stringify(verification.scopes) : null,
+      verification?.configHash ?? null,
       verification?.expiresAt ?? null,
       body.activate ? 1 : 0,
       secretHash,
@@ -8242,7 +9166,7 @@ async function handleUpstreamCredentialCreate(
     targetId: id,
     upstreamCredentialExists: { id, secretHash },
     details: {
-      provider: "tikhub",
+      provider: PRIMARY_UPSTREAM_PROVIDER,
       label,
       fingerprint,
       activateRequested: body.activate,
@@ -8257,7 +9181,7 @@ async function handleUpstreamCredentialCreate(
       .prepare(
         `SELECT 1 AS present
          FROM upstream_credentials
-         WHERE provider = 'tikhub' AND secret_hash = ?
+         WHERE provider = 'primary' AND secret_hash = ?
          LIMIT 1`,
       )
       .bind(secretHash)
@@ -8393,7 +9317,12 @@ async function handleUpstreamCredentialUpdate(
       encryptionKey,
       existing.id,
     );
-    const verification = await verifyUpstreamProviderApiKey(apiKey, env);
+    const sourceConfig = await loadUpstreamSourceConfig(db, env, true);
+    const verification = await verifyUpstreamProviderApiKey(
+      apiKey,
+      env,
+      sourceConfig,
+    );
     await activateManagedUpstreamProviderCredential(
       db,
       request,
@@ -8403,13 +9332,16 @@ async function handleUpstreamCredentialUpdate(
     );
   } else {
     const revokedAt = new Date().toISOString();
+    const revokedSecretHash = await sha256Hex(
+      `revoked:${id}:${revokedAt}:${randomBase64Url(18)}`,
+    );
     const revokeAudit = await prepareAdminAuditStatement(db, request, {
       action: "upstream_credential.revoked",
       targetType: "upstream_credential",
       targetId: id,
       upstreamCredentialRevocation: { id, revokedAt },
       details: {
-        provider: "tikhub",
+        provider: PRIMARY_UPSTREAM_PROVIDER,
         label: existing.label,
         fingerprint: existing.secret_hash.slice(0, 16),
       },
@@ -8421,7 +9353,7 @@ async function handleUpstreamCredentialUpdate(
             `UPDATE upstream_credential_state
              SET active_credential_id = NULL, version = version + 1,
                  updated_at = CURRENT_TIMESTAMP
-             WHERE provider = 'tikhub' AND active_credential_id = ?
+             WHERE provider = 'primary' AND active_credential_id = ?
                AND version = ?`,
           )
           .bind(id, expectedVersion),
@@ -8429,22 +9361,28 @@ async function handleUpstreamCredentialUpdate(
           .prepare(
             `UPDATE upstream_credentials
              SET revoked_at = ?,
-                 encrypted_secret = 'revoked'
-             WHERE id = ? AND provider = 'tikhub' AND revoked_at IS NULL
+                 encrypted_secret = 'revoked',
+                 secret_hash = ?
+             WHERE id = ? AND provider = 'primary' AND revoked_at IS NULL
                AND EXISTS (
                  SELECT 1 FROM upstream_credential_state
-                 WHERE provider = 'tikhub' AND managed_enabled = 1
+                 WHERE provider = 'primary' AND managed_enabled = 1
                    AND active_credential_id IS NULL AND version = ?
                )`,
           )
-          .bind(revokedAt, id, expectedVersion + 1),
+          .bind(
+            revokedAt,
+            revokedSecretHash,
+            id,
+            expectedVersion + 1,
+          ),
         db
           .prepare(
             `DELETE FROM catalog_sync_state
              WHERE id = 1
                AND EXISTS (
                  SELECT 1 FROM upstream_credential_state
-                 WHERE provider = 'tikhub' AND managed_enabled = 1
+                 WHERE provider = 'primary' AND managed_enabled = 1
                    AND active_credential_id IS NULL AND version = ?
                )`,
           )
@@ -8468,18 +9406,25 @@ async function handleUpstreamCredentialUpdate(
           .prepare(
           `UPDATE upstream_credentials
            SET revoked_at = ?,
-               encrypted_secret = 'revoked'
-           WHERE id = ? AND provider = 'tikhub' AND revoked_at IS NULL
+               encrypted_secret = 'revoked',
+               secret_hash = ?
+           WHERE id = ? AND provider = 'primary' AND revoked_at IS NULL
              AND EXISTS (
                SELECT 1 FROM upstream_credential_state
-               WHERE provider = 'tikhub' AND version = ?
+               WHERE provider = 'primary' AND version = ?
                  AND (
                    active_credential_id IS NULL OR
                    active_credential_id != ?
                  )
              )`,
           )
-          .bind(revokedAt, id, expectedVersion, id),
+          .bind(
+            revokedAt,
+            revokedSecretHash,
+            id,
+            expectedVersion,
+            id,
+          ),
         revokeAudit,
       ]);
       if (
@@ -8540,36 +9485,49 @@ async function handleCatalogSync(
   }
 
   try {
-    const credential = await resolveUpstreamProviderCredential(env, db);
-    if (!credential) {
+    const sourceConfig = await loadUpstreamSourceConfig(db, env, true);
+    const credential = await resolveUpstreamProviderCredential(
+      env,
+      db,
+      sourceConfig,
+    );
+    if (sourceConfig.catalogAuthMode === "required" && !credential) {
       throw new PlatformError(
         503,
         "upstream_not_configured",
-        "UpstreamProvider 服务端密钥尚未配置。",
+        "数据源目录要求认证，请先配置并验证服务端密钥。",
+      );
+    }
+    const credentialState = await upstreamCredentialState(db);
+    const credentialSource = credential?.source ?? null;
+    const credentialId = credential?.id ?? null;
+    const credentialFingerprint = credential?.fingerprint ?? null;
+    const credentialScopes = credential?.scopes ?? null;
+    const catalogHeaders = new Headers({ accept: "application/json" });
+    if (credential && sourceConfig.catalogAuthMode !== "none") {
+      catalogHeaders.set(
+        "authorization",
+        `Bearer ${credential.secret}`,
       );
     }
 
-    const upstreamBase = normalizeUpstreamBase(env.UPSTREAM_BASE_URL);
     let response: Response;
     try {
-      response = await fetch(
-        `${upstreamBase}/tikhub/user/get_all_endpoints_info`,
-        {
-          headers: {
-            authorization: `Bearer ${credential.secret}`,
-            accept: "application/json",
-          },
-          redirect: "error",
-          signal: AbortSignal.timeout(
-            clampInteger(
-              env.UPSTREAM_TIMEOUT_MS,
-              45_000,
-              30_000,
-              60_000,
-            ),
+      response = await fetch(upstreamConfigUrl(
+        sourceConfig,
+        sourceConfig.catalogPath,
+      ), {
+        headers: catalogHeaders,
+        redirect: "error",
+        signal: AbortSignal.timeout(
+          clampInteger(
+            env.UPSTREAM_TIMEOUT_MS,
+            45_000,
+            30_000,
+            60_000,
           ),
-        },
-      );
+        ),
+      });
     } catch {
       throw new PlatformError(
         502,
@@ -8593,21 +9551,21 @@ async function handleCatalogSync(
     const payload = priceSnapshot.payload;
     let openApiResponse: Response;
     try {
-      openApiResponse = await fetch(
-        `${new URL(upstreamBase).origin}/openapi.json`,
-        {
-          headers: { accept: "application/json" },
-          redirect: "error",
-          signal: AbortSignal.timeout(
-            clampInteger(
-              env.UPSTREAM_TIMEOUT_MS,
-              45_000,
-              30_000,
-              60_000,
-            ),
+      openApiResponse = await fetch(upstreamConfigUrl(
+        sourceConfig,
+        sourceConfig.openApiPath,
+      ), {
+        headers: catalogHeaders,
+        redirect: "error",
+        signal: AbortSignal.timeout(
+          clampInteger(
+            env.UPSTREAM_TIMEOUT_MS,
+            45_000,
+            30_000,
+            60_000,
           ),
-        },
-      );
+        ),
+      });
     } catch {
       throw new PlatformError(
         502,
@@ -8628,18 +9586,30 @@ async function handleCatalogSync(
       "catalog_schema_sync_failed",
     );
     const openApiPayload = openApiSnapshot.payload;
-    const priceCatalog = extractCatalogPrices(payload);
+    const priceCatalog = extractCatalogPrices(
+      payload,
+      sourceConfig.apiPathPrefix,
+    );
     const prices = priceCatalog.entries;
-    const openApi = extractOpenApiCatalog(openApiPayload);
+    const openApi = extractOpenApiCatalog(
+      openApiPayload,
+      sourceConfig.apiPathPrefix,
+    );
     const entries = mergeCatalogEntries(
       prices,
       openApi,
-      credential.scopes,
+      credentialScopes,
+      sourceConfig.apiPathPrefix,
     );
     const coverageBreakdown = catalogCoverageBreakdown(
       prices,
       openApi,
-      credential.scopes,
+      credentialScopes,
+      sourceConfig.apiPathPrefix,
+    );
+    const unresolvedEntries = unresolvedCatalogEntries(
+      prices,
+      openApi,
     );
     const pricedEntries = entries.filter(
       (entry) => entry.priceVerified,
@@ -8656,7 +9626,8 @@ async function handleCatalogSync(
     if (
       coverageBreakdown.openApiPriceMapped -
         coverageBreakdown.scopeExcluded !==
-      pricedEntries
+        pricedEntries ||
+      unresolvedEntries.length !== coverageBreakdown.priceOnly
     ) {
       throw new PlatformError(
         502,
@@ -8684,6 +9655,13 @@ async function handleCatalogSync(
         502,
         "catalog_sync_failed",
         "上游端点目录超过安全处理上限，请人工检查响应。",
+      );
+    }
+    if (unresolvedEntries.length > 100_000) {
+      throw new PlatformError(
+        502,
+        "catalog_sync_failed",
+        "数据源待补全文档目录超过安全处理上限，请人工检查响应。",
       );
     }
 
@@ -8724,7 +9702,17 @@ async function handleCatalogSync(
                   SELECT openapi_snapshot_hash
                   FROM catalog_sync_state
                   WHERE id = 1
-                ) AS previous_openapi_snapshot_hash
+                ) AS previous_openapi_snapshot_hash,
+                (
+                  SELECT source_config_version
+                  FROM catalog_sync_state
+                  WHERE id = 1
+                ) AS previous_source_config_version,
+                (
+                  SELECT source_config_hash
+                  FROM catalog_sync_state
+                  WHERE id = 1
+                ) AS previous_source_config_hash
          FROM endpoint_catalog
          WHERE sync_generation = (
            SELECT last_success_generation
@@ -8741,6 +9729,8 @@ async function handleCatalogSync(
         previous_credential_fingerprint: string | null;
         previous_credential_state_version: number | null;
         previous_openapi_snapshot_hash: string | null;
+        previous_source_config_version: number | null;
+        previous_source_config_hash: string | null;
       }>();
     const knownCount = Number(currentCount?.count ?? 0);
     if (
@@ -8761,12 +9751,15 @@ async function handleCatalogSync(
       );
     }
     const comparableCredential =
-      currentCount?.previous_credential_source === credential.source &&
-      currentCount.previous_credential_id === credential.id &&
+      currentCount?.previous_credential_source === credentialSource &&
+      currentCount.previous_credential_id === credentialId &&
       currentCount.previous_credential_fingerprint ===
-        credential.fingerprint &&
+        credentialFingerprint &&
       Number(currentCount.previous_credential_state_version) ===
-        credential.stateVersion;
+        credentialState.version &&
+      Number(currentCount.previous_source_config_version) ===
+        sourceConfig.version &&
+      currentCount.previous_source_config_hash === sourceConfig.hash;
     const previousMatchedCount = Number(
       currentCount?.expected_matched_count ?? 0,
     );
@@ -8792,12 +9785,17 @@ async function handleCatalogSync(
       50_000,
     );
     let synced = 0;
-    await db
-      .prepare(
+    let unresolvedSynced = 0;
+    await db.batch([
+      db.prepare(
         `DELETE FROM catalog_sync_staging
          WHERE datetime(created_at) < datetime('now', '-1 day')`,
-      )
-      .run();
+      ),
+      db.prepare(
+        `DELETE FROM catalog_unresolved_staging
+         WHERE datetime(created_at) < datetime('now', '-1 day')`,
+      ),
+    ]);
     for (let offset = 0; offset < entries.length; offset += 50) {
       const renewal = await db
         .prepare(
@@ -8862,6 +9860,78 @@ async function handleCatalogSync(
       await db.batch(statements);
       synced += statements.length;
     }
+    for (
+      let offset = 0;
+      offset < unresolvedEntries.length;
+      offset += 50
+    ) {
+      const renewal = await db
+        .prepare(
+          `UPDATE catalog_sync_locks
+           SET locked_at = CURRENT_TIMESTAMP
+           WHERE id = 1 AND generation = ?`,
+        )
+        .bind(syncGeneration)
+        .run();
+      if (Number(renewal.meta?.changes ?? 0) !== 1) {
+        throw new PlatformError(
+          409,
+          "catalog_sync_lease_lost",
+          "目录同步租约已失效，本次快照不会发布。",
+        );
+      }
+      const statements = unresolvedEntries
+        .slice(offset, offset + 50)
+        .map((entry, batchIndex) => {
+          const customerPrice = Math.max(
+            entry.upstreamPriceUsdMicros,
+            Math.ceil(
+              (entry.upstreamPriceUsdMicros *
+                (10_000 + markupBps)) /
+                10_000,
+            ),
+          );
+          return db
+            .prepare(
+              `INSERT INTO catalog_unresolved_staging
+               (id, sync_generation, path, platform, data_type, surface,
+                summary, upstream_price_usd_micros,
+                customer_price_usd_micros, price_verified,
+                rate_limit_raw, rate_limit_rps, free_credit,
+                volume_discount, source_type, source_owner,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?,
+                       CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            )
+            .bind(
+              `${syncGeneration}:pending:${offset + batchIndex}`,
+              syncGeneration,
+              entry.path,
+              entry.platform,
+              entry.dataType,
+              entry.surface,
+              entry.summary,
+              entry.upstreamPriceUsdMicros,
+              customerPrice,
+              entry.rateLimitRaw,
+              entry.rateLimitRps,
+              entry.freeCredit == null
+                ? null
+                : entry.freeCredit
+                  ? 1
+                  : 0,
+              entry.volumeDiscount == null
+                ? null
+                : entry.volumeDiscount
+                  ? 1
+                  : 0,
+              entry.sourceType,
+              entry.sourceOwner,
+            );
+        });
+      await db.batch(statements);
+      unresolvedSynced += statements.length;
+    }
     const staged = await db
       .prepare(
         `SELECT COUNT(*) AS count,
@@ -8925,23 +9995,68 @@ async function handleCatalogSync(
         "目录暂存快照或数据类型元数据不完整，本次不会发布。",
       );
     }
-
-    const publishCredential = await resolveUpstreamProviderCredential(env, db);
+    const unresolvedStaged = await db
+      .prepare(
+        `SELECT COUNT(*) AS count,
+                COALESCE(SUM(
+                  CASE
+                    WHEN data_type IN (
+                      'account', 'analytics_trends', 'comments',
+                      'commerce_marketing', 'content', 'email', 'live',
+                      'media_download', 'profile_creator',
+                      'search_discovery', 'social_graph', 'system',
+                      'taxonomy', 'utility', 'other'
+                    )
+                      AND surface IN ('app', 'web', 'app_web', 'other')
+                      AND price_verified = 1
+                      AND upstream_price_usd_micros >= 0
+                      AND customer_price_usd_micros >=
+                          upstream_price_usd_micros
+                    THEN 1 ELSE 0
+                  END
+                ), 0) AS metadata_complete
+         FROM catalog_unresolved_staging
+         WHERE sync_generation = ?`,
+      )
+      .bind(syncGeneration)
+      .first<{ count: number; metadata_complete: number }>();
     if (
-      !publishCredential ||
-      publishCredential.id !== credential.id ||
-      publishCredential.source !== credential.source ||
-      publishCredential.fingerprint !== credential.fingerprint ||
-      publishCredential.stateVersion !== credential.stateVersion
+      Number(unresolvedStaged?.count ?? 0) !==
+        unresolvedEntries.length ||
+      Number(unresolvedStaged?.metadata_complete ?? 0) !==
+        unresolvedEntries.length
     ) {
       throw new PlatformError(
         409,
-        "catalog_sync_credential_changed",
-        "UpstreamProvider 活动凭据在同步期间发生变化，本次快照不会发布。",
+        "catalog_snapshot_incomplete",
+        "待补全文档目录暂存快照不完整，本次不会发布。",
+      );
+    }
+
+    const publishConfig = await loadUpstreamSourceConfig(db, env, true);
+    const publishCredentialState = await upstreamCredentialState(db);
+    const publishCredential = await resolveUpstreamProviderCredential(
+      env,
+      db,
+      publishConfig,
+    );
+    if (
+      publishConfig.version !== sourceConfig.version ||
+      publishConfig.hash !== sourceConfig.hash ||
+      publishCredentialState.version !== credentialState.version ||
+      (publishCredential?.id ?? null) !== credentialId ||
+      (publishCredential?.source ?? null) !== credentialSource ||
+      (publishCredential?.fingerprint ?? null) !==
+        credentialFingerprint
+    ) {
+      throw new PlatformError(
+        409,
+        "catalog_sync_source_changed",
+        "数据源配置或活动凭据在同步期间发生变化，本次快照不会发布。",
       );
     }
     const managedCredentialFlag =
-      credential.source === "managed" ? 1 : 0;
+      credentialState.managedEnabled ? 1 : 0;
     const syncAudit = await prepareAdminAuditStatement(db, request, {
       action: "catalog.synced",
       targetType: "catalog_generation",
@@ -8949,6 +10064,8 @@ async function handleCatalogSync(
       catalogSyncGeneration: syncGeneration,
       details: {
         synced,
+        pendingDocumentation: unresolvedSynced,
+        sourceConfigVersion: sourceConfig.version,
         openApiVersion,
         openApiOperations: openApi.size,
         rawPriceRows: priceCatalog.rawRecordCount,
@@ -8992,8 +10109,13 @@ async function handleCatalogSync(
                WHERE l.id = 1 AND l.generation = ?
              )
              AND EXISTS (
+               SELECT 1 FROM upstream_source_config c
+               WHERE c.id = 1 AND c.enabled = 1
+                 AND c.version = ? AND c.config_hash = ?
+             )
+             AND EXISTS (
                SELECT 1 FROM upstream_credential_state u
-               WHERE u.provider = 'tikhub' AND u.version = ?
+               WHERE u.provider = 'primary' AND u.version = ?
                  AND u.managed_enabled = ?
                  AND u.active_credential_id IS ?
              )
@@ -9072,9 +10194,11 @@ async function handleCatalogSync(
         .bind(
           syncGeneration,
           syncGeneration,
-          credential.stateVersion,
+          sourceConfig.version,
+          sourceConfig.hash,
+          credentialState.version,
           managedCredentialFlag,
-          credential.id,
+          credentialId,
         ),
       db
         .prepare(
@@ -9093,8 +10217,13 @@ async function handleCatalogSync(
                WHERE l.id = 1 AND l.generation = ?
              )
              AND EXISTS (
+               SELECT 1 FROM upstream_source_config c
+               WHERE c.id = 1 AND c.enabled = 1
+                 AND c.version = ? AND c.config_hash = ?
+             )
+             AND EXISTS (
                SELECT 1 FROM upstream_credential_state u
-               WHERE u.provider = 'tikhub' AND u.version = ?
+               WHERE u.provider = 'primary' AND u.version = ?
                  AND u.managed_enabled = ?
                  AND u.active_credential_id IS ?
              )`,
@@ -9102,16 +10231,118 @@ async function handleCatalogSync(
         .bind(
           syncGeneration,
           syncGeneration,
-          credential.stateVersion,
+          sourceConfig.version,
+          sourceConfig.hash,
+          credentialState.version,
           managedCredentialFlag,
-          credential.id,
+          credentialId,
+        ),
+      db
+        .prepare(
+          `INSERT INTO catalog_unresolved_endpoints
+           (path, platform, data_type, surface, summary,
+            upstream_price_usd_micros, customer_price_usd_micros,
+            price_verified, rate_limit_raw, rate_limit_rps,
+            free_credit, volume_discount, source_type, source_owner,
+            sync_generation, created_at, updated_at)
+           SELECT s.path, s.platform, s.data_type, s.surface, s.summary,
+                  s.upstream_price_usd_micros,
+                  s.customer_price_usd_micros, s.price_verified,
+                  s.rate_limit_raw, s.rate_limit_rps, s.free_credit,
+                  s.volume_discount, s.source_type, s.source_owner,
+                  s.sync_generation, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+           FROM catalog_unresolved_staging s
+           WHERE s.sync_generation = ?
+             AND EXISTS (
+               SELECT 1 FROM catalog_sync_locks l
+               WHERE l.id = 1 AND l.generation = ?
+             )
+             AND EXISTS (
+               SELECT 1 FROM upstream_source_config c
+               WHERE c.id = 1 AND c.enabled = 1
+                 AND c.version = ? AND c.config_hash = ?
+             )
+             AND EXISTS (
+               SELECT 1 FROM upstream_credential_state u
+               WHERE u.provider = 'primary' AND u.version = ?
+                 AND u.managed_enabled = ?
+                 AND u.active_credential_id IS ?
+             )
+           ON CONFLICT(path) DO UPDATE SET
+             platform = excluded.platform,
+             data_type = excluded.data_type,
+             surface = excluded.surface,
+             summary = excluded.summary,
+             customer_price_usd_micros = CASE
+               WHEN catalog_unresolved_endpoints
+                      .upstream_price_usd_micros !=
+                    excluded.upstream_price_usd_micros
+               THEN excluded.customer_price_usd_micros
+               ELSE catalog_unresolved_endpoints
+                      .customer_price_usd_micros
+             END,
+             upstream_price_usd_micros =
+               excluded.upstream_price_usd_micros,
+             price_verified = excluded.price_verified,
+             rate_limit_raw = excluded.rate_limit_raw,
+             rate_limit_rps = excluded.rate_limit_rps,
+             free_credit = excluded.free_credit,
+             volume_discount = excluded.volume_discount,
+             source_type = excluded.source_type,
+             source_owner = excluded.source_owner,
+             sync_generation = excluded.sync_generation,
+             updated_at = CURRENT_TIMESTAMP`,
+        )
+        .bind(
+          syncGeneration,
+          syncGeneration,
+          sourceConfig.version,
+          sourceConfig.hash,
+          credentialState.version,
+          managedCredentialFlag,
+          credentialId,
+        ),
+      db
+        .prepare(
+          `DELETE FROM catalog_unresolved_endpoints
+           WHERE NOT EXISTS (
+             SELECT 1
+             FROM catalog_unresolved_staging s
+             WHERE s.sync_generation = ?
+               AND s.path = catalog_unresolved_endpoints.path
+           )
+             AND EXISTS (
+               SELECT 1 FROM catalog_sync_locks l
+               WHERE l.id = 1 AND l.generation = ?
+             )
+             AND EXISTS (
+               SELECT 1 FROM upstream_source_config c
+               WHERE c.id = 1 AND c.enabled = 1
+                 AND c.version = ? AND c.config_hash = ?
+             )
+             AND EXISTS (
+               SELECT 1 FROM upstream_credential_state u
+               WHERE u.provider = 'primary' AND u.version = ?
+                 AND u.managed_enabled = ?
+                 AND u.active_credential_id IS ?
+             )`,
+        )
+        .bind(
+          syncGeneration,
+          syncGeneration,
+          sourceConfig.version,
+          sourceConfig.hash,
+          credentialState.version,
+          managedCredentialFlag,
+          credentialId,
         ),
       db
         .prepare(
           `INSERT INTO catalog_sync_state
            (id, last_success_generation, credential_source,
             credential_id, credential_fingerprint,
-            credential_state_version, openapi_version,
+            credential_state_version, source_config_version,
+            source_config_hash, openapi_version,
             openapi_operation_count, raw_price_row_count,
             normalized_price_count, openapi_price_mapped_count,
             price_only_count, openapi_only_count,
@@ -9120,15 +10351,20 @@ async function handleCatalogSync(
             awaiting_price_count, openapi_snapshot_hash,
             price_snapshot_hash, synced_at)
            SELECT 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  ?, ?, ?,
+                  ?, ?, ?, ?, ?,
                   CURRENT_TIMESTAMP
            WHERE EXISTS (
              SELECT 1 FROM catalog_sync_locks
              WHERE id = 1 AND generation = ?
-           )
+             )
+             AND EXISTS (
+               SELECT 1 FROM upstream_source_config c
+               WHERE c.id = 1 AND c.enabled = 1
+                 AND c.version = ? AND c.config_hash = ?
+             )
              AND EXISTS (
                SELECT 1 FROM upstream_credential_state u
-               WHERE u.provider = 'tikhub' AND u.version = ?
+               WHERE u.provider = 'primary' AND u.version = ?
                  AND u.managed_enabled = ?
                  AND u.active_credential_id IS ?
              )
@@ -9139,6 +10375,8 @@ async function handleCatalogSync(
              credential_fingerprint = excluded.credential_fingerprint,
              credential_state_version =
                excluded.credential_state_version,
+             source_config_version = excluded.source_config_version,
+             source_config_hash = excluded.source_config_hash,
              openapi_version = excluded.openapi_version,
              openapi_operation_count = excluded.openapi_operation_count,
              raw_price_row_count = excluded.raw_price_row_count,
@@ -9158,10 +10396,12 @@ async function handleCatalogSync(
         )
         .bind(
           syncGeneration,
-          credential.source,
-          credential.id,
-          credential.fingerprint,
-          credential.stateVersion,
+          credentialSource,
+          credentialId,
+          credentialFingerprint,
+          credentialState.version,
+          sourceConfig.version,
+          sourceConfig.hash,
           openApiVersion,
           openApi.size,
           priceCatalog.rawRecordCount,
@@ -9177,9 +10417,11 @@ async function handleCatalogSync(
           openApiSnapshotHash,
           priceSnapshotHash,
           syncGeneration,
-          credential.stateVersion,
+          sourceConfig.version,
+          sourceConfig.hash,
+          credentialState.version,
           managedCredentialFlag,
-          credential.id,
+          credentialId,
         ),
       syncAudit,
       db
@@ -9188,10 +10430,16 @@ async function handleCatalogSync(
            WHERE generation = ?`,
         )
         .bind(syncGeneration),
+      db
+        .prepare(
+          `DELETE FROM catalog_unresolved_staging
+           WHERE sync_generation = ?`,
+        )
+        .bind(syncGeneration),
     ]);
     if (
-      Number(finalization[2]?.meta?.changes ?? 0) !== 1 ||
-      Number(finalization[3]?.meta?.changes ?? 0) !== 1
+      Number(finalization[4]?.meta?.changes ?? 0) !== 1 ||
+      Number(finalization[5]?.meta?.changes ?? 0) !== 1
     ) {
       throw new PlatformError(
         409,
@@ -9203,7 +10451,8 @@ async function handleCatalogSync(
       .prepare(
         `SELECT last_success_generation, credential_source,
                 credential_id, credential_fingerprint,
-                credential_state_version
+                credential_state_version, source_config_version,
+                source_config_hash
          FROM catalog_sync_state
          WHERE id = 1`,
       )
@@ -9213,14 +10462,19 @@ async function handleCatalogSync(
         credential_id: string | null;
         credential_fingerprint: string | null;
         credential_state_version: number | null;
+        source_config_version: number | null;
+        source_config_hash: string | null;
       }>();
     if (
       published?.last_success_generation !== syncGeneration ||
-      published.credential_source !== credential.source ||
-      published.credential_id !== credential.id ||
-      published.credential_fingerprint !== credential.fingerprint ||
+      published.credential_source !== credentialSource ||
+      published.credential_id !== credentialId ||
+      published.credential_fingerprint !== credentialFingerprint ||
       Number(published.credential_state_version) !==
-        credential.stateVersion
+        credentialState.version ||
+      Number(published.source_config_version) !==
+        sourceConfig.version ||
+      published.source_config_hash !== sourceConfig.hash
     ) {
       throw new PlatformError(
         409,
@@ -9231,6 +10485,7 @@ async function handleCatalogSync(
     return jsonResponse(
       {
         synced,
+        pendingDocumentation: unresolvedSynced,
         openApiVersion,
         openApiOperations: openApi.size,
         rawPriceRows: priceCatalog.rawRecordCount,
@@ -9257,6 +10512,12 @@ async function handleCatalogSync(
         .prepare(
           `DELETE FROM catalog_sync_staging
            WHERE generation = ?`,
+        )
+        .bind(syncGeneration),
+      db
+        .prepare(
+          `DELETE FROM catalog_unresolved_staging
+           WHERE sync_generation = ?`,
         )
         .bind(syncGeneration),
       db
@@ -10196,7 +11457,8 @@ async function managedUpstreamProviderCredentialsSnapshot(
     rows = await db
       .prepare(
         `SELECT c.id, c.label, c.encrypted_secret, c.secret_hash,
-                c.verified_scopes_json, c.expires_at,
+                c.verified_scopes_json, c.verified_config_hash,
+                c.expires_at,
                 CASE
                   WHEN c.revoked_at IS NOT NULL THEN 'revoked'
                   WHEN s.active_credential_id = c.id THEN 'active'
@@ -10206,7 +11468,7 @@ async function managedUpstreamProviderCredentialsSnapshot(
          FROM upstream_credentials c
          JOIN upstream_credential_state s
            ON s.provider = c.provider
-         WHERE c.provider = 'tikhub'
+         WHERE c.provider = 'primary'
          ORDER BY CASE
                     WHEN s.active_credential_id = c.id THEN 0
                     WHEN c.revoked_at IS NULL THEN 1
@@ -10243,7 +11505,7 @@ async function upstreamCredentialState(
       .prepare(
         `SELECT active_credential_id, managed_enabled, version
          FROM upstream_credential_state
-         WHERE provider = 'tikhub'`,
+         WHERE provider = 'primary'`,
       )
       .first<{
         active_credential_id: string | null;
@@ -10283,7 +11545,8 @@ async function managedUpstreamProviderCredentialById(
     return await db
       .prepare(
         `SELECT c.id, c.label, c.encrypted_secret, c.secret_hash,
-                c.verified_scopes_json, c.expires_at,
+                c.verified_scopes_json, c.verified_config_hash,
+                c.expires_at,
                 CASE
                   WHEN c.revoked_at IS NOT NULL THEN 'revoked'
                   WHEN s.active_credential_id = c.id THEN 'active'
@@ -10293,7 +11556,7 @@ async function managedUpstreamProviderCredentialById(
          FROM upstream_credentials c
          JOIN upstream_credential_state s
            ON s.provider = c.provider
-         WHERE c.provider = 'tikhub' AND c.id = ?`,
+         WHERE c.provider = 'primary' AND c.id = ?`,
       )
       .bind(id)
       .first<ManagedUpstreamCredentialRecord>();
@@ -10369,11 +11632,12 @@ async function activateManagedUpstreamProviderCredential(
       updatedAt: activatedAt,
       verifiedAt: activatedAt,
       verifiedScopesJson,
+      verifiedConfigHash: verification.configHash,
       expiresAt: verification.expiresAt,
       secretHash: existing.secret_hash,
     },
     details: {
-      provider: "tikhub",
+      provider: PRIMARY_UPSTREAM_PROVIDER,
       label: existing.label,
       fingerprint: existing.secret_hash.slice(0, 16),
       previousStateVersion: expectedVersion,
@@ -10383,16 +11647,18 @@ async function activateManagedUpstreamProviderCredential(
     db
       .prepare(
         `UPDATE upstream_credentials
-         SET verified_scopes_json = ?, expires_at = ?, verified_at = ?
-         WHERE id = ? AND provider = 'tikhub' AND revoked_at IS NULL
+         SET verified_scopes_json = ?, verified_config_hash = ?,
+             expires_at = ?, verified_at = ?
+         WHERE id = ? AND provider = 'primary' AND revoked_at IS NULL
            AND secret_hash = ?
            AND EXISTS (
              SELECT 1 FROM upstream_credential_state
-             WHERE provider = 'tikhub' AND version = ?
+             WHERE provider = 'primary' AND version = ?
            )`,
       )
       .bind(
         verifiedScopesJson,
+        verification.configHash,
         verification.expiresAt,
         activatedAt,
         id,
@@ -10404,11 +11670,12 @@ async function activateManagedUpstreamProviderCredential(
       `UPDATE upstream_credential_state
        SET managed_enabled = 1, active_credential_id = ?,
            version = version + 1, updated_at = ?
-       WHERE provider = 'tikhub' AND version = ?
+       WHERE provider = 'primary' AND version = ?
          AND EXISTS (
            SELECT 1 FROM upstream_credentials
-           WHERE id = ? AND provider = 'tikhub' AND revoked_at IS NULL
+           WHERE id = ? AND provider = 'primary' AND revoked_at IS NULL
              AND secret_hash = ? AND verified_scopes_json = ?
+             AND verified_config_hash = ?
              AND expires_at IS ? AND verified_at = ?
          )`,
       )
@@ -10419,6 +11686,7 @@ async function activateManagedUpstreamProviderCredential(
         id,
         existing.secret_hash,
         verifiedScopesJson,
+        verification.configHash,
         verification.expiresAt,
         activatedAt,
       ),
@@ -10428,7 +11696,7 @@ async function activateManagedUpstreamProviderCredential(
          WHERE id = 1
            AND EXISTS (
              SELECT 1 FROM upstream_credential_state
-             WHERE provider = 'tikhub' AND managed_enabled = 1
+             WHERE provider = 'primary' AND managed_enabled = 1
                AND active_credential_id = ? AND version = ?
                AND updated_at = ?
            )`,
@@ -10516,7 +11784,9 @@ async function importUpstreamProviderCredentialsEncryptionKey(
 
 function upstreamProviderCredentialAdditionalData(id: string): ArrayBuffer {
   return bytesToArrayBuffer(
-    new TextEncoder().encode(`relaybase:tikhub:${id}:v1`),
+    new TextEncoder().encode(
+      `relaybase:upstream-credential:${id}:v1`,
+    ),
   );
 }
 
@@ -10589,13 +11859,16 @@ async function decryptUpstreamProviderApiKey(
 async function verifyUpstreamProviderApiKey(
   apiKey: string,
   env: PlatformEnv,
+  sourceConfig: UpstreamSourceConfig,
 ): Promise<UpstreamProviderCredentialVerification> {
-  const upstreamBase = normalizeUpstreamBase(env.UPSTREAM_BASE_URL);
   let response: Response | null = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const candidate = await fetch(
-        `${upstreamBase}/tikhub/user/get_user_info`,
+        upstreamConfigUrl(
+          sourceConfig,
+          sourceConfig.credentialPath,
+        ),
         {
           headers: {
             authorization: `Bearer ${apiKey}`,
@@ -10697,14 +11970,17 @@ async function verifyUpstreamProviderApiKey(
   const scopes = normalizeUpstreamProviderCredentialScopes(
     apiKeyData.api_key_scopes,
   );
-  if (!scopes || !hasUpstreamProviderDataScope(scopes)) {
+  if (
+    !scopes ||
+    !hasUpstreamProviderDataScope(scopes, sourceConfig)
+  ) {
     throw new PlatformError(
       400,
       "upstream_credential_scope_insufficient",
       "这个 UpstreamProvider API Key 没有可用于数据接口的授权范围。",
     );
   }
-  return { scopes, expiresAt };
+  return { scopes, expiresAt, configHash: sourceConfig.hash };
 }
 
 function normalizeUpstreamProviderCredentialScopes(
@@ -10722,7 +11998,7 @@ function normalizeUpstreamProviderCredentialScopes(
       compact.length > 512 ||
       (compact !== "*" &&
         compact !== "all" &&
-        !/^\/api\/v1(?:\/[a-z0-9_-]+)*$/.test(compact))
+        !/^\/[a-z0-9_-]+(?:\/[a-z0-9_-]+)*$/.test(compact))
     ) {
       return null;
     }
@@ -10731,20 +12007,29 @@ function normalizeUpstreamProviderCredentialScopes(
   return [...new Set(normalized)].sort();
 }
 
-function hasUpstreamProviderDataScope(scopes: string[]): boolean {
+function hasUpstreamProviderDataScope(
+  scopes: string[],
+  sourceConfig?: UpstreamSourceConfig,
+): boolean {
+  const apiPathPrefix = sourceConfig?.apiPathPrefix ?? "/api";
+  const versionRoot = `${apiPathPrefix}/v1`.toLowerCase();
+  const excluded = (sourceConfig?.publicExcludedPrefixes ?? []).map(
+    (prefix) =>
+      `${apiPathPrefix}${prefix.replace(/\/$/, "")}`.toLowerCase(),
+  );
   return scopes.some((normalized) => {
     if (
       normalized === "*" ||
       normalized === "all" ||
-      normalized === "/api/v1"
+      normalized === versionRoot
     ) {
       return true;
     }
-    if (!normalized.startsWith("/api/v1/")) return false;
-    return (
-      !normalized.startsWith("/api/v1/tikhub/user") &&
-      !normalized.startsWith("/api/v1/tikhub/admin") &&
-      !normalized.startsWith("/api/v1/demo")
+    if (!normalized.startsWith(`${versionRoot}/`)) return false;
+    return !excluded.some(
+      (prefix) =>
+        normalized === prefix ||
+        normalized.startsWith(`${prefix}/`),
     );
   });
 }
@@ -10752,11 +12037,15 @@ function hasUpstreamProviderDataScope(scopes: string[]): boolean {
 function upstreamProviderCredentialAllowsPath(
   scopes: string[] | null,
   catalogPath: string,
+  apiPathPrefix = "/api",
 ): boolean {
   if (scopes === null) return true;
-  const upstreamPath = `/api${catalogPath}`.toLowerCase();
+  const upstreamPath =
+    `${apiPathPrefix}${catalogPath}`.toLowerCase();
+  const versionRoot =
+    `${apiPathPrefix}/v1`.toLowerCase();
   return scopes.some((scope) => {
-    if (scope === "*" || scope === "all" || scope === "/api/v1") {
+    if (scope === "*" || scope === "all" || scope === versionRoot) {
       return true;
     }
     return (
@@ -10766,7 +12055,10 @@ function upstreamProviderCredentialAllowsPath(
   });
 }
 
-function storedUpstreamProviderCredentialScopes(value: string | null): string[] {
+function storedUpstreamProviderCredentialScopes(
+  value: string | null,
+  sourceConfig?: UpstreamSourceConfig,
+): string[] {
   if (!value) {
     throw new PlatformError(
       503,
@@ -10777,7 +12069,9 @@ function storedUpstreamProviderCredentialScopes(value: string | null): string[] 
   try {
     const parsed = JSON.parse(value) as unknown;
     const scopes = normalizeUpstreamProviderCredentialScopes(parsed);
-    if (!scopes || !hasUpstreamProviderDataScope(scopes)) throw new Error();
+    if (!scopes || !hasUpstreamProviderDataScope(scopes, sourceConfig)) {
+      throw new Error();
+    }
     return scopes;
   } catch {
     throw new PlatformError(
@@ -10791,7 +12085,12 @@ function storedUpstreamProviderCredentialScopes(value: string | null): string[] 
 async function resolveUpstreamProviderCredential(
   env: PlatformEnv,
   db: D1Database,
+  configuredSource?: UpstreamSourceConfig,
 ): Promise<ResolvedUpstreamProviderCredential | null> {
+  const sourceConfig =
+    configuredSource ??
+    (await loadUpstreamSourceConfig(db, env, false));
+  if (!sourceConfig || !sourceConfig.enabled) return null;
   const state = await upstreamCredentialState(db);
   if (state.managedEnabled) {
     if (!state.activeCredentialId) return null;
@@ -10804,6 +12103,13 @@ async function resolveUpstreamProviderCredential(
         503,
         "upstream_credential_state_invalid",
         "UpstreamProvider 活动凭据状态无效，已停止上游调用。",
+      );
+    }
+    if (managed.verified_config_hash !== sourceConfig.hash) {
+      throw new PlatformError(
+        503,
+        "upstream_credential_reverification_required",
+        "数据源路由已变化，请重新验证活动凭据。",
       );
     }
     if (
@@ -10829,9 +12135,11 @@ async function resolveUpstreamProviderCredential(
       id: managed.id,
       scopes: storedUpstreamProviderCredentialScopes(
         managed.verified_scopes_json,
+        sourceConfig,
       ),
       expiresAt: managed.expires_at,
       stateVersion: state.version,
+      configHash: sourceConfig.hash,
     };
   }
   if (!hasConfiguredCredential(env.UPSTREAM_API_KEY)) return null;
@@ -10843,6 +12151,7 @@ async function resolveUpstreamProviderCredential(
     scopes: null,
     expiresAt: null,
     stateVersion: state.version,
+    configHash: sourceConfig.hash,
   };
 }
 
@@ -11002,9 +12311,9 @@ function hasConfiguredAdminSecret(value?: string): value is string {
 }
 
 function hasValidRuntimeConfiguration(env: PlatformEnv): boolean {
-  try {
-    normalizeUpstreamBase(env.UPSTREAM_BASE_URL);
-  } catch {
+  if (
+    parseUpstreamAllowedOrigins(env.UPSTREAM_ALLOWED_ORIGINS).size === 0
+  ) {
     return false;
   }
   if (
@@ -11094,6 +12403,12 @@ async function operationalReadiness(env: PlatformEnv) {
              (SELECT credential_state_version
               FROM catalog_sync_state LIMIT 1)
                AS catalog_credential_state_version,
+             (SELECT source_config_version
+              FROM catalog_sync_state LIMIT 1)
+               AS catalog_source_config_version,
+             (SELECT source_config_hash
+              FROM catalog_sync_state LIMIT 1)
+               AS catalog_source_config_hash,
              (SELECT openapi_operation_count
               FROM catalog_sync_state LIMIT 1)
                AS catalog_coverage_schema,
@@ -11106,6 +12421,15 @@ async function operationalReadiness(env: PlatformEnv) {
                      COALESCE(operation_id, '')
               FROM catalog_sync_staging LIMIT 1)
                AS catalog_staging_taxonomy_schema,
+             (SELECT config_hash
+              FROM upstream_source_config LIMIT 1)
+               AS upstream_source_config_schema,
+             (SELECT path || data_type || surface
+              FROM catalog_unresolved_endpoints LIMIT 1)
+               AS catalog_unresolved_schema,
+             (SELECT path || data_type || surface
+              FROM catalog_unresolved_staging LIMIT 1)
+               AS catalog_unresolved_staging_schema,
              (SELECT idempotency_hash FROM payment_orders LIMIT 1)
                AS payment_idempotency_schema,
              (SELECT upstream_cost_usd_micros FROM api_calls LIMIT 1)
@@ -11170,6 +12494,8 @@ async function operationalReadiness(env: PlatformEnv) {
           catalog_credential_id: string | null;
           catalog_credential_fingerprint: string | null;
           catalog_credential_state_version: number | null;
+          catalog_source_config_version: number | null;
+          catalog_source_config_hash: string | null;
         }>();
       schemaReady = row != null;
       try {
@@ -11181,7 +12507,18 @@ async function operationalReadiness(env: PlatformEnv) {
       reconciliationRecent =
         Number(row?.reconciliation_recent ?? 0) === 1;
       try {
-        const resolved = await resolveUpstreamProviderCredential(env, env.DB);
+        const sourceConfig = await loadUpstreamSourceConfig(
+          env.DB,
+          env,
+          false,
+        );
+        const resolved = sourceConfig
+          ? await resolveUpstreamProviderCredential(
+              env,
+              env.DB,
+              sourceConfig,
+            )
+          : null;
         upstreamConfigured = Boolean(resolved);
         catalogReady =
           taxonomyReady &&
@@ -11192,7 +12529,10 @@ async function operationalReadiness(env: PlatformEnv) {
           row.catalog_credential_id === resolved.id &&
           row.catalog_credential_fingerprint === resolved.fingerprint &&
           Number(row.catalog_credential_state_version) ===
-            resolved.stateVersion;
+            resolved.stateVersion &&
+          Number(row.catalog_source_config_version) ===
+            sourceConfig?.version &&
+          row.catalog_source_config_hash === sourceConfig?.hash;
       } catch {
         upstreamConfigured = false;
         catalogReady = false;
@@ -11510,46 +12850,26 @@ async function readResponseText(
   return new TextDecoder().decode(combined);
 }
 
-async function safeUpstreamErrorMessage(
+async function providerNeutralUpstreamErrorMessage(
   response: Response,
-  limit: number,
-  sensitiveValues: string[] = [],
 ): Promise<string> {
-  let text: string;
   try {
-    text = await readResponseText(response, limit, "upstream_error");
+    await response.body?.cancel(
+      "provider error body is not exposed to customers",
+    );
   } catch {
-    return `上游返回 HTTP ${response.status}，本次未扣费。`;
+    // The public response remains provider-neutral even if cancellation fails.
   }
-  let message = "";
-  try {
-    const parsed = JSON.parse(text) as unknown;
-    if (isPlainRecord(parsed)) {
-      message =
-        firstString(parsed, ["message", "detail", "msg", "error"]) ?? "";
-      if (!message && isPlainRecord(parsed.error)) {
-        message =
-          firstString(parsed.error, ["message", "detail", "msg"]) ?? "";
-      }
-    }
-  } catch {
-    message = text;
+  if (response.status === 404) {
+    return "数据服务未找到请求的资源，本次未扣费。";
   }
-  let redacted = message.replace(
-    /\bbearer\s+[\x21-\x7E]{8,512}/gi,
-    "Bearer [redacted]",
-  );
-  for (const sensitiveValue of sensitiveValues) {
-    if (sensitiveValue.length >= 8) {
-      redacted = redacted.split(sensitiveValue).join("[redacted]");
-    }
+  if (response.status === 429) {
+    return "数据服务当前请求过多，请稍后重试；本次未扣费。";
   }
-  const safe = redacted
-    .replace(/[\u0000-\u001F\u007F]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 240);
-  return safe || `上游返回 HTTP ${response.status}，本次未扣费。`;
+  if (response.status === 401 || response.status === 403) {
+    return "数据服务暂时无法完成授权校验，本次未扣费。";
+  }
+  return "数据服务请求未成功，本次未扣费。";
 }
 
 function upstreamErrorResponse(
@@ -11861,9 +13181,50 @@ type CatalogPriceEntry = {
   path: string;
   httpMethod: "GET" | "POST" | null;
   upstreamPriceUsdMicros: number;
+  rateLimitRaw: string | null;
+  rateLimitRps: number | null;
+  freeCredit: boolean | null;
+  volumeDiscount: boolean | null;
+  sourceType: string | null;
+  sourceOwner: string | null;
 };
 
-function extractCatalogPrices(payload: unknown): {
+type CatalogUnresolvedSyncEntry = CatalogPriceEntry & {
+  platform: string;
+  dataType: CatalogDataType;
+  surface: MarketplaceSurface;
+  summary: string;
+};
+
+function catalogBooleanFlag(value: unknown): boolean | null {
+  if (value === true || value === 1 || value === "1") return true;
+  if (value === false || value === 0 || value === "0") return false;
+  return null;
+}
+
+function catalogRateLimit(value: unknown): {
+  raw: string | null;
+  rps: number | null;
+} {
+  if (typeof value !== "string" && typeof value !== "number") {
+    return { raw: null, rps: null };
+  }
+  const raw = String(value).replace(/\s+/g, "").trim().slice(0, 80);
+  const match = raw.match(/^([1-9]\d{0,6})(?:\/(?:s|sec|second))?$/i);
+  const rps = match ? Number(match[1]) : null;
+  return {
+    raw: raw || null,
+    rps:
+      rps != null && Number.isSafeInteger(rps) && rps <= 1_000_000
+        ? rps
+        : null,
+  };
+}
+
+function extractCatalogPrices(
+  payload: unknown,
+  apiPathPrefix = "/api",
+): {
   entries: CatalogPriceEntry[];
   rawRecordCount: number;
 } {
@@ -11927,7 +13288,7 @@ function extractCatalogPrices(payload: unknown): {
     if (rawPath && price.usdMicros != null) {
       rawRecordCount += 1;
       try {
-        const path = normalizeCatalogPath(rawPath);
+        const path = normalizeCatalogPath(rawPath, apiPathPrefix);
         const rawMethod = firstString(record, [
           "method",
           "http_method",
@@ -11948,10 +13309,17 @@ function extractCatalogPrices(payload: unknown): {
           rawMethod === "GET" || rawMethod === "POST"
             ? rawMethod
             : null;
+        const rateLimit = catalogRateLimit(record.rate_limit);
         const candidate = {
           path,
           httpMethod,
           upstreamPriceUsdMicros: price.usdMicros,
+          rateLimitRaw: rateLimit.raw,
+          rateLimitRps: rateLimit.rps,
+          freeCredit: catalogBooleanFlag(record.allow_free_credit),
+          volumeDiscount: catalogBooleanFlag(record.allow_discount),
+          sourceType: compactCatalogText(record.endpoint_type, 120),
+          sourceOwner: compactCatalogText(record.endpoint_owner, 160),
         };
         const existing = byPath.get(path);
         if (
@@ -11974,6 +13342,30 @@ function extractCatalogPrices(payload: unknown): {
             ? {
                 ...existing,
                 httpMethod: existing.httpMethod ?? candidate.httpMethod,
+                rateLimitRaw:
+                  existing.rateLimitRaw === candidate.rateLimitRaw
+                    ? existing.rateLimitRaw
+                    : null,
+                rateLimitRps:
+                  existing.rateLimitRps === candidate.rateLimitRps
+                    ? existing.rateLimitRps
+                    : null,
+                freeCredit:
+                  existing.freeCredit === candidate.freeCredit
+                    ? existing.freeCredit
+                    : null,
+                volumeDiscount:
+                  existing.volumeDiscount === candidate.volumeDiscount
+                    ? existing.volumeDiscount
+                    : null,
+                sourceType:
+                  existing.sourceType === candidate.sourceType
+                    ? existing.sourceType
+                    : null,
+                sourceOwner:
+                  existing.sourceOwner === candidate.sourceOwner
+                    ? existing.sourceOwner
+                    : null,
               }
             : candidate,
         );
@@ -12665,6 +14057,7 @@ async function assertStoredCatalogTaxonomyIntegrity(
 
 function extractOpenApiCatalog(
   payload: unknown,
+  apiPathPrefix = "/api",
 ): Map<
   string,
   Omit<CatalogSyncEntry, "upstreamPriceUsdMicros" | "priceVerified">
@@ -12680,8 +14073,14 @@ function extractOpenApiCatalog(
     string,
     Omit<CatalogSyncEntry, "upstreamPriceUsdMicros" | "priceVerified">
   >();
+  const configuredV1Prefix = `${apiPathPrefix}/v1/`;
   for (const [rawPath, pathItem] of Object.entries(payload.paths)) {
-    if (!/^\/(?:api\/)?v1\//.test(rawPath)) continue;
+    if (
+      !rawPath.startsWith("/v1/") &&
+      !rawPath.startsWith(configuredV1Prefix)
+    ) {
+      continue;
+    }
     if (
       !isPlainRecord(pathItem) ||
       Object.hasOwn(pathItem, "$ref") ||
@@ -12761,7 +14160,7 @@ function extractOpenApiCatalog(
             "UpstreamProvider OpenAPI 的 v1 operation 输入元数据无效，本次同步已停止。",
           );
         }
-        const path = normalizeCatalogPath(rawPath);
+        const path = normalizeCatalogPath(rawPath, apiPathPrefix);
         const httpMethod = method.toUpperCase() as "GET" | "POST";
         const tags = normalizeCatalogOperationTags(operation.tags);
         const operationId = normalizeCatalogOperationId(
@@ -12882,6 +14281,7 @@ function mergeCatalogEntries(
   prices: CatalogPriceEntry[],
   openApi: ReturnType<typeof extractOpenApiCatalog>,
   credentialScopes: string[] | null,
+  apiPathPrefix: string,
 ): CatalogSyncEntry[] {
   const pricesByPath = new Map(prices.map((price) => [price.path, price]));
   return [...openApi.values()].map((metadata) => {
@@ -12890,7 +14290,11 @@ function mergeCatalogEntries(
       price != null &&
       (price.httpMethod == null ||
         price.httpMethod === metadata.httpMethod) &&
-      upstreamProviderCredentialAllowsPath(credentialScopes, metadata.path);
+      upstreamProviderCredentialAllowsPath(
+        credentialScopes,
+        metadata.path,
+        apiPathPrefix,
+      );
     return {
       ...metadata,
       upstreamPriceUsdMicros: methodMatches
@@ -12901,10 +14305,66 @@ function mergeCatalogEntries(
   });
 }
 
+function unresolvedCatalogEntries(
+  prices: CatalogPriceEntry[],
+  openApi: ReturnType<typeof extractOpenApiCatalog>,
+): CatalogUnresolvedSyncEntry[] {
+  return prices.flatMap((price) => {
+    const metadata = openApi.get(price.path);
+    if (
+      metadata &&
+      (price.httpMethod == null ||
+        price.httpMethod === metadata.httpMethod)
+    ) {
+      return [];
+    }
+    const platform = price.path.split("/")[2] || "other";
+    const taxonomyHints = price.sourceType
+      ? [price.sourceType]
+      : [];
+    const surface = providerSurfaceForPath(
+      price.path,
+      taxonomyHints,
+    ) as MarketplaceSurface;
+    const dataType = providerDataTypeFor({
+      platform,
+      sourcePath: price.path,
+      tags: taxonomyHints,
+      operationId: null,
+    }) as CatalogDataType;
+    if (
+      !PROVIDER_SURFACES.includes(surface) ||
+      !PROVIDER_DATA_TYPES.includes(dataType)
+    ) {
+      throw new PlatformError(
+        502,
+        "catalog_pending_taxonomy_invalid",
+        "待补全文档目录的数据分类无效，本次同步已停止。",
+      );
+    }
+    const pathLabel = price.path
+      .split("/")
+      .filter(Boolean)
+      .slice(-3)
+      .map((segment) => segment.replace(/[_-]+/g, " "))
+      .join(" / ");
+    return [
+      {
+        ...price,
+        platform,
+        dataType,
+        surface,
+        summary: `数据服务 · ${pathLabel}`.slice(0, 240),
+      },
+    ];
+  });
+}
+
 function catalogCoverageBreakdown(
   prices: CatalogPriceEntry[],
   openApi: ReturnType<typeof extractOpenApiCatalog>,
   credentialScopes: string[] | null,
+  apiPathPrefix: string,
 ): {
   openApiPriceMapped: number;
   priceOnly: number;
@@ -12928,6 +14388,7 @@ function catalogCoverageBreakdown(
       !upstreamProviderCredentialAllowsPath(
         credentialScopes,
         metadata.path,
+        apiPathPrefix,
       )
     ) {
       scopeExcluded += 1;
@@ -12957,13 +14418,16 @@ function safeStoredJson(value: string | null): unknown {
   }
 }
 
-function safeStoredStringArray(value: string | null): string[] {
+function safeStoredStringArray(
+  value: string | null,
+  maxItems = 32,
+): string[] {
   if (!value) return [];
   try {
     const parsed = JSON.parse(value) as unknown;
     if (
       !Array.isArray(parsed) ||
-      parsed.length > 32 ||
+      parsed.length > maxItems ||
       !parsed.every(
         (item) =>
           typeof item === "string" &&
@@ -12979,26 +14443,19 @@ function safeStoredStringArray(value: string | null): string[] {
   }
 }
 
-function normalizeCatalogPath(value: string): string {
+function normalizeCatalogPath(
+  value: string,
+  apiPathPrefix = "/api",
+): string {
   try {
     let path = value.trim();
-    if (/^https?:\/\//i.test(path)) {
-      const url = new URL(path);
-      if (
-        url.protocol !== "https:" ||
-        url.port ||
-        url.username ||
-        url.password ||
-        url.search ||
-        url.hash ||
-        (url.hostname !== "api.tikhub.io" &&
-          url.hostname !== "api.tikhub.dev")
-      ) {
-        throw new Error("Untrusted endpoint host");
-      }
-      path = url.pathname;
+    if (/^https?:\/\//i.test(path)) throw new Error("absolute URL rejected");
+    if (
+      apiPathPrefix &&
+      path.startsWith(`${apiPathPrefix}/v1/`)
+    ) {
+      path = path.slice(apiPathPrefix.length);
     }
-    if (path.startsWith("/api/v1/")) path = path.slice("/api".length);
     if (!path.startsWith("/v1/")) {
       throw new Error("Unsupported endpoint path");
     }
@@ -13157,7 +14614,7 @@ function catalogHardBlockedSignals(path: string): string[] {
     normalized.split("/").pop() ?? "",
   );
   const reasons: string[] = [];
-  if (/^\/v1\/(?:tikhub|demo)\//.test(normalized)) {
+  if (/^\/v1\/(?:internal|admin|control|demo|health)(?:\/|$)/.test(normalized)) {
     reasons.push("control_namespace");
   }
   reasons.push(...catalogOperationWriteSignals(operation));
@@ -13303,42 +14760,355 @@ function classifyCatalogSafety(
   };
 }
 
-function normalizeUpstreamBase(value?: string): string {
-  const raw = (value || "https://api.tikhub.io/api/v1").trim();
-  let url: URL;
+function parseUpstreamAllowedOrigins(value?: string): Set<string> {
+  const origins = new Set<string>();
+  for (const raw of (value ?? "").split(",")) {
+    const compact = raw.trim();
+    if (!compact) continue;
+    try {
+      const url = new URL(compact);
+      if (
+        url.protocol !== "https:" ||
+        url.port ||
+        url.username ||
+        url.password ||
+        url.search ||
+        url.hash ||
+        (url.pathname !== "" && url.pathname !== "/") ||
+        isPrivateOrLocalHostname(url.hostname)
+      ) {
+        continue;
+      }
+      origins.add(url.origin);
+    } catch {
+      continue;
+    }
+  }
+  return origins;
+}
+
+function isPrivateOrLocalHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/\.$/, "");
+  if (
+    normalized === "localhost" ||
+    normalized.endsWith(".localhost") ||
+    normalized.endsWith(".local") ||
+    normalized === "0.0.0.0" ||
+    normalized === "::1"
+  ) {
+    return true;
+  }
+  const ipv4 = normalized.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const octets = ipv4.slice(1).map(Number);
+    if (octets.some((octet) => octet < 0 || octet > 255)) return true;
+    return (
+      octets[0] === 10 ||
+      octets[0] === 127 ||
+      octets[0] === 0 ||
+      (octets[0] === 169 && octets[1] === 254) ||
+      (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+      (octets[0] === 192 && octets[1] === 168) ||
+      (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127) ||
+      octets[0] >= 224
+    );
+  }
+  return (
+    normalized.startsWith("[") ||
+    normalized.includes(":") ||
+    normalized === "metadata.google.internal"
+  );
+}
+
+function normalizeUpstreamConfigPath(
+  value: unknown,
+  field: string,
+  options: { allowEmpty?: boolean; publicPrefix?: boolean } = {},
+): string {
+  if (typeof value !== "string") {
+    throw new PlatformError(
+      400,
+      "invalid_upstream_config",
+      `数据源配置 ${field} 无效。`,
+    );
+  }
+  const compact = value.trim().replace(/\/+$/, "");
+  if (options.allowEmpty && compact === "") return "";
+  if (
+    compact.length < 2 ||
+    compact.length > 600 ||
+    !compact.startsWith("/") ||
+    compact.startsWith("//") ||
+    compact.includes("..") ||
+    compact.includes("?") ||
+    compact.includes("#") ||
+    /[\u0000-\u001F\u007F]/.test(compact) ||
+    (options.publicPrefix && !compact.startsWith("/v1/"))
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_upstream_config",
+      `数据源配置 ${field} 无效。`,
+    );
+  }
+  return compact;
+}
+
+function normalizeUpstreamSourceConfigInput(
+  body: Record<string, unknown>,
+  env: PlatformEnv,
+): Omit<UpstreamSourceConfig, "version" | "hash" | "updatedAt"> {
+  if (typeof body.enabled !== "boolean") {
+    throw new PlatformError(
+      400,
+      "invalid_upstream_config",
+      "必须明确设置数据源启用状态。",
+    );
+  }
+  if (typeof body.sourceOrigin !== "string") {
+    throw new PlatformError(
+      400,
+      "invalid_upstream_config",
+      "数据源 Origin 无效。",
+    );
+  }
+  let origin: string;
   try {
-    url = new URL(raw);
+    const url = new URL(body.sourceOrigin.trim());
+    if (
+      url.protocol !== "https:" ||
+      url.port ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      (url.pathname !== "" && url.pathname !== "/") ||
+      isPrivateOrLocalHostname(url.hostname)
+    ) {
+      throw new Error("unsafe origin");
+    }
+    origin = url.origin;
   } catch {
     throw new PlatformError(
-      500,
-      "invalid_upstream_configuration",
-      "上游地址配置无效。",
+      400,
+      "invalid_upstream_config",
+      "数据源 Origin 必须是允许列表中的公开 HTTPS Origin。",
+    );
+  }
+  const allowedOrigins = parseUpstreamAllowedOrigins(
+    env.UPSTREAM_ALLOWED_ORIGINS,
+  );
+  if (!allowedOrigins.has(origin)) {
+    throw new PlatformError(
+      400,
+      "upstream_origin_not_allowed",
+      "数据源 Origin 不在部署允许列表中。",
+    );
+  }
+  const catalogAuthMode = body.catalogAuthMode;
+  if (
+    catalogAuthMode !== "none" &&
+    catalogAuthMode !== "optional" &&
+    catalogAuthMode !== "required"
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_upstream_config",
+      "目录认证模式无效。",
     );
   }
   if (
-    url.protocol !== "https:" ||
-    Boolean(url.port) ||
-    Boolean(url.username) ||
-    Boolean(url.password) ||
-    Boolean(url.search) ||
-    Boolean(url.hash) ||
-    (url.hostname !== "api.tikhub.io" && url.hostname !== "api.tikhub.dev")
+    !Array.isArray(body.publicExcludedPrefixes) ||
+    body.publicExcludedPrefixes.length > 100
   ) {
     throw new PlatformError(
-      500,
-      "invalid_upstream_configuration",
-      "上游地址配置无效。",
+      400,
+      "invalid_upstream_config",
+      "公开排除前缀无效。",
     );
   }
-  const path = url.pathname.replace(/\/+$/, "");
-  if (path !== "/api/v1") {
+  const apiPathPrefix = normalizeUpstreamConfigPath(
+    body.apiPathPrefix,
+    "apiPathPrefix",
+    { allowEmpty: true },
+  );
+  const openApiPath = normalizeUpstreamConfigPath(
+    body.openApiPath,
+    "openApiPath",
+  );
+  const catalogPath = normalizeUpstreamConfigPath(
+    body.catalogPath,
+    "catalogPath",
+  );
+  const credentialPath = normalizeUpstreamConfigPath(
+    body.credentialPath,
+    "credentialPath",
+  );
+  const controlPlanePrefix = (path: string): string | null => {
+    const publicPath =
+      apiPathPrefix && path.startsWith(`${apiPathPrefix}/v1/`)
+        ? path.slice(apiPathPrefix.length)
+        : path;
+    const segments = publicPath.split("/").filter(Boolean);
+    if (
+      segments.length < 3 ||
+      segments[0] !== "v1" ||
+      !/^[A-Za-z0-9_-]{1,80}$/.test(segments[1])
+    ) {
+      return null;
+    }
+    return `/v1/${segments[1]}/`;
+  };
+  const requiredExclusions = [
+    controlPlanePrefix(catalogPath),
+    controlPlanePrefix(credentialPath),
+  ].filter((value): value is string => value !== null);
+  const publicExcludedPrefixes = [
+    ...new Set(
+      [
+        ...body.publicExcludedPrefixes.map((prefix) =>
+          `${normalizeUpstreamConfigPath(
+            prefix,
+            "publicExcludedPrefixes",
+            { publicPrefix: true },
+          )}/`.replace(/\/+$/, "/"),
+        ),
+        ...requiredExclusions,
+      ],
+    ),
+  ].sort();
+  return {
+    enabled: body.enabled,
+    origin,
+    apiPathPrefix,
+    openApiPath,
+    catalogPath,
+    credentialPath,
+    catalogAuthMode,
+    publicExcludedPrefixes,
+  };
+}
+
+function loadUpstreamSourceConfig(
+  db: D1Database,
+  env: PlatformEnv,
+  required: true,
+): Promise<UpstreamSourceConfig>;
+function loadUpstreamSourceConfig(
+  db: D1Database,
+  env: PlatformEnv,
+  required: false,
+): Promise<UpstreamSourceConfig | null>;
+async function loadUpstreamSourceConfig(
+  db: D1Database,
+  env: PlatformEnv,
+  required: boolean,
+): Promise<UpstreamSourceConfig | null> {
+  let row: UpstreamSourceConfigRecord | null;
+  try {
+    row = await db
+      .prepare(
+        `SELECT id, enabled, version, config_hash, source_origin,
+                api_path_prefix, openapi_path, catalog_path,
+                credential_path, catalog_auth_mode,
+                public_excluded_prefixes_json, updated_at
+         FROM upstream_source_config
+         WHERE id = 1`,
+      )
+      .first<UpstreamSourceConfigRecord>();
+  } catch {
+    if (!required) return null;
+    throw new PlatformError(
+      503,
+      "database_migrations_required",
+      "数据源配置迁移尚未完成。",
+    );
+  }
+  if (!row) {
+    if (!required) return null;
+    throw new PlatformError(
+      503,
+      "upstream_config_required",
+      "请先在管理后台保存数据源路由配置。",
+    );
+  }
+  const input = normalizeUpstreamSourceConfigInput(
+    {
+      enabled: Number(row.enabled) === 1,
+      sourceOrigin: row.source_origin,
+      apiPathPrefix: row.api_path_prefix,
+      openApiPath: row.openapi_path,
+      catalogPath: row.catalog_path,
+      credentialPath: row.credential_path,
+      catalogAuthMode: row.catalog_auth_mode,
+      publicExcludedPrefixes: safeStoredStringArray(
+        row.public_excluded_prefixes_json,
+        100,
+      ),
+    },
+    env,
+  );
+  const version = Number(row.version);
+  if (
+    !Number.isSafeInteger(version) ||
+    version < 1 ||
+    !/^[0-9a-f]{64}$/.test(row.config_hash) ||
+    !Number.isFinite(Date.parse(row.updated_at))
+  ) {
+    throw new PlatformError(
+      503,
+      "upstream_config_invalid",
+      "数据源配置校验失败。",
+    );
+  }
+  const expectedHash = await sha256Hex(
+    JSON.stringify({
+      enabled: input.enabled,
+      sourceOrigin: input.origin,
+      apiPathPrefix: input.apiPathPrefix,
+      openApiPath: input.openApiPath,
+      catalogPath: input.catalogPath,
+      credentialPath: input.credentialPath,
+      catalogAuthMode: input.catalogAuthMode,
+      publicExcludedPrefixes: input.publicExcludedPrefixes,
+    }),
+  );
+  if (expectedHash !== row.config_hash) {
+    throw new PlatformError(
+      503,
+      "upstream_config_invalid",
+      "数据源配置完整性校验失败。",
+    );
+  }
+  if (required && !input.enabled) {
+    throw new PlatformError(
+      503,
+      "upstream_config_disabled",
+      "数据源配置当前未启用。",
+    );
+  }
+  return {
+    ...input,
+    version,
+    hash: row.config_hash,
+    updatedAt: new Date(row.updated_at).toISOString(),
+  };
+}
+
+function upstreamConfigUrl(
+  config: UpstreamSourceConfig,
+  path: string,
+): string {
+  const normalized = normalizeUpstreamConfigPath(path, "path");
+  const url = new URL(normalized, `${config.origin}/`);
+  if (url.origin !== config.origin) {
     throw new PlatformError(
       500,
-      "invalid_upstream_configuration",
-      "上游地址必须以 /api/v1 结尾。",
+      "upstream_config_invalid",
+      "数据源路由越过了已配置 Origin。",
     );
   }
-  return `${url.origin}${path}`;
+  return url.href;
 }
 
 function validateProxyPath(path: string): void {
@@ -13489,10 +15259,20 @@ async function prepareAdminAuditStatement(
       path: string;
       revision: number;
     };
+    pendingCatalogPriceUpdate?: {
+      path: string;
+      customerPriceUsdMicros: number;
+      updatedAt: string;
+    };
     catalogSyncGeneration?: string;
     upstreamCredentialExists?: {
       id: string;
       secretHash: string;
+    };
+    upstreamConfigUpdate?: {
+      version: number;
+      configHash: string;
+      updatedAt: string;
     };
     upstreamCredentialActivation?: {
       id: string;
@@ -13500,6 +15280,7 @@ async function prepareAdminAuditStatement(
       updatedAt: string;
       verifiedAt: string;
       verifiedScopesJson: string;
+      verifiedConfigHash: string;
       expiresAt: string | null;
       secretHash: string;
     };
@@ -13525,10 +15306,14 @@ async function prepareAdminAuditStatement(
     input.idempotencyKey ??
     (input.catalogEndpointRevision
       ? `revision:${input.catalogEndpointRevision.path}:${input.catalogEndpointRevision.revision}`
+      : input.pendingCatalogPriceUpdate
+        ? `pending-price:${input.pendingCatalogPriceUpdate.path}:${input.pendingCatalogPriceUpdate.customerPriceUsdMicros}:${input.pendingCatalogPriceUpdate.updatedAt}`
       : input.catalogSyncGeneration
         ? `generation:${input.catalogSyncGeneration}`
         : input.upstreamCredentialExists
           ? `credential:${input.upstreamCredentialExists.id}:${input.upstreamCredentialExists.secretHash}`
+          : input.upstreamConfigUpdate
+            ? `source-config:${input.upstreamConfigUpdate.version}:${input.upstreamConfigUpdate.configHash}:${input.upstreamConfigUpdate.updatedAt}`
           : input.upstreamCredentialActivation
             ? `activation:${input.upstreamCredentialActivation.id}:${input.upstreamCredentialActivation.stateVersion}`
             : input.upstreamCredentialRevocation
@@ -13609,6 +15394,27 @@ async function prepareAdminAuditStatement(
         input.catalogEndpointRevision.revision,
       );
   }
+  if (input.pendingCatalogPriceUpdate) {
+    return db
+      .prepare(
+        `INSERT OR IGNORE INTO admin_audit_logs
+         (id, actor_fingerprint, action, target_type, target_id,
+          details_json, created_at)
+         SELECT ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+         WHERE changes() = 1
+           AND EXISTS (
+             SELECT 1 FROM catalog_unresolved_endpoints
+             WHERE path = ? AND customer_price_usd_micros = ?
+               AND updated_at = ?
+           )`,
+      )
+      .bind(
+        ...values,
+        input.pendingCatalogPriceUpdate.path,
+        input.pendingCatalogPriceUpdate.customerPriceUsdMicros,
+        input.pendingCatalogPriceUpdate.updatedAt,
+      );
+  }
   if (input.catalogSyncGeneration) {
     return db
       .prepare(
@@ -13632,13 +15438,33 @@ async function prepareAdminAuditStatement(
          SELECT ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
          WHERE EXISTS (
            SELECT 1 FROM upstream_credentials
-           WHERE id = ? AND provider = 'tikhub' AND secret_hash = ?
+           WHERE id = ? AND provider = 'primary' AND secret_hash = ?
          )`,
       )
       .bind(
         ...values,
         input.upstreamCredentialExists.id,
         input.upstreamCredentialExists.secretHash,
+      );
+  }
+  if (input.upstreamConfigUpdate) {
+    return db
+      .prepare(
+        `INSERT OR IGNORE INTO admin_audit_logs
+         (id, actor_fingerprint, action, target_type, target_id,
+          details_json, created_at)
+         SELECT ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+         WHERE EXISTS (
+           SELECT 1 FROM upstream_source_config
+           WHERE id = 1 AND version = ? AND config_hash = ?
+             AND updated_at = ?
+         )`,
+      )
+      .bind(
+        ...values,
+        input.upstreamConfigUpdate.version,
+        input.upstreamConfigUpdate.configHash,
+        input.upstreamConfigUpdate.updatedAt,
       );
   }
   if (input.upstreamCredentialActivation) {
@@ -13654,11 +15480,12 @@ async function prepareAdminAuditStatement(
            JOIN upstream_credentials c
              ON c.provider = s.provider
             AND c.id = s.active_credential_id
-           WHERE s.provider = 'tikhub' AND s.managed_enabled = 1
+           WHERE s.provider = 'primary' AND s.managed_enabled = 1
              AND s.active_credential_id = ? AND s.version = ?
              AND s.updated_at = ?
              AND c.revoked_at IS NULL AND c.secret_hash = ?
-             AND c.verified_scopes_json = ? AND c.expires_at IS ?
+             AND c.verified_scopes_json = ?
+             AND c.verified_config_hash = ? AND c.expires_at IS ?
              AND c.verified_at = ?
          )`,
       )
@@ -13669,6 +15496,7 @@ async function prepareAdminAuditStatement(
         input.upstreamCredentialActivation.updatedAt,
         input.upstreamCredentialActivation.secretHash,
         input.upstreamCredentialActivation.verifiedScopesJson,
+        input.upstreamCredentialActivation.verifiedConfigHash,
         input.upstreamCredentialActivation.expiresAt,
         input.upstreamCredentialActivation.verifiedAt,
       );
@@ -13682,7 +15510,7 @@ async function prepareAdminAuditStatement(
          SELECT ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
          WHERE EXISTS (
            SELECT 1 FROM upstream_credentials
-           WHERE id = ? AND provider = 'tikhub'
+           WHERE id = ? AND provider = 'primary'
              AND revoked_at = ? AND encrypted_secret = 'revoked'
          )`,
       )

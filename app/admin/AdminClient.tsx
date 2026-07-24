@@ -157,6 +157,32 @@ type CatalogResponse = {
   sync: CatalogSyncInfo | null;
 };
 
+type PendingCatalogEndpoint = {
+  id: string;
+  path: string;
+  platform: string;
+  dataType: CatalogDataType;
+  surface: CatalogSurface;
+  method: null;
+  summary: string;
+  upstreamPriceUsdMicros: number;
+  customerPriceUsdMicros: number;
+  priceVerified: boolean;
+  rateLimit: string | null;
+  rateLimitRps: number | null;
+  documentationStatus: "pending";
+  callable: false;
+  updatedAt: string;
+};
+
+type PendingCatalogResponse = {
+  endpoints: PendingCatalogEndpoint[];
+  count: number;
+  total: number;
+  offset: number;
+  nextOffset: number | null;
+};
+
 type CatalogSyncCoverage = {
   openApiVersion: string | null;
   openApiOperations: number;
@@ -294,6 +320,44 @@ type UpstreamCredentialsResponse = {
   environmentFallbackConfigured: boolean;
 };
 
+type CatalogAuthMode = "none" | "optional" | "required";
+
+type UpstreamSourceConfig = {
+  enabled: boolean;
+  version: number;
+  sourceOrigin: string;
+  apiPathPrefix: string;
+  openApiPath: string;
+  catalogPath: string;
+  credentialPath: string;
+  catalogAuthMode: CatalogAuthMode;
+  publicExcludedPrefixes: string[];
+  updatedAt: string;
+};
+
+type UpstreamConfigResponse = {
+  configured: boolean;
+  config: UpstreamSourceConfig | null;
+  originAllowlistConfigured: boolean;
+};
+
+type UpstreamConfigMutationResponse = {
+  config: UpstreamSourceConfig;
+  catalogInvalidated: true;
+  credentialsRequireVerification: true;
+};
+
+type UpstreamConfigDraft = {
+  enabled: boolean;
+  sourceOrigin: string;
+  apiPathPrefix: string;
+  openApiPath: string;
+  catalogPath: string;
+  credentialPath: string;
+  catalogAuthMode: CatalogAuthMode;
+  publicExcludedPrefixesText: string;
+};
+
 type AdminPayment = {
   id: string;
   userEmail: string;
@@ -382,17 +446,28 @@ type Validator<T> = (value: unknown) => value is T;
 
 const SESSION_SECRET_KEY = "relaybase.admin.master-secret.v1";
 const CATALOG_SAFETY_POLICY_VERSION = 1;
+const PENDING_CATALOG_PAGE_SIZE = 50;
 const validPaymentStatus = /^[a-z][a-z0-9_]{0,63}$/;
 const validSha256Digest = /^[a-f0-9]{64}$/;
+const EMPTY_UPSTREAM_CONFIG_DRAFT: UpstreamConfigDraft = {
+  enabled: false,
+  sourceOrigin: "",
+  apiPathPrefix: "",
+  openApiPath: "",
+  catalogPath: "",
+  credentialPath: "",
+  catalogAuthMode: "required",
+  publicExcludedPrefixesText: "",
+};
 const readinessMissingLabels: Record<string, string> = {
   database: "数据库绑定",
   configuration: "运行配置",
   legal_review: "适用地区法律审查",
-  reseller_authorization: "上游 转售 / 白标授权",
-  upstream_credentials: "上游 活动数据源",
+  reseller_authorization: "上游转售 / 白标授权",
+  upstream_credentials: "上游活动数据源",
   admin_credentials: "管理与调度密钥",
   crypto_payments: "稳定币生产支付开关",
-  commercial_clearance: "上游 稳定币付款书面澄清",
+  commercial_clearance: "上游稳定币付款书面澄清",
   payment_provider: "支付服务商生产配置",
   authentication: "客户登录方式",
   database_migrations: "数据库迁移",
@@ -478,6 +553,115 @@ function isSafeHttpUrl(value: unknown): value is string {
   } catch {
     return false;
   }
+}
+
+function isUpstreamSourceOrigin(value: unknown): value is string {
+  if (!isNonEmptyString(value, 2_000)) return false;
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      url.origin === value &&
+      !url.port &&
+      !url.username &&
+      !url.password &&
+      (url.pathname === "" || url.pathname === "/") &&
+      !url.search &&
+      !url.hash
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isUpstreamConfigPath(
+  value: unknown,
+  options: { allowEmpty?: boolean; publicPrefix?: boolean } = {},
+): value is string {
+  if (options.allowEmpty && value === "") return true;
+  return (
+    isNonEmptyString(value, 600) &&
+    value.length >= 2 &&
+    value.startsWith(options.publicPrefix ? "/v1/" : "/") &&
+    !value.startsWith("//") &&
+    !value.includes("..") &&
+    !value.includes("?") &&
+    !value.includes("#") &&
+    !/[\u0000-\u001F\u007F]/.test(value) &&
+    (!options.publicPrefix || value.endsWith("/"))
+  );
+}
+
+function isCatalogAuthMode(value: unknown): value is CatalogAuthMode {
+  return (
+    value === "none" || value === "optional" || value === "required"
+  );
+}
+
+function isUpstreamSourceConfig(
+  value: unknown,
+): value is UpstreamSourceConfig {
+  if (!isObject(value) || !Array.isArray(value.publicExcludedPrefixes)) {
+    return false;
+  }
+  return (
+    typeof value.enabled === "boolean" &&
+    isSafeNonNegativeInteger(value.version) &&
+    value.version <= 2_147_483_647 &&
+    isUpstreamSourceOrigin(value.sourceOrigin) &&
+    isUpstreamConfigPath(value.apiPathPrefix, { allowEmpty: true }) &&
+    isUpstreamConfigPath(value.openApiPath) &&
+    isUpstreamConfigPath(value.catalogPath) &&
+    isUpstreamConfigPath(value.credentialPath) &&
+    isCatalogAuthMode(value.catalogAuthMode) &&
+    value.publicExcludedPrefixes.length <= 100 &&
+    value.publicExcludedPrefixes.every((prefix) =>
+      isUpstreamConfigPath(prefix, { publicPrefix: true }),
+    ) &&
+    new Set(value.publicExcludedPrefixes).size ===
+      value.publicExcludedPrefixes.length &&
+    isDateString(value.updatedAt)
+  );
+}
+
+function isUpstreamConfigResponse(
+  value: unknown,
+): value is UpstreamConfigResponse {
+  if (!isObject(value)) return false;
+  return (
+    typeof value.configured === "boolean" &&
+    typeof value.originAllowlistConfigured === "boolean" &&
+    (value.config === null || isUpstreamSourceConfig(value.config)) &&
+    value.configured === (value.config !== null)
+  );
+}
+
+function isUpstreamConfigMutationResponse(
+  value: unknown,
+): value is UpstreamConfigMutationResponse {
+  return (
+    isObject(value) &&
+    isUpstreamSourceConfig(value.config) &&
+    value.catalogInvalidated === true &&
+    value.credentialsRequireVerification === true
+  );
+}
+
+function upstreamConfigDraftFrom(
+  config: UpstreamSourceConfig | null,
+): UpstreamConfigDraft {
+  if (!config) return { ...EMPTY_UPSTREAM_CONFIG_DRAFT };
+  return {
+    enabled: config.enabled,
+    sourceOrigin: config.sourceOrigin,
+    apiPathPrefix: config.apiPathPrefix,
+    openApiPath: config.openApiPath,
+    catalogPath: config.catalogPath,
+    credentialPath: config.credentialPath,
+    catalogAuthMode: config.catalogAuthMode,
+    publicExcludedPrefixesText:
+      config.publicExcludedPrefixes.join("\n"),
+  };
 }
 
 function isJsonValue(value: unknown, depth = 0): value is JsonValue {
@@ -808,6 +992,57 @@ function isCatalogResponse(value: unknown): value is CatalogResponse {
     (value.sync === null || isCatalogSyncInfo(value.sync)) &&
     value.endpoints.length <= 500 &&
     value.endpoints.every(isCatalogEndpoint)
+  );
+}
+
+function isPendingCatalogEndpoint(
+  value: unknown,
+): value is PendingCatalogEndpoint {
+  if (!isObject(value)) return false;
+  return (
+    isNonEmptyString(value.id, 200) &&
+    isSafePath(value.path) &&
+    isNonEmptyString(value.platform, 80) &&
+    isCatalogDataType(value.dataType) &&
+    isCatalogSurface(value.surface) &&
+    value.method === null &&
+    isNonEmptyString(value.summary, 1_000) &&
+    isSafeNonNegativeInteger(value.upstreamPriceUsdMicros) &&
+    value.upstreamPriceUsdMicros <= 100_000_000 &&
+    isSafeNonNegativeInteger(value.customerPriceUsdMicros) &&
+    value.customerPriceUsdMicros <= 100_000_000 &&
+    value.customerPriceUsdMicros >= value.upstreamPriceUsdMicros &&
+    typeof value.priceVerified === "boolean" &&
+    isNullableString(value.rateLimit, 160) &&
+    (value.rateLimitRps === null ||
+      (typeof value.rateLimitRps === "number" &&
+        Number.isFinite(value.rateLimitRps) &&
+        value.rateLimitRps >= 0 &&
+        value.rateLimitRps <= 1_000_000)) &&
+    value.documentationStatus === "pending" &&
+    value.callable === false &&
+    isDateString(value.updatedAt)
+  );
+}
+
+function isPendingCatalogResponse(
+  value: unknown,
+): value is PendingCatalogResponse {
+  if (!isObject(value) || !Array.isArray(value.endpoints)) return false;
+  return (
+    isSafeNonNegativeInteger(value.count) &&
+    value.count === value.endpoints.length &&
+    isSafeNonNegativeInteger(value.total) &&
+    isSafeNonNegativeInteger(value.offset) &&
+    value.offset <= 100_000 &&
+    value.total >= value.offset + value.count &&
+    (value.nextOffset === null ||
+      (isSafeNonNegativeInteger(value.nextOffset) &&
+        value.nextOffset === value.offset + value.count &&
+        value.nextOffset > value.offset &&
+        value.nextOffset <= 100_000)) &&
+    value.endpoints.length <= 500 &&
+    value.endpoints.every(isPendingCatalogEndpoint)
   );
 }
 
@@ -1192,10 +1427,33 @@ function isCatalogUpdateResponse(
   );
 }
 
+function isPendingCatalogPriceUpdateResponse(
+  value: unknown,
+): value is {
+  ok: true;
+  path: string;
+  customerPriceUsdMicros: number;
+  updatedAt: string;
+  callable: false;
+  documentationStatus: "pending";
+} {
+  return (
+    isObject(value) &&
+    value.ok === true &&
+    isSafePath(value.path) &&
+    isSafeNonNegativeInteger(value.customerPriceUsdMicros) &&
+    value.customerPriceUsdMicros <= 100_000_000 &&
+    isDateString(value.updatedAt) &&
+    value.callable === false &&
+    value.documentationStatus === "pending"
+  );
+}
+
 function isCatalogSyncResponse(
   value: unknown,
 ): value is {
   synced: number;
+  pendingDocumentation: number;
   openApiVersion: string | null;
   openApiOperations: number;
   rawPriceRows: number;
@@ -1216,6 +1474,8 @@ function isCatalogSyncResponse(
   return (
     isObject(value) &&
     isSafeNonNegativeInteger(value.synced) &&
+    isSafeNonNegativeInteger(value.pendingDocumentation) &&
+    value.pendingDocumentation <= 100_000 &&
     isNullableString(value.openApiVersion, 80) &&
     isSafeNonNegativeInteger(value.openApiOperations) &&
     value.openApiOperations === value.synced &&
@@ -1341,6 +1601,20 @@ function parseUsdInput(value: string): number | null {
     Number(whole) * 1_000_000 +
     Number(fraction.padEnd(6, "0"));
   return Number.isSafeInteger(micros) && micros >= 1 && micros <= 100_000_000
+    ? micros
+    : null;
+}
+
+function parsePendingUsdInput(value: string): number | null {
+  const normalized = value.trim();
+  if (!/^\d{1,3}(?:\.\d{1,6})?$/.test(normalized)) return null;
+  const [whole, fraction = ""] = normalized.split(".");
+  const micros =
+    Number(whole) * 1_000_000 +
+    Number(fraction.padEnd(6, "0"));
+  return Number.isSafeInteger(micros) &&
+    micros >= 0 &&
+    micros <= 100_000_000
     ? micros
     : null;
 }
@@ -2105,8 +2379,14 @@ export function AdminClient() {
   const [catalog, setCatalog] = useState<RemoteState<CatalogResponse>>({
     status: "idle",
   });
+  const [pendingCatalog, setPendingCatalog] = useState<
+    RemoteState<PendingCatalogResponse>
+  >({ status: "idle" });
   const [upstreamCredentials, setUpstreamCredentials] = useState<
     RemoteState<UpstreamCredentialsResponse>
+  >({ status: "idle" });
+  const [upstreamConfig, setUpstreamConfig] = useState<
+    RemoteState<UpstreamConfigResponse>
   >({ status: "idle" });
   const [payments, setPayments] = useState<RemoteState<PaymentsResponse>>({
     status: "idle",
@@ -2122,6 +2402,8 @@ export function AdminClient() {
   const [userQuery, setUserQuery] = useState("");
   const [userStatus, setUserStatus] = useState("all");
   const [catalogQuery, setCatalogQuery] = useState("");
+  const [pendingCatalogQuery, setPendingCatalogQuery] = useState("");
+  const [pendingCatalogPage, setPendingCatalogPage] = useState(0);
   const [catalogPlatform, setCatalogPlatform] = useState("all");
   const [catalogDataType, setCatalogDataType] =
     useState<CatalogDataTypeFilter>("all");
@@ -2147,7 +2429,12 @@ export function AdminClient() {
   const [previewingCatalogBatch, setPreviewingCatalogBatch] = useState(false);
   const [refreshingCatalogBatch, setRefreshingCatalogBatch] = useState(false);
   const [applyingCatalogBatch, setApplyingCatalogBatch] = useState(false);
-  const [upstreamLabel, setUpstreamLabel] = useState("Primary Provider");
+  const [upstreamConfigDraft, setUpstreamConfigDraft] =
+    useState<UpstreamConfigDraft>(() => ({
+      ...EMPTY_UPSTREAM_CONFIG_DRAFT,
+    }));
+  const [savingUpstreamConfig, setSavingUpstreamConfig] = useState(false);
+  const [upstreamLabel, setUpstreamLabel] = useState("主数据源");
   const [upstreamApiKey, setUpstreamApiKey] = useState("");
   const [activateUpstreamAfterSave, setActivateUpstreamAfterSave] =
     useState(true);
@@ -2155,6 +2442,10 @@ export function AdminClient() {
     useState(false);
   const [priceDrafts, setPriceDrafts] = useState<Record<string, string>>({});
   const [savingPath, setSavingPath] = useState("");
+  const [pendingPriceDrafts, setPendingPriceDrafts] = useState<
+    Record<string, string>
+  >({});
+  const [savingPendingPath, setSavingPendingPath] = useState("");
   const [paymentFilter, setPaymentFilter] = useState("manual_review");
   const [recoveryOrderId, setRecoveryOrderId] = useState("");
   const [recoveryPaymentId, setRecoveryPaymentId] = useState("");
@@ -2306,6 +2597,111 @@ export function AdminClient() {
     }
   }, [adminSecret]);
 
+  const loadPendingCatalog = useCallback(
+    async (secret = adminSecret) => {
+      if (!secret) return;
+      setPendingCatalog({ status: "loading" });
+      try {
+        const endpoints: PendingCatalogEndpoint[] = [];
+        let offset = 0;
+        let total: number | null = null;
+        while (true) {
+          const page = await adminRequest(
+            `/api/admin/catalog/pending?limit=500&offset=${offset}`,
+            secret,
+            isPendingCatalogResponse,
+          );
+          if (
+            page.offset !== offset ||
+            (total !== null && page.total !== total)
+          ) {
+            throw new AdminApiError(
+              "文档待同步服务在分页读取期间发生变化，请重新加载。",
+              409,
+            );
+          }
+          total ??= page.total;
+          if (total > 100_000) {
+            throw new AdminApiError(
+              "文档待同步服务超过安全加载上限。",
+              502,
+            );
+          }
+          endpoints.push(...page.endpoints);
+          if (endpoints.length > total || endpoints.length > 100_000) {
+            throw new AdminApiError(
+              "文档待同步服务分页结果不完整。",
+              502,
+            );
+          }
+          if (page.nextOffset === null) break;
+          offset = page.nextOffset;
+        }
+        if (
+          endpoints.length !== total ||
+          new Set(endpoints.map((endpoint) => endpoint.path)).size !==
+            endpoints.length
+        ) {
+          throw new AdminApiError(
+            "文档待同步服务分页存在遗漏或重复，已停止展示。",
+            502,
+          );
+        }
+        const data: PendingCatalogResponse = {
+          endpoints,
+          count: endpoints.length,
+          total,
+          offset: 0,
+          nextOffset: null,
+        };
+        setPendingCatalog({ status: "ready", data });
+        setPendingPriceDrafts(
+          Object.fromEntries(
+            endpoints.map((endpoint) => [
+              endpoint.path,
+              usdInputValue(endpoint.customerPriceUsdMicros),
+            ]),
+          ),
+        );
+        setPendingCatalogPage(0);
+      } catch (error) {
+        setPendingCatalog({
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "无法读取文档待同步服务。",
+        });
+      }
+    },
+    [adminSecret],
+  );
+
+  const loadUpstreamConfig = useCallback(
+    async (secret = adminSecret) => {
+      if (!secret) return;
+      setUpstreamConfig({ status: "loading" });
+      try {
+        const data = await adminRequest(
+          "/api/admin/upstream-config",
+          secret,
+          isUpstreamConfigResponse,
+        );
+        setUpstreamConfig({ status: "ready", data });
+        setUpstreamConfigDraft(upstreamConfigDraftFrom(data.config));
+      } catch (error) {
+        setUpstreamConfig({
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "无法读取数据源配置。",
+        });
+      }
+    },
+    [adminSecret],
+  );
+
   const loadUpstreamCredentials = useCallback(
     async (secret = adminSecret) => {
       if (!secret) return;
@@ -2323,7 +2719,7 @@ export function AdminClient() {
           message:
             error instanceof Error
               ? error.message
-              : "无法读取 上游 凭据。",
+              : "无法读取上游凭据。",
         });
       }
     },
@@ -2433,8 +2829,10 @@ export function AdminClient() {
         setOverview({ status: "ready", data });
         setRememberForTab(persistForTab);
         void loadUsers(secret);
+        void loadUpstreamConfig(secret);
         void loadUpstreamCredentials(secret);
         void loadCatalog(secret);
+        void loadPendingCatalog(secret);
         void loadPayments(secret);
         void loadPaymentReviews(secret);
       } catch (error) {
@@ -2449,8 +2847,10 @@ export function AdminClient() {
     },
     [
       loadCatalog,
+      loadPendingCatalog,
       loadPaymentReviews,
       loadPayments,
+      loadUpstreamConfig,
       loadUpstreamCredentials,
       loadUsers,
     ],
@@ -2655,6 +3055,40 @@ export function AdminClient() {
     catalogTag,
   ]);
 
+  const filteredPendingEndpoints = useMemo(() => {
+    if (pendingCatalog.status !== "ready") return [];
+    const query = pendingCatalogQuery
+      .trim()
+      .toLocaleLowerCase("zh-CN");
+    if (!query) return pendingCatalog.data.endpoints;
+    return pendingCatalog.data.endpoints.filter(
+      (endpoint) =>
+        endpoint.path.toLocaleLowerCase("zh-CN").includes(query) ||
+        endpoint.platform.toLocaleLowerCase("zh-CN").includes(query) ||
+        endpoint.dataType.toLocaleLowerCase("zh-CN").includes(query) ||
+        endpoint.surface.toLocaleLowerCase("zh-CN").includes(query) ||
+        endpoint.summary.toLocaleLowerCase("zh-CN").includes(query),
+    );
+  }, [pendingCatalog, pendingCatalogQuery]);
+
+  const pendingCatalogPageCount = Math.max(
+    1,
+    Math.ceil(
+      filteredPendingEndpoints.length / PENDING_CATALOG_PAGE_SIZE,
+    ),
+  );
+  const safePendingCatalogPage = Math.min(
+    pendingCatalogPage,
+    pendingCatalogPageCount - 1,
+  );
+  const visiblePendingEndpoints = useMemo(() => {
+    const start = safePendingCatalogPage * PENDING_CATALOG_PAGE_SIZE;
+    return filteredPendingEndpoints.slice(
+      start,
+      start + PENDING_CATALOG_PAGE_SIZE,
+    );
+  }, [filteredPendingEndpoints, safePendingCatalogPage]);
+
   const visiblePayments = useMemo(() => {
     if (payments.status !== "ready") return [];
     return payments.data.payments.filter(
@@ -2678,6 +3112,12 @@ export function AdminClient() {
     setAuthError("");
     setNotice("");
     setUpstreamApiKey("");
+    setPendingCatalogQuery("");
+    setPendingCatalogPage(0);
+    setPendingPriceDrafts({});
+    setSavingPendingPath("");
+    setUpstreamConfigDraft({ ...EMPTY_UPSTREAM_CONFIG_DRAFT });
+    setSavingUpstreamConfig(false);
     setSavingUpstreamCredential(false);
     setConfirmAction(null);
     setCatalogBatch(null);
@@ -2691,8 +3131,10 @@ export function AdminClient() {
     catalogBatchApplyRetry.current = null;
     setOverview({ status: "idle" });
     setUsers({ status: "idle" });
+    setUpstreamConfig({ status: "idle" });
     setUpstreamCredentials({ status: "idle" });
     setCatalog({ status: "idle" });
+    setPendingCatalog({ status: "idle" });
     setPayments({ status: "idle" });
     setPaymentReviews({ status: "idle" });
     setReviewResolution(null);
@@ -2703,23 +3145,145 @@ export function AdminClient() {
     void authenticate(secretInput, rememberForTab);
   }
 
+  async function submitUpstreamConfig(
+    event: FormEvent<HTMLFormElement>,
+  ) {
+    event.preventDefault();
+    if (upstreamConfig.status !== "ready") {
+      setNotice("请先刷新数据源配置。");
+      return;
+    }
+    if (!upstreamConfig.data.originAllowlistConfigured) {
+      setNotice("部署环境尚未配置数据源 Origin 允许列表，暂时不能保存。");
+      return;
+    }
+
+    const sourceOrigin = upstreamConfigDraft.sourceOrigin
+      .trim()
+      .replace(/\/+$/, "");
+    const normalizePath = (value: string) =>
+      value.trim().replace(/\/+$/, "");
+    const apiPathPrefix = normalizePath(
+      upstreamConfigDraft.apiPathPrefix,
+    );
+    const openApiPath = normalizePath(upstreamConfigDraft.openApiPath);
+    const catalogPath = normalizePath(upstreamConfigDraft.catalogPath);
+    const credentialPath = normalizePath(
+      upstreamConfigDraft.credentialPath,
+    );
+    const publicExcludedPrefixes = [
+      ...new Set(
+        upstreamConfigDraft.publicExcludedPrefixesText
+          .split(/\r?\n/)
+          .map((prefix) => prefix.trim())
+          .filter(Boolean)
+          .map(
+            (prefix) =>
+              `${prefix.replace(/\/+$/, "")}/`,
+          ),
+      ),
+    ].sort();
+
+    if (!isUpstreamSourceOrigin(sourceOrigin)) {
+      setNotice("数据源 Origin 必须是无路径、无端口的公开 HTTPS Origin。");
+      return;
+    }
+    if (
+      !isUpstreamConfigPath(apiPathPrefix, { allowEmpty: true }) ||
+      !isUpstreamConfigPath(openApiPath) ||
+      !isUpstreamConfigPath(catalogPath) ||
+      !isUpstreamConfigPath(credentialPath)
+    ) {
+      setNotice(
+        "数据源路径必须以 / 开头，不能包含查询参数、片段、双斜杠或 ..。",
+      );
+      return;
+    }
+    if (
+      publicExcludedPrefixes.length > 100 ||
+      !publicExcludedPrefixes.every((prefix) =>
+        isUpstreamConfigPath(prefix, { publicPrefix: true }),
+      )
+    ) {
+      setNotice(
+        "公开排除前缀最多 100 条，每行一条，且必须以 /v1/ 开头。",
+      );
+      return;
+    }
+
+    setSavingUpstreamConfig(true);
+    setNotice("");
+    try {
+      const result = await adminRequest(
+        "/api/admin/upstream-config",
+        adminSecret,
+        isUpstreamConfigMutationResponse,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            enabled: upstreamConfigDraft.enabled,
+            sourceOrigin,
+            apiPathPrefix,
+            openApiPath,
+            catalogPath,
+            credentialPath,
+            catalogAuthMode: upstreamConfigDraft.catalogAuthMode,
+            publicExcludedPrefixes,
+            expectedVersion:
+              upstreamConfig.data.config?.version ?? 0,
+          }),
+        },
+      );
+      setUpstreamConfig({
+        status: "ready",
+        data: {
+          configured: true,
+          config: result.config,
+          originAllowlistConfigured:
+            upstreamConfig.data.originAllowlistConfigured,
+        },
+      });
+      setUpstreamConfigDraft(upstreamConfigDraftFrom(result.config));
+      setNotice(
+        `数据源配置已保存为 v${result.config.version}。原目录与凭据验证状态已失效，请重新验证活动凭据并同步目录后再上架服务。`,
+      );
+      await Promise.all([
+        loadUpstreamCredentials(),
+        loadCatalog(),
+        loadPendingCatalog(),
+        loadOverview(),
+      ]);
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "数据源配置保存失败。",
+      );
+      if (error instanceof AdminApiError && error.status === 409) {
+        await loadUpstreamConfig();
+      }
+    } finally {
+      setSavingUpstreamConfig(false);
+    }
+  }
+
   async function submitUpstreamCredential(
     event: FormEvent<HTMLFormElement>,
   ) {
     event.preventDefault();
     if (upstreamCredentials.status !== "ready") {
-      setNotice("请先刷新 上游 凭据状态。");
+      setNotice("请先刷新上游凭据状态。");
       return;
     }
     const label = upstreamLabel.replace(/\s+/g, " ").trim();
     if (label.length < 2 || label.length > 80) {
-      setNotice("上游 凭据名称必须是 2–80 个字符。");
+      setNotice("上游凭据名称必须是 2–80 个字符。");
       return;
     }
     if (
       !/^[\x21-\x7E]{16,512}$/.test(upstreamApiKey)
     ) {
-      setNotice("请输入 16–512 个 ASCII 可见字符组成的 上游 API Key。");
+      setNotice("请输入 16–512 个 ASCII 可见字符组成的上游 API Key。");
       return;
     }
     if (!upstreamCredentials.data.encryptionConfigured) {
@@ -2752,7 +3316,7 @@ export function AdminClient() {
         result.activationConflict
           ? `已加密保存 ${result.credential.label} 为备用；活动数据源在提交期间发生变化，请从列表重新确认切换。`
           : result.credential.status === "active"
-          ? `已验证并启用 ${result.credential.label}；下一步请到“路由与定价”同步 上游 目录。`
+          ? `已验证并启用 ${result.credential.label}；下一步请到“路由与定价”同步上游目录。`
           : `已加密保存 ${result.credential.label}，当前为备用状态。`,
       );
       await Promise.all([
@@ -2763,7 +3327,7 @@ export function AdminClient() {
       setNotice(
         error instanceof Error
           ? error.message
-          : "上游 凭据保存失败。",
+          : "上游凭据保存失败。",
       );
       await loadUpstreamCredentials();
     } finally {
@@ -2780,7 +3344,7 @@ export function AdminClient() {
       !catalog.data.sync.coverage
     ) {
       setCatalogBatchError(
-        "当前目录没有完整覆盖证明，请先成功同步 上游 后再生成批量预览。",
+        "当前目录没有完整覆盖证明，请先成功同步上游后再生成批量预览。",
       );
       return;
     }
@@ -2984,6 +3548,79 @@ export function AdminClient() {
     }
   }
 
+  async function savePendingEndpointPrice(
+    endpoint: PendingCatalogEndpoint,
+  ) {
+    const price = parsePendingUsdInput(
+      pendingPriceDrafts[endpoint.path] ?? "",
+    );
+    if (price === null) {
+      setNotice("客户价必须是 $0–$100，最多 6 位小数。");
+      return;
+    }
+    if (price < endpoint.upstreamPriceUsdMicros) {
+      setNotice("客户价不能低于当前上游成本。");
+      return;
+    }
+    setSavingPendingPath(endpoint.path);
+    setNotice("");
+    try {
+      const result = await adminRequest(
+        "/api/admin/catalog/pending",
+        adminSecret,
+        isPendingCatalogPriceUpdateResponse,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            path: endpoint.path,
+            customerPriceUsdMicros: price,
+            expectedUpdatedAt: endpoint.updatedAt,
+          }),
+        },
+      );
+      setPendingCatalog((current) => {
+        if (current.status !== "ready") return current;
+        return {
+          status: "ready",
+          data: {
+            ...current.data,
+            endpoints: current.data.endpoints.map((item) =>
+              item.path === result.path
+                ? {
+                    ...item,
+                    customerPriceUsdMicros:
+                      result.customerPriceUsdMicros,
+                    updatedAt: result.updatedAt,
+                  }
+                : item,
+            ),
+          },
+        };
+      });
+      setPendingPriceDrafts((current) => ({
+        ...current,
+        [result.path]: usdInputValue(result.customerPriceUsdMicros),
+      }));
+      setNotice(
+        `已保存 ${result.path} 的客户价；该服务仍不可调用或上架，需等待文档与方法补齐。`,
+      );
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "文档待同步服务价格保存失败。",
+      );
+      if (
+        error instanceof AdminApiError &&
+        (error.status === 404 || error.status === 409)
+      ) {
+        await loadPendingCatalog();
+      }
+    } finally {
+      setSavingPendingPath("");
+    }
+  }
+
   function openReviewResolution(
     review: PaymentReview,
     action: ReviewAction,
@@ -3151,7 +3788,7 @@ export function AdminClient() {
       } else if (confirmAction.kind === "credential") {
         if (upstreamCredentials.status !== "ready") {
           throw new AdminApiError(
-            "上游 凭据状态尚未加载，请刷新后重试。",
+            "上游凭据状态尚未加载，请刷新后重试。",
             409,
           );
         }
@@ -3170,7 +3807,7 @@ export function AdminClient() {
         );
         setNotice(
           confirmAction.action === "activate"
-            ? `已验证并切换到 ${result.credential.label}；下一步请到“路由与定价”重新同步 上游 目录。`
+            ? `已验证并切换到 ${result.credential.label}；下一步请到“路由与定价”重新同步上游目录。`
             : `已撤销 ${result.credential.label}；密文不会再被运行时使用。`,
         );
         await Promise.all([
@@ -3185,9 +3822,13 @@ export function AdminClient() {
           { method: "POST" },
         );
         setNotice(
-          `同步完成：OpenAPI ${result.openApiOperations} 条，价格原始 ${result.rawPriceRows} / 去重 ${result.normalizedPrices} 条；映射 ${result.openApiPriceMapped}、仅价格目录 ${result.priceOnly}、仅 OpenAPI ${result.openApiOnly}、Key scope 排除 ${result.scopeExcluded}；最终核验 ${result.priced} 条（正价 ${result.positivePrice}、零价 ${result.zeroPrice}），停用缺失端点 ${result.disabledMissing} 条。`,
+          `同步完成：OpenAPI ${result.openApiOperations} 条，价格原始 ${result.rawPriceRows} / 去重 ${result.normalizedPrices} 条；映射 ${result.openApiPriceMapped}、仅价格目录 ${result.priceOnly}、仅 OpenAPI ${result.openApiOnly}、Key scope 排除 ${result.scopeExcluded}；最终核验 ${result.priced} 条（正价 ${result.positivePrice}、零价 ${result.zeroPrice}），文档待同步 ${result.pendingDocumentation} 条，停用缺失端点 ${result.disabledMissing} 条。`,
         );
-        await Promise.all([loadCatalog(), loadOverview()]);
+        await Promise.all([
+          loadCatalog(),
+          loadPendingCatalog(),
+          loadOverview(),
+        ]);
       }
       setConfirmAction(null);
     } catch (error) {
@@ -3198,7 +3839,7 @@ export function AdminClient() {
       ) {
         setConfirmAction(null);
         await loadUpstreamCredentials();
-        setNotice("上游 活动凭据状态已变化，请重新确认本次操作。");
+        setNotice("上游活动凭据状态已变化，请重新确认本次操作。");
       } else {
         setNotice(error instanceof Error ? error.message : "管理操作失败。");
       }
@@ -3217,7 +3858,7 @@ export function AdminClient() {
           <p className="section-kicker">RELAYBASE / OPERATIONS</p>
           <h1 id="admin-login-title">运营管理后台</h1>
           <p className="admin-login-intro">
-            查看实际用户与调用数据，维护 上游 路由、成本、客户价和支付复核队列。
+            查看实际用户与调用数据，维护上游路由、成本、客户价和支付复核队列。
           </p>
           <form onSubmit={submitSecret}>
             <label htmlFor="admin-secret">管理员主密钥</label>
@@ -3310,7 +3951,7 @@ export function AdminClient() {
             [
               ["overview", "运营总览"],
               ["users", "用户管理"],
-              ["upstream", "上游 数据源"],
+              ["upstream", "上游数据源"],
               ["catalog", "路由与定价"],
               ["payments", "支付复核"],
             ] as const
@@ -3710,23 +4351,276 @@ export function AdminClient() {
         {activeTab === "upstream" ? (
           <section
             className="admin-section"
-            aria-labelledby="upstream-credentials-title"
+            aria-labelledby="upstream-title"
           >
             <div className="admin-section-head">
               <div>
                 <p className="section-kicker">UPSTREAM / DATA SOURCE</p>
-                <h2 id="upstream-credentials-title">上游 数据源</h2>
+                <h2 id="upstream-title">上游数据源</h2>
               </div>
               <button
                 className="button button-ghost button-small"
-                onClick={() => void loadUpstreamCredentials()}
+                onClick={() => {
+                  void Promise.all([
+                    loadUpstreamConfig(),
+                    loadUpstreamCredentials(),
+                  ]);
+                }}
               >
                 刷新状态
               </button>
             </div>
             <StatePanel
+              state={upstreamConfig}
+              label="数据源配置"
+              onRetry={() => void loadUpstreamConfig()}
+            >
+              {upstreamConfig.status === "ready" ? (
+                <form
+                  className="admin-upstream-config-card"
+                  onSubmit={submitUpstreamConfig}
+                >
+                  <div className="admin-upstream-config-head">
+                    <div>
+                      <p className="section-kicker">
+                        SOURCE ROUTING CONTRACT
+                      </p>
+                      <h3>数据源路由配置</h3>
+                      <p>
+                        统一维护数据源 Origin、调用前缀、目录路径和认证约束。
+                        页面不会预置或公开任何实际服务品牌。
+                      </p>
+                    </div>
+                    <div className="admin-upstream-config-status">
+                      <span
+                        className={
+                          upstreamConfig.data.config?.enabled
+                            ? "is-enabled"
+                            : ""
+                        }
+                      >
+                        {upstreamConfig.data.configured
+                          ? upstreamConfig.data.config?.enabled
+                            ? "运行中"
+                            : "已停用"
+                          : "尚未保存"}
+                      </span>
+                      <strong>
+                        {upstreamConfig.data.config
+                          ? `v${upstreamConfig.data.config.version}`
+                          : "v0"}
+                      </strong>
+                      <small>
+                        {upstreamConfig.data.config
+                          ? `更新于 ${formatDate(
+                              upstreamConfig.data.config.updatedAt,
+                            )}`
+                          : "首次保存将创建版本 1"}
+                      </small>
+                    </div>
+                  </div>
+
+                  {!upstreamConfig.data.originAllowlistConfigured ? (
+                    <div className="admin-readiness-alert">
+                      <div>
+                        <strong>部署环境尚未设置 Origin 允许列表</strong>
+                        <p>
+                          先配置 UPSTREAM_ALLOWED_ORIGINS。只有允许列表中的
+                          公开 HTTPS Origin 才能保存，避免将代理指向内部网络。
+                        </p>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <label className="admin-upstream-config-toggle">
+                    <input
+                      type="checkbox"
+                      checked={upstreamConfigDraft.enabled}
+                      onChange={(event) =>
+                        setUpstreamConfigDraft((draft) => ({
+                          ...draft,
+                          enabled: event.target.checked,
+                        }))
+                      }
+                    />
+                    <span>
+                      <strong>启用这组数据源路由</strong>
+                      <small>
+                        停用后保留配置，但不会代理客户请求或同步目录。
+                      </small>
+                    </span>
+                  </label>
+
+                  <div className="admin-upstream-config-grid">
+                    <label className="is-wide">
+                      <span>数据源 Origin</span>
+                      <input
+                        type="url"
+                        required
+                        spellCheck={false}
+                        autoComplete="off"
+                        maxLength={2_000}
+                        value={upstreamConfigDraft.sourceOrigin}
+                        placeholder="https://api.example.com"
+                        onChange={(event) =>
+                          setUpstreamConfigDraft((draft) => ({
+                            ...draft,
+                            sourceOrigin: event.target.value,
+                          }))
+                        }
+                      />
+                      <small>
+                        仅填写 Origin，不要包含路径、端口、查询参数或凭据。
+                      </small>
+                    </label>
+                    <label>
+                      <span>API 路径前缀</span>
+                      <input
+                        spellCheck={false}
+                        maxLength={600}
+                        value={upstreamConfigDraft.apiPathPrefix}
+                        placeholder="/api/v1（可留空）"
+                        onChange={(event) =>
+                          setUpstreamConfigDraft((draft) => ({
+                            ...draft,
+                            apiPathPrefix: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span>OpenAPI 文档路径</span>
+                      <input
+                        required
+                        spellCheck={false}
+                        maxLength={600}
+                        value={upstreamConfigDraft.openApiPath}
+                        placeholder="/openapi.json"
+                        onChange={(event) =>
+                          setUpstreamConfigDraft((draft) => ({
+                            ...draft,
+                            openApiPath: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span>价格目录路径</span>
+                      <input
+                        required
+                        spellCheck={false}
+                        maxLength={600}
+                        value={upstreamConfigDraft.catalogPath}
+                        placeholder="/catalog"
+                        onChange={(event) =>
+                          setUpstreamConfigDraft((draft) => ({
+                            ...draft,
+                            catalogPath: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span>凭据验证路径</span>
+                      <input
+                        required
+                        spellCheck={false}
+                        maxLength={600}
+                        value={upstreamConfigDraft.credentialPath}
+                        placeholder="/credential/verify"
+                        onChange={(event) =>
+                          setUpstreamConfigDraft((draft) => ({
+                            ...draft,
+                            credentialPath: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span>目录认证模式</span>
+                      <select
+                        value={upstreamConfigDraft.catalogAuthMode}
+                        onChange={(event) =>
+                          setUpstreamConfigDraft((draft) => ({
+                            ...draft,
+                            catalogAuthMode: event.target
+                              .value as CatalogAuthMode,
+                          }))
+                        }
+                      >
+                        <option value="required">必须使用活动凭据</option>
+                        <option value="optional">有凭据时使用</option>
+                        <option value="none">无需凭据</option>
+                      </select>
+                    </label>
+                    <label className="is-wide">
+                      <span>公开目录排除前缀</span>
+                      <textarea
+                        rows={4}
+                        maxLength={60_100}
+                        spellCheck={false}
+                        value={
+                          upstreamConfigDraft.publicExcludedPrefixesText
+                        }
+                        placeholder={"/v1/internal/\n/v1/control/"}
+                        onChange={(event) =>
+                          setUpstreamConfigDraft((draft) => ({
+                            ...draft,
+                            publicExcludedPrefixesText:
+                              event.target.value,
+                          }))
+                        }
+                      />
+                      <small>
+                        每行一个 /v1/ 前缀，最多 100 条；命中的路由不会进入公开目录。
+                      </small>
+                    </label>
+                  </div>
+
+                  <div className="admin-upstream-config-impact">
+                    <strong>保存影响</strong>
+                    <p>
+                      保存会使当前目录同步证明和凭据验证结果失效，并下架现有服务。
+                      保存后必须重新验证活动凭据、同步目录并完成定价审核。
+                    </p>
+                  </div>
+                  <div className="admin-upstream-config-actions">
+                    <button
+                      className="button button-ghost"
+                      type="button"
+                      disabled={savingUpstreamConfig}
+                      onClick={() =>
+                        setUpstreamConfigDraft(
+                          upstreamConfigDraftFrom(
+                            upstreamConfig.data.config,
+                          ),
+                        )
+                      }
+                    >
+                      恢复已保存值
+                    </button>
+                    <button
+                      className="button button-blue"
+                      type="submit"
+                      disabled={
+                        savingUpstreamConfig ||
+                        !upstreamConfig.data.originAllowlistConfigured
+                      }
+                    >
+                      {savingUpstreamConfig
+                        ? "正在保存配置…"
+                        : `保存为 v${
+                            (upstreamConfig.data.config?.version ?? 0) +
+                            1
+                          }`}
+                    </button>
+                  </div>
+                </form>
+              ) : null}
+            </StatePanel>
+            <StatePanel
               state={upstreamCredentials}
-              label="上游 凭据"
+              label="上游凭据"
               onRetry={() => void loadUpstreamCredentials()}
             >
               {upstreamCredentials.status === "ready" ? (
@@ -3811,7 +4705,7 @@ export function AdminClient() {
                   >
                     <div>
                       <p className="section-kicker">ADD CREDENTIAL</p>
-                      <h3>新增 上游 API Key</h3>
+                      <h3>新增上游 API Key</h3>
                       <p>
                         Key 经同源 HTTPS 提交后立即使用 AES-256-GCM
                         加密；D1 保存密文、完整哈希、已验证 scope
@@ -3828,7 +4722,7 @@ export function AdminClient() {
                         onChange={(event) =>
                           setUpstreamLabel(event.target.value)
                         }
-                        placeholder="例如：Primary Provider"
+                        placeholder="例如：主数据源"
                       />
                     </label>
                     <label>
@@ -3856,7 +4750,7 @@ export function AdminClient() {
                         }
                       />
                       <span>
-                        保存后向 上游 验证并设为活动数据源
+                        保存后向上游验证并设为活动数据源
                         <small>
                           关闭时仅加密保存为备用，不会用于任何客户请求
                         </small>
@@ -3970,9 +4864,9 @@ export function AdminClient() {
                     </div>
                   ) : (
                     <div className="admin-empty">
-                      <strong>尚未保存 上游 凭据</strong>
+                      <strong>尚未保存上游凭据</strong>
                       <p>
-                        配置加密主密钥后，在上方添加第一个 上游 API Key。
+                        配置加密主密钥后，在上方添加第一个上游 API Key。
                       </p>
                     </div>
                   )}
@@ -3992,7 +4886,12 @@ export function AdminClient() {
               <div className="admin-section-actions">
                 <button
                   className="button button-ghost button-small"
-                  onClick={() => void loadCatalog()}
+                  onClick={() => {
+                    void Promise.all([
+                      loadCatalog(),
+                      loadPendingCatalog(),
+                    ]);
+                  }}
                 >
                   刷新目录
                 </button>
@@ -4000,10 +4899,274 @@ export function AdminClient() {
                   className="button button-dark button-small"
                   onClick={() => setConfirmAction({ kind: "sync" })}
                 >
-                  同步 上游
+                  同步上游
                 </button>
               </div>
             </div>
+            <section
+              className="admin-pending-catalog"
+              aria-labelledby="pending-catalog-title"
+            >
+              <div className="admin-pending-catalog-head">
+                <div>
+                  <p className="section-kicker">
+                    DOCUMENTATION HOLDING AREA
+                  </p>
+                  <h3 id="pending-catalog-title">
+                    文档待同步服务
+                  </h3>
+                  <p>
+                    这里收录价格目录已发现、但尚未匹配到完整文档与 HTTP
+                    方法的服务。它们与可调用目录严格隔离。
+                  </p>
+                </div>
+                {pendingCatalog.status === "ready" ? (
+                  <strong>
+                    {pendingCatalog.data.total.toLocaleString()} PENDING
+                  </strong>
+                ) : null}
+              </div>
+              <StatePanel
+                state={pendingCatalog}
+                label="文档待同步服务"
+                onRetry={() => void loadPendingCatalog()}
+              >
+                {pendingCatalog.status === "ready" ? (
+                  <>
+                    <div
+                      className="admin-pending-catalog-warning"
+                      role="note"
+                    >
+                      <strong>不可调用 · 不可上架</strong>
+                      <p>
+                        只有补齐接口文档、HTTP 方法和必要参数，并在下次同步中进入正式目录后，
+                        才能继续安全审核。此处仅允许预设客户价。
+                      </p>
+                    </div>
+                    <div className="admin-pending-catalog-toolbar">
+                      <label>
+                        <span>搜索待同步服务</span>
+                        <input
+                          type="search"
+                          maxLength={160}
+                          value={pendingCatalogQuery}
+                          placeholder="路径、平台、数据类型、入口或摘要"
+                          onChange={(event) => {
+                            setPendingCatalogQuery(event.target.value);
+                            setPendingCatalogPage(0);
+                          }}
+                        />
+                      </label>
+                      <p>
+                        已完整加载{" "}
+                        <strong>
+                          {pendingCatalog.data.count.toLocaleString()}
+                        </strong>{" "}
+                        条；当前筛选{" "}
+                        <strong>
+                          {filteredPendingEndpoints.length.toLocaleString()}
+                        </strong>{" "}
+                        条
+                      </p>
+                    </div>
+
+                    {visiblePendingEndpoints.length ? (
+                      <div className="admin-pending-catalog-table-wrap">
+                        <table className="admin-pending-catalog-table">
+                          <thead>
+                            <tr>
+                              <th>路径</th>
+                              <th>平台</th>
+                              <th>数据类型 / 入口</th>
+                              <th>成本</th>
+                              <th>客户价</th>
+                              <th>速率</th>
+                              <th>状态</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {visiblePendingEndpoints.map((endpoint) => {
+                              const draft =
+                                pendingPriceDrafts[endpoint.path] ?? "";
+                              const parsedDraft =
+                                parsePendingUsdInput(draft);
+                              const priceChanged =
+                                parsedDraft !== null &&
+                                parsedDraft !==
+                                  endpoint.customerPriceUsdMicros;
+                              const invalidPrice =
+                                parsedDraft === null ||
+                                parsedDraft <
+                                  endpoint.upstreamPriceUsdMicros;
+                              return (
+                                <tr key={endpoint.path}>
+                                  <td>
+                                    <code title={endpoint.path}>
+                                      {endpoint.path}
+                                    </code>
+                                    <small>{endpoint.summary}</small>
+                                  </td>
+                                  <td>
+                                    <strong>{endpoint.platform}</strong>
+                                  </td>
+                                  <td>
+                                    <span>
+                                      {catalogDataTypeLabel(
+                                        endpoint.dataType,
+                                      )}{" "}
+                                      <code>{endpoint.dataType}</code>
+                                    </span>
+                                    <small>
+                                      {catalogSurfaceLabel(
+                                        endpoint.surface,
+                                      )}{" "}
+                                      / {endpoint.surface}
+                                    </small>
+                                  </td>
+                                  <td>
+                                    <strong>
+                                      {formatUsd(
+                                        endpoint.upstreamPriceUsdMicros,
+                                        6,
+                                      )}
+                                    </strong>
+                                    <small>
+                                      {endpoint.priceVerified
+                                        ? "成本已核验"
+                                        : "成本待核验"}
+                                    </small>
+                                  </td>
+                                  <td>
+                                    <div className="admin-pending-price-control">
+                                      <span aria-hidden="true">$</span>
+                                      <input
+                                        aria-label={`${endpoint.path} 客户价（USD / 次）`}
+                                        aria-invalid={invalidPrice}
+                                        inputMode="decimal"
+                                        maxLength={11}
+                                        value={draft}
+                                        onChange={(event) =>
+                                          setPendingPriceDrafts(
+                                            (current) => ({
+                                              ...current,
+                                              [endpoint.path]:
+                                                event.target.value,
+                                            }),
+                                          )
+                                        }
+                                      />
+                                      <button
+                                        className="button button-blue button-small"
+                                        type="button"
+                                        disabled={
+                                          savingPendingPath ===
+                                            endpoint.path ||
+                                          invalidPrice ||
+                                          !priceChanged
+                                        }
+                                        onClick={() =>
+                                          void savePendingEndpointPrice(
+                                            endpoint,
+                                          )
+                                        }
+                                      >
+                                        {savingPendingPath === endpoint.path
+                                          ? "保存中"
+                                          : "保存"}
+                                      </button>
+                                    </div>
+                                    {invalidPrice ? (
+                                      <small className="is-error">
+                                        不得低于成本，最多 6 位小数
+                                      </small>
+                                    ) : null}
+                                  </td>
+                                  <td>
+                                    <strong>
+                                      {endpoint.rateLimitRps === null
+                                        ? "未提供"
+                                        : `${endpoint.rateLimitRps.toLocaleString(
+                                            "en-US",
+                                            {
+                                              maximumFractionDigits: 3,
+                                            },
+                                          )} RPS`}
+                                    </strong>
+                                    <small>
+                                      {endpoint.rateLimit ??
+                                        "无原始速率说明"}
+                                    </small>
+                                  </td>
+                                  <td>
+                                    <span className="admin-pending-status">
+                                      不可调用
+                                    </span>
+                                    <small>文档与方法待补齐</small>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <div className="admin-empty">
+                        <strong>
+                          {pendingCatalog.data.count
+                            ? "没有符合搜索条件的待同步服务"
+                            : "当前没有文档待同步服务"}
+                        </strong>
+                        <p>
+                          {pendingCatalog.data.count
+                            ? "调整搜索词后重试。"
+                            : "下次目录同步发现缺少文档或方法的服务时，会安全隔离到这里。"}
+                        </p>
+                      </div>
+                    )}
+
+                    {filteredPendingEndpoints.length ? (
+                      <div className="admin-pending-catalog-pagination">
+                        <button
+                          className="button button-ghost button-small"
+                          type="button"
+                          disabled={safePendingCatalogPage === 0}
+                          onClick={() =>
+                            setPendingCatalogPage((page) =>
+                              Math.max(0, page - 1),
+                            )
+                          }
+                        >
+                          上一页
+                        </button>
+                        <span>
+                          第 {safePendingCatalogPage + 1} /{" "}
+                          {pendingCatalogPageCount} 页 · 每页最多{" "}
+                          {PENDING_CATALOG_PAGE_SIZE} 条
+                        </span>
+                        <button
+                          className="button button-ghost button-small"
+                          type="button"
+                          disabled={
+                            safePendingCatalogPage >=
+                            pendingCatalogPageCount - 1
+                          }
+                          onClick={() =>
+                            setPendingCatalogPage((page) =>
+                              Math.min(
+                                pendingCatalogPageCount - 1,
+                                page + 1,
+                              ),
+                            )
+                          }
+                        >
+                          下一页
+                        </button>
+                      </div>
+                    ) : null}
+                  </>
+                ) : null}
+              </StatePanel>
+            </section>
             <StatePanel
               state={catalog}
               label="接口目录"
@@ -4121,7 +5284,7 @@ export function AdminClient() {
                       <div className="admin-catalog-proof-missing">
                         <strong>当前记录缺少覆盖证明</strong>
                         <p>
-                          请重新同步 上游；在新快照成功发布前，系统不会伪造覆盖数量。
+                          请重新同步上游；在新快照成功发布前，系统不会伪造覆盖数量。
                         </p>
                       </div>
                     )}
@@ -4674,7 +5837,7 @@ export function AdminClient() {
                     <div className="admin-empty">
                       <strong>没有符合条件的接口</strong>
                       <p>
-                        调整筛选条件，或从 上游 同步最新端点目录。
+                        调整筛选条件，或从上游同步最新端点目录。
                       </p>
                     </div>
                   )}
@@ -5040,9 +6203,9 @@ export function AdminClient() {
                   : "下架此接口？"
                 : confirmAction.kind === "credential"
                   ? confirmAction.action === "activate"
-                    ? "验证并切换 上游 数据源？"
-                    : "撤销这个 上游 API Key？"
-                  : "从 上游 同步全部接口？"
+                    ? "验证并切换上游数据源？"
+                    : "撤销这个上游 API Key？"
+                  : "从上游同步全部接口？"
           }
           description={
             confirmAction.kind === "user"
@@ -5055,11 +6218,11 @@ export function AdminClient() {
                   : `${confirmAction.endpoint.path} 将立即停止接受新调用，历史账单不受影响。`
                 : confirmAction.kind === "credential"
                   ? confirmAction.action === "activate"
-                    ? `服务端会先向 上游 验证 ${confirmAction.credential.label}，成功后用版本比较切换唯一活动凭据。`
+                    ? `服务端会先向上游验证 ${confirmAction.credential.label}，成功后用版本比较切换唯一活动凭据。`
                     : confirmAction.credential.status === "active"
                       ? `撤销 ${confirmAction.credential.label} 后托管模式会保持开启，但数据调用和目录同步将安全关闭，直到启用另一个 Key。`
                       : `${confirmAction.credential.label} 将永久标记为已撤销，不能再次启用。`
-                  : "同步会读取 上游 当前目录。新接口默认下架，价格变化的已上架接口会自动下架等待复核，客户价不会被静默覆盖。"
+                  : "同步会读取上游当前目录。新接口默认下架，价格变化的已上架接口会自动下架等待复核，客户价不会被静默覆盖。"
           }
           confirmLabel={
             confirmAction.kind === "user"

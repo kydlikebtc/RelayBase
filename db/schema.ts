@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  check,
   index,
   integer,
   sqliteTable,
@@ -277,15 +278,41 @@ export const operationHeartbeats = sqliteTable("operation_heartbeats", {
   detailsJson: text("details_json"),
 });
 
+export const upstreamSourceConfig = sqliteTable(
+  "upstream_source_config",
+  {
+    id: integer("id").primaryKey(),
+    enabled: integer("enabled", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    version: integer("version").notNull().default(0),
+    configHash: text("config_hash").notNull(),
+    sourceOrigin: text("source_origin").notNull(),
+    apiPathPrefix: text("api_path_prefix").notNull(),
+    openApiPath: text("openapi_path").notNull(),
+    catalogPath: text("catalog_path").notNull(),
+    credentialPath: text("credential_path").notNull(),
+    catalogAuthMode: text("catalog_auth_mode").notNull(),
+    publicExcludedPrefixesJson: text("public_excluded_prefixes_json")
+      .notNull()
+      .default("[]"),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    check("upstream_source_config_singleton", sql`${table.id} = 1`),
+  ],
+);
+
 export const upstreamCredentials = sqliteTable(
   "upstream_credentials",
   {
     id: text("id").primaryKey(),
-    provider: text("provider").notNull().default("tikhub"),
+    provider: text("provider").notNull().default("primary"),
     label: text("label").notNull(),
     encryptedSecret: text("encrypted_secret").notNull(),
     secretHash: text("secret_hash").notNull(),
     verifiedScopesJson: text("verified_scopes_json"),
+    verifiedConfigHash: text("verified_config_hash"),
     expiresAt: text("expires_at"),
     verifiedAt: text("verified_at"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -396,6 +423,37 @@ export const endpointCatalog = sqliteTable(
   ],
 );
 
+export const catalogUnresolvedEndpoints = sqliteTable(
+  "catalog_unresolved_endpoints",
+  {
+    path: text("path").primaryKey(),
+    platform: text("platform").notNull(),
+    dataType: text("data_type").notNull().default("other"),
+    surface: text("surface").notNull().default("other"),
+    summary: text("summary"),
+    upstreamPriceUsdMicros: integer("upstream_price_usd_micros").notNull(),
+    customerPriceUsdMicros: integer("customer_price_usd_micros").notNull(),
+    priceVerified: integer("price_verified", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    rateLimitRaw: text("rate_limit_raw"),
+    rateLimitRps: integer("rate_limit_rps"),
+    freeCredit: integer("free_credit", { mode: "boolean" }),
+    volumeDiscount: integer("volume_discount", { mode: "boolean" }),
+    sourceType: text("source_type"),
+    sourceOwner: text("source_owner"),
+    syncGeneration: text("sync_generation"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("catalog_unresolved_endpoints_platform_idx").on(table.platform),
+    index("catalog_unresolved_endpoints_generation_idx").on(
+      table.syncGeneration,
+    ),
+  ],
+);
+
 export const catalogSyncLocks = sqliteTable("catalog_sync_locks", {
   id: integer("id").primaryKey(),
   generation: text("generation").notNull(),
@@ -409,6 +467,8 @@ export const catalogSyncState = sqliteTable("catalog_sync_state", {
   credentialId: text("credential_id"),
   credentialFingerprint: text("credential_fingerprint"),
   credentialStateVersion: integer("credential_state_version"),
+  sourceConfigVersion: integer("source_config_version"),
+  sourceConfigHash: text("source_config_hash"),
   openApiVersion: text("openapi_version"),
   openApiOperationCount: integer("openapi_operation_count"),
   rawPriceRowCount: integer("raw_price_row_count"),
@@ -610,6 +670,41 @@ export const catalogSyncStaging = sqliteTable(
     index("catalog_sync_staging_generation_idx").on(table.generation),
     uniqueIndex("catalog_sync_staging_generation_path_unique").on(
       table.generation,
+      table.path,
+    ),
+  ],
+);
+
+export const catalogUnresolvedStaging = sqliteTable(
+  "catalog_unresolved_staging",
+  {
+    id: text("id").primaryKey(),
+    syncGeneration: text("sync_generation").notNull(),
+    path: text("path").notNull(),
+    platform: text("platform").notNull(),
+    dataType: text("data_type").notNull().default("other"),
+    surface: text("surface").notNull().default("other"),
+    summary: text("summary"),
+    upstreamPriceUsdMicros: integer("upstream_price_usd_micros").notNull(),
+    customerPriceUsdMicros: integer("customer_price_usd_micros").notNull(),
+    priceVerified: integer("price_verified", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    rateLimitRaw: text("rate_limit_raw"),
+    rateLimitRps: integer("rate_limit_rps"),
+    freeCredit: integer("free_credit", { mode: "boolean" }),
+    volumeDiscount: integer("volume_discount", { mode: "boolean" }),
+    sourceType: text("source_type"),
+    sourceOwner: text("source_owner"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("catalog_unresolved_staging_generation_idx").on(
+      table.syncGeneration,
+    ),
+    uniqueIndex("catalog_unresolved_staging_generation_path_unique").on(
+      table.syncGeneration,
       table.path,
     ),
   ],

@@ -3,9 +3,8 @@
 declare namespace Cloudflare {
   interface Env {
     DB: D1Database;
-    UPSTREAM_API_KEY?: string;
     UPSTREAM_CREDENTIALS_ENCRYPTION_KEY?: string;
-    UPSTREAM_BASE_URL?: string;
+    UPSTREAM_ALLOWED_ORIGINS?: string;
     RESELLER_AUTHORIZED?: string;
     PAYMENT_PROVIDER?: string;
     NOWPAYMENTS_API_KEY?: string;

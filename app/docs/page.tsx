@@ -66,14 +66,18 @@ const errors = [
   ["400", "invalid_idempotency_key", "幂等键缺失或格式无效"],
   ["400", "invalid_marketplace_filter", "API 市场筛选值无效或重复"],
   ["400", "invalid_pagination", "分页 limit 或 offset 超出允许范围"],
-  ["400", "invalid_marketplace_endpoint", "详情 path 或 method 缺失或无效"],
+  ["400", "invalid_marketplace_endpoint", "详情 path 缺失，或可选 method 无效"],
   ["400", "invalid_max_cost", "最高成本请求头不是允许范围内的微美元整数"],
   ["401", "invalid_api_key", "API Key 缺失、无效或已撤销"],
   ["402", "insufficient_balance", "可用余额不足以发起本次调用"],
   ["409", "idempotency_conflict", "幂等键已被使用；不会重复调用或扣费"],
   ["409", "price_quote_exceeded", "实时客户价超过请求声明的最高成本"],
   ["404", "endpoint_not_enabled", "接口未开放，或上游通过统一错误体返回 404"],
-  ["404", "marketplace_endpoint_not_found", "参考市场中没有匹配的 path 与 method"],
+  [
+    "404",
+    "marketplace_endpoint_not_found",
+    "参考市场中没有匹配的 path 或可选 method",
+  ],
   ["429", "rate_limit_exceeded", "客户、账户或共享上游达到速率限制"],
   ["502", "upstream_unavailable", "上游网络不可用；请求已退款"],
   [
@@ -187,54 +191,81 @@ export default async function DocsPage() {
             <h2>区分能力发现与真实可调用。</h2>
             <p>
               <Link href="/catalog">API 市场页面</Link>
-              只读取当前部署在管理后台完成同步的运行时目录。仓库不内置第三方
-              OpenAPI 快照、原始说明、来源哈希或官方标签清单；尚未同步时市场返回
-              空结果。公开文案和分类由 RelayBase 生成，不代表某个 Provider 的
-              官方文档。
+              只读取当前部署在管理后台完成同步的运行时完整市场目录。目录同时包含
+              已匹配接口文档的完整定义条目，以及只存在于价格目录的 price-only
+              文档待同步条目；尚未同步时返回空结果。仓库不内置第三方 OpenAPI
+              快照、原始说明、来源哈希或官方标签清单。
             </p>
+            <p>
+              底层数据源的 HTTPS Origin、路由与 API Key 只由运营方在管理后台运行时
+              配置，API Key 单独加密保存。公共市场、健康接口、日志和构建产物都不
+              返回实际来源；公开文案和分类由 RelayBase 生成，不代表数据源的官方
+              文档。
+            </p>
+            <div className="docs-callout docs-callout-warning">
+              <span>!</span>
+              <div>
+                <b>升级后必须重新录入托管凭据</b>
+                <p>
+                  中性化迁移会永久撤销旧托管密钥并不可逆覆盖原密文，同时清空活动
+                  凭据。运营方必须重新保存运行时数据源、录入并验证新凭据，再完成
+                  全量同步和人工审核；旧密钥不能恢复或重新启用。
+                </p>
+              </div>
+            </div>
             <CodePanel title="Marketplace discovery" language="HTTP">
-              {`GET ${origin}/api/marketplace?q=profile&platform=example&tag=profile_creator&dataType=profile_creator&method=GET&surface=web&availability=available&limit=20&offset=0
+              {`GET ${origin}/api/marketplace?q=profile&platform=example&category=profile_creator&dataType=profile_creator&method=GET&surface=web&availability=available&limit=20&offset=0
 GET ${origin}/api/marketplace/detail?path=%2Fv1%2Fexample%2Fprofile%2Fread&method=GET`}
             </CodePanel>
             <p>
               市场列表支持 <code>q</code>、<code>platform</code>、
-              RelayBase 能力分类 <code>tag</code>、归一化分类 <code>dataType</code>、
+              RelayBase 能力分类 <code>category</code>、归一化分类{" "}
+              <code>dataType</code>、
               <code>method</code>、
               <code>surface</code>、<code>availability</code>、
               <code>limit</code> 和 <code>offset</code>。默认每页 20 条；
-              响应包含 <code>source</code>、全局 <code>stats</code> 与{" "}
+              响应包含中性的 <code>catalog</code> 状态、全局{" "}
+              <code>stats</code> 与{" "}
               <code>facets</code>、当前页 <code>endpoints</code>、筛选后{" "}
               <code>total</code>、<code>count</code>、<code>offset</code> 和{" "}
               <code>nextOffset</code>。
             </p>
             <CodePanel title="Marketplace detail response" language="JSON">
               {`{
-  "source": {
-    "provider": "Configured upstream",
-    "openApiVersion": null,
-    "snapshotHash": null,
-    "generatedAt": "2026-07-24T09:30:00.000Z",
-    "operationCount": 1
+  "catalog": {
+    "revision": "sync_runtime_revision",
+    "updatedAt": "2026-07-24T09:30:00.000Z",
+    "complete": true,
+    "serviceCount": 1
   },
   "endpoint": {
+    "id": "svc_12s7du3_read",
     "path": "/v1/example/profile/read",
     "method": "GET",
-    "availability": "pending",
+    "availability": "available",
     "dataType": "profile_creator",
-    "tags": ["profile_creator", "web"],
+    "categories": ["profile_creator", "web"],
     "surface": "web",
-    "operationId": null,
+    "summary": "Read",
+    "pricing": {
+      "amountUsdMicros": 1300,
+      "currency": "USD",
+      "unit": "request",
+      "verified": true
+    },
+    "rateLimitRps": 10,
+    "documentationStatus": "complete",
     "description": "通过 RelayBase 查询 example 的 profile_creator 数据。",
-    "parameters": [
-      {
-        "name": "profile_id",
-        "in": "query",
-        "required": true,
-        "schema": { "type": "string" }
-      }
-    ],
-    "requestBody": null,
-    "response": null
+    "input": {
+      "parameters": [{ "name": "profile_id", "in": "query", "required": true }],
+      "requestBody": null
+    },
+    "response": {
+      "contentType": "application/json",
+      "mode": "relaybase_envelope",
+      "schema": null,
+      "description": "成功时返回 RelayBase 的 { success: true, data } JSON 包装；外部服务控制字段不会透传。"
+    }
   },
   "examples": {
     "curl": "curl ...",
@@ -244,14 +275,31 @@ GET ${origin}/api/marketplace/detail?path=%2Fv1%2Fexample%2Fprofile%2Fread&metho
 }`}
             </CodePanel>
             <p>
-              详情查询必须同时提供 URL 编码的精确 <code>path</code> 和{" "}
-              <code>method=GET|POST</code>。它返回 RelayBase 分类、自写说明、经过
-              安全过滤的参数结构，以及按该端点方法生成的 cURL、JavaScript、
-              Python 示例；不会返回 Provider 名称、来源地址、原始描述、原始
-              operationId、响应 Schema 或快照哈希。
+              详情查询必须提供 URL 编码的精确 <code>path</code>。查询完整定义服务
+              时必须同时提供 <code>method=GET|POST</code>；查询 price-only
+              文档待同步服务时省略未知方法。完整定义服务返回 RelayBase 分类、
+              自写说明、结构化价格、安全过滤后的输入结构和三种调用示例。
+              price-only 服务固定返回 <code>method=null</code>、
+              <code>documentationStatus=pending</code>、空输入结构和空示例。
+              响应不会返回数据源名称、来源地址、原始描述、原始 operationId、
+              响应 Schema 或快照哈希。
+              实际调用成功后统一返回
+              <code>{"{ success: true, data }"}</code>，不透传外部服务的顶层
+              文档、支持入口、消息或请求 ID。
               <code>available</code> 才表示当前可代理；<code>pending</code> 是待审核
               或部署尚未就绪，<code>restricted</code> 永不开放。
             </p>
+            <div className="docs-callout docs-callout-warning">
+              <span>×</span>
+              <div>
+                <b>price-only 服务不能调用或上架</b>
+                <p>
+                  管理员可以预设客户价，但不能手工补造 HTTP 方法。只有后续运行时
+                  文档提供匹配的方法和输入定义，并经新一轮同步转为完整定义服务后，
+                  才能进入安全审核和上架流程。
+                </p>
+              </div>
+            </div>
             <div className="docs-callout docs-callout-warning">
               <span>!</span>
               <div>
@@ -271,11 +319,11 @@ GET ${origin}/api/catalog?platform=example&dataType=profile_creator&tag=profile_
               <code>/api/catalog</code> 是端点级已开放清单。客户还必须确认响应中的{" "}
               <code>mode=live</code>，并满足最新 readiness、账户、余额和限流条件。
               列表支持精确的 <code>platform</code>、<code>dataType</code>、
-              <code>tag</code> 与 <code>surface</code> 筛选；每条端点返回当前成功
-              同步代次的 <code>dataType</code>、<code>tags</code>、
-              <code>surface</code> 和 <code>operationId</code>，方便客户按同一
-              分类构建调用与报价页面。
-              <code>priceUsdMicros</code> 是每次上游 HTTP 200 成功请求的客户价格；
+              <code>tag</code> 与 <code>surface</code> 筛选；每条端点只返回
+              RelayBase 服务编号、路径、方法、分类、入口、自写摘要和结构化{" "}
+              <code>pricing</code>，不会返回原始 operationId。
+              <code>pricing.amountUsdMicros</code> 是每次上游 HTTP 200 成功请求的
+              客户价格；
               未出现在该目录中的路径不能调用。真实代理与充值还要求服务端已归档
               上游商业授权与付款模式书面确认；缺失时两者都会安全关闭。
               <code>capabilities.taxonomyReady</code> 还必须为 true；畸形 v1
@@ -334,8 +382,8 @@ X-RelayBase-Max-Cost-Usd-Micros: 2000`}
             <div className="docs-section-label">04 / EXAMPLES</div>
             <h2>同一请求，三种写法</h2>
             <p>
-              下面都请求同一个 TikTok 用户资料能力。把示例域名替换为你的部署域名，并替换 API
-              Key。
+              下面都请求同一个合成的用户资料能力。把示例域名替换为你的部署域名，
+              并替换 API Key。
             </p>
             <div className="docs-code-stack">
               <CodePanel title="cURL" language="SHELL">
@@ -354,8 +402,10 @@ X-RelayBase-Max-Cost-Usd-Micros: 2000`}
             <div className="docs-section-label">05 / RESPONSE</div>
             <h2>响应与 requestId</h2>
             <p>
-              公开端点成功时原样透传上游 JSON，不额外包裹 RelayBase
-              字段。请求标识与计费信息通过响应头和控制台提供；任何平台或上游错误都使用下方统一错误体。
+              公开端点成功时统一返回
+              <code>{"{ success: true, data }"}</code>。外部服务的顶层控制字段
+              不会透传；请求标识与计费信息通过响应头和控制台提供，任何平台或数据源
+              错误都使用下方统一错误体。
             </p>
             <CodePanel title="RelayBase response headers" language="HTTP">
               {`X-Request-Id: req_01K2...
@@ -366,7 +416,7 @@ X-RelayBase-Balance-Usd-Micros: 24998000`}
               <div>
                 <span>200</span>
                 <b>请求成功</b>
-                <p>上游 JSON 已原样返回，本次调用按对应能力最终计费。</p>
+                <p>数据载荷已放入 RelayBase 的 data 字段，本次调用按对应能力最终计费。</p>
               </div>
               <div>
                 <span>4xx</span>

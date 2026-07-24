@@ -4,15 +4,16 @@ RelayBase 是一个多租户数据 API 网关。客户使用 RelayBase 签发的
 `/v1/...` 路径；服务端负责目录审核、客户定价、余额预扣、上游调用、失败退款、
 幂等、限流和审计。
 
-当前应用版本：`v0.4.0-preview.1`。默认运行在安全沙盒。未完成书面商业授权、法律审查、
+当前应用版本：`v0.4.0-preview.2`。默认运行在安全沙盒。未完成书面商业授权、法律审查、
 支付商审批、登录配置、目录审核和近期对账之前，真实代理与稳定币充值都会安全关闭。
 
 ## 已实现能力
 
 - Google OAuth 与 EVM 钱包签名登录
 - 用户、登录身份、会话、客户 API Key 和调用数据管理
-- 管理后台维护加密上游凭据、目录、路由、成本、客户价和上下架状态
-- 运行时同步完整能力目录；新端点默认下架，价格变化会自动等待复核
+- 管理后台维护运行时数据源、加密凭据、目录路由、成本、客户价和上下架状态
+- 已恢复运行时完整市场目录；同时保留完整定义条目与仅价格目录的文档待同步条目，
+  新端点默认下架，价格变化会自动等待复核
 - API 市场按平台、RelayBase 能力分类、数据类型、方法、调用表面和可用状态筛选
 - 预付余额、请求级幂等、最高报价保护、成功计费与失败自动退款
 - NOWPayments 稳定币订单、验签回调、定时对账、晚到款、重复入金和退款冲销
@@ -29,9 +30,13 @@ RelayBase 是一个多租户数据 API 网关。客户使用 RelayBase 签发的
 - 不公开 Provider 名称、来源地址、原始描述、原始 operationId、响应 Schema 或
   快照哈希。
 - 上游内部账户、凭据、价格等控制面服务不会进入客户市场。
-- 只有通过安全审核、人工核价并明确上架的端点才会标记为 `available`。
+- 完整市场由“完整定义条目”和“文档待同步条目”组成。后者是价格目录存在、但尚未
+  匹配到运行时接口文档与 HTTP 方法的 price-only 条目，只用于能力发现，不可调用
+  或上架。
+- 只有完成能力、文档、安全和成本校验，并由后台人工核价和明确上架的端点才会标记
+  为 `available`。
 
-详细边界见 [上游 Provider 集成边界](docs/UPSTREAM-INTEGRATION.md)。
+详细边界见 [上游数据源集成边界](docs/UPSTREAM-INTEGRATION.md)。
 
 ## 本地开发
 
@@ -61,8 +66,8 @@ npm run check
 
 ### 上游
 
-- `UPSTREAM_BASE_URL`：经授权 Provider 的唯一 HTTPS API 基础地址
-- `UPSTREAM_API_KEY`：首次启用托管凭据前的迁移回退
+- `UPSTREAM_ALLOWED_ORIGINS`：允许管理员在后台选择的、以逗号分隔的精确 HTTPS
+  origin 白名单；必须作为托管 Secret 保存，留空时同步、验证和代理全部 fail closed
 - `UPSTREAM_CREDENTIALS_ENCRYPTION_KEY`：32 个随机字节编码成 43 字符、无
   padding 的 base64url；必须跨部署稳定保存
 - `RESELLER_AUTHORIZED=true`：仅在多租户转售、白标、缓存和价格加成得到书面授权
@@ -70,8 +75,15 @@ npm run check
 - `UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED=true`：仅在付款模式已获上游书面确认
   且证据已私下归档后设置
 
-一旦后台成功启用托管凭据，系统永久进入 managed mode，不再回退环境变量 Key。
-加密主密钥丢失、密文异常、活动 Key 撤销或过期都会立即关闭真实上游调用。
+来源地址、API Key 和目录路由只允许在管理后台运行时录入；公开代码、构建模板和
+示例配置不得保存真实来源。后台只接受 `UPSTREAM_ALLOWED_ORIGINS` 白名单内的
+HTTPS origin，并加密保存凭据。加密主密钥丢失、密文异常、活动 Key 撤销或过期
+都会立即关闭真实上游调用。公共市场、健康接口、日志和构建产物只暴露中性运行
+状态，不返回实际 Origin、数据源路由或凭据。
+
+执行 `0014` 中性化迁移时，所有旧托管上游密钥都会被永久撤销，原密文会被不可逆
+覆盖，托管模式和活动密钥也会被清空。升级后必须在后台重新保存运行时数据源、重新
+录入并验证一条新凭据，再完成全量同步和人工审核；旧记录不能恢复或重新启用。
 
 ### 登录
 
@@ -117,7 +129,9 @@ ${PUBLIC_APP_URL}/admin
 
 - 实际用户、身份、会话、API Key 和用量统计
 - 加密上游凭据的保存、在线验证、切换与永久撤销
+- 运行时数据源 Origin、API 前缀、文档/价格/凭据路由与公开排除前缀
 - 目录同步、覆盖证明、安全分类、成本与客户价
+- price-only 文档待同步服务的隔离查看和客户价预设
 - 单端点或批量定价、上架、调价和下架
 - 支付订单、人工复核、退款冲销和孤儿订单恢复
 - readiness 缺口与操作审计
@@ -130,14 +144,17 @@ ${PUBLIC_APP_URL}/admin
 运行时市场：
 
 ```text
-GET /api/marketplace?q=profile&platform=example&tag=profile_creator&dataType=profile_creator&method=GET&surface=web&availability=available&limit=20&offset=0
+GET /api/marketplace?q=profile&platform=example&category=profile_creator&dataType=profile_creator&method=GET&surface=web&availability=available&limit=20&offset=0
 GET /api/marketplace/detail?path=%2Fv1%2Fexample%2Fprofile%2Fread&method=GET
 ```
 
-`GET /api/marketplace` 返回 `source`、`stats`、`facets`、`endpoints`、`total`、
-`count`、`offset` 和 `nextOffset`。`GET /api/marketplace/detail` 需要精确的
-`path` 与 `method`，返回 RelayBase 说明、分类、安全过滤后的参数结构和三种调用
-示例。
+`GET /api/marketplace` 返回 `catalog`、`stats`、`facets`、`endpoints`、`total`、
+`count`、`offset` 和 `nextOffset`。完整市场包含已匹配运行时接口文档的完整定义
+条目，也包含只存在于价格目录的 price-only 条目。price-only 条目的
+`documentationStatus=pending`、`method=null`，不可调用或上架，直到后续运行时
+文档补齐方法和输入定义并经新一轮同步匹配。`GET /api/marketplace/detail` 需要精确
+的 `path`；查询完整定义条目时必须同时传入 `method=GET|POST`，查询 price-only
+条目时省略未知方法。只有完整定义条目才会返回安全过滤后的输入结构和非空调用示例。
 
 真实可调用目录：
 
@@ -150,7 +167,7 @@ GET /api/catalog?platform=example&dataType=profile_creator&tag=profile_creator&s
 
 ## 目录同步与审核
 
-同步当前上游能力和价格：
+同步当前上游能力、文档状态和价格：
 
 ```bash
 curl -X POST "$APP_URL/api/admin/catalog/sync" \
@@ -160,13 +177,20 @@ curl -X POST "$APP_URL/api/admin/catalog/sync" \
 同步会：
 
 1. 获取运行时能力规范和可信价格目录。
-2. 校验完整性、路径、方法、分类、scope 和价格精度。
+2. 区分完整定义条目与 price-only 文档待同步条目，并校验完整性、路径、方法、
+   分类、scope 和价格精度。
 3. 解析 GET/POST、参数结构、RelayBase 数据类型和调用表面。
 4. 对 Cookie、会话、令牌、密钥、写入、发布、互动和删除能力执行安全分类。
 5. 在临时代次完成全部验证后原子发布；失败时保留上一成功目录。
 
-只有 `safe_data_read`、价格已验证且经过人工审核的服务可以上架。客户价格使用 USD
-micros：`1 USD = 1,000,000`。
+后台可预设 price-only 条目的客户价，但不能补造缺失的方法或把它上架。只有在后续
+运行时文档中出现匹配定义，并重新同步为完整定义条目后，才能继续安全分类、人工
+核价和上架审核。最终只有 `safe_data_read`、文档与价格已验证且经过人工审核的
+服务可以调用。客户价格使用 USD micros：`1 USD = 1,000,000`。
+
+客户调用成功时统一返回 `{"success":true,"data":...}`；外部服务的顶层文档链接、
+支持入口、消息、状态文本和请求 ID 不会透传。RelayBase 请求 ID 仅通过
+`x-request-id` 响应头返回。
 
 单端点审核示例：
 

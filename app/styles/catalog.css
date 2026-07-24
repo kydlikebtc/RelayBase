@@ -526,6 +526,11 @@
   background: var(--lime);
 }
 
+.marketplace-method.is-pending {
+  color: var(--ink-soft);
+  background: var(--paper-raised);
+}
+
 .marketplace-availability.is-available {
   color: white;
   background: var(--green);
@@ -638,6 +643,12 @@
   font-weight: 850;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.marketplace-card dd small {
+  font-family: var(--sans);
+  font-size: 8px;
+  font-weight: 800;
 }
 
 .marketplace-card-open {
@@ -1066,6 +1077,14 @@
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.marketplace-detail-price small {
+  display: block;
+  margin-top: 4px;
+  color: var(--ink-soft);
+  font-size: 9px;
+  font-weight: 750;
 }
 
 .marketplace-detail-content > section {
