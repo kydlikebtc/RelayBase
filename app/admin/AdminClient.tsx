@@ -111,6 +111,14 @@ type CatalogDataTypeFilter = "all" | CatalogDataType;
 type CatalogSurfaceFilter = "all" | CatalogSurface;
 type CatalogFilterStatus = "all" | "enabled" | "disabled" | "review";
 type CatalogSafetyFilter = "all" | CatalogSafetyClassification;
+type CatalogMarketplaceAvailability =
+  | "available"
+  | "pending"
+  | "restricted";
+type CatalogRuntimeAvailabilityFilter =
+  | "all"
+  | "available"
+  | "unavailable";
 type CatalogBatchAction = "publish" | "reprice" | "disable";
 type CatalogBatchStatus =
   | "preparing"
@@ -148,8 +156,16 @@ type CatalogEndpoint = {
   revision: number;
   sourceUpdatedAt: string | null;
   presentInLatestSync: boolean;
+  marketplaceAvailability: CatalogMarketplaceAvailability;
+  availabilityReasons: string[];
   reviewedAt: string | null;
   updatedAt: string;
+};
+
+type CatalogConfirmResponse = {
+  ok: true;
+  count: number;
+  paths: string[];
 };
 
 type CatalogResponse = {
@@ -916,6 +932,14 @@ function isCatalogEndpoint(value: unknown): value is CatalogEndpoint {
     value.revision <= 2_147_483_647 &&
     isNullableDateString(value.sourceUpdatedAt) &&
     typeof value.presentInLatestSync === "boolean" &&
+    (value.marketplaceAvailability === "available" ||
+      value.marketplaceAvailability === "pending" ||
+      value.marketplaceAvailability === "restricted") &&
+    Array.isArray(value.availabilityReasons) &&
+    value.availabilityReasons.length <= 16 &&
+    value.availabilityReasons.every((reason) =>
+      isNonEmptyString(reason, 80),
+    ) &&
     isNullableDateString(value.reviewedAt) &&
     isDateString(value.updatedAt)
   );
@@ -1424,6 +1448,22 @@ function isCatalogUpdateResponse(
   );
 }
 
+function isCatalogConfirmResponse(
+  value: unknown,
+): value is CatalogConfirmResponse {
+  return (
+    isObject(value) &&
+    value.ok === true &&
+    isSafeNonNegativeInteger(value.count) &&
+    value.count >= 1 &&
+    value.count <= 100 &&
+    Array.isArray(value.paths) &&
+    value.paths.length === value.count &&
+    value.paths.every(isSafePath) &&
+    new Set(value.paths).size === value.paths.length
+  );
+}
+
 function isPendingCatalogPriceUpdateResponse(
   value: unknown,
 ): value is {
@@ -1643,6 +1683,43 @@ function catalogSafetyLabel(value: CatalogSafetyClassification) {
 
 function catalogSafetyFilterLabel(value: CatalogSafetyFilter) {
   return value === "all" ? "全部安全分类" : catalogSafetyLabel(value);
+}
+
+function catalogEndpointConfirmable(endpoint: CatalogEndpoint) {
+  return (
+    !endpoint.enabled &&
+    endpoint.presentInLatestSync &&
+    endpoint.priceVerified &&
+    endpoint.customerPriceUsdMicros >= endpoint.upstreamPriceUsdMicros &&
+    (endpoint.method === "GET" || endpoint.method === "POST") &&
+    endpoint.safetyClassification === "safe_data_read" &&
+    endpoint.safetyPolicyVersion === CATALOG_SAFETY_POLICY_VERSION
+  );
+}
+
+function catalogAvailabilityReasonLabel(reason: string) {
+  const labels: Record<string, string> = {
+    not_in_public_catalog: "未进入公开数据市场目录",
+    pending_confirmation: "等待运营确认添加到前台",
+    read_only_not_confirmed: "只读契约尚未确认",
+    price_unverified: "售价尚未核验",
+    not_in_latest_sync: "最新上游目录中已缺失",
+    safety_not_approved: "安全策略未通过",
+    runtime_not_ready: "上游数据源或运行目录未就绪",
+    safety_restricted: "安全策略限制调用",
+  };
+  return labels[reason] ?? reason;
+}
+
+function catalogAvailabilitySummary(endpoint: CatalogEndpoint) {
+  if (endpoint.marketplaceAvailability === "available") {
+    return "后端运行条件、目录代次与安全校验均已通过";
+  }
+  return endpoint.availabilityReasons.length
+    ? endpoint.availabilityReasons
+        .map(catalogAvailabilityReasonLabel)
+        .join("；")
+    : "当前运行条件未全部满足";
 }
 
 function normalizeCatalogTagKey(value: string) {
@@ -2414,6 +2491,15 @@ export function AdminClient() {
     useState<CatalogFilterStatus>("all");
   const [catalogSafety, setCatalogSafety] =
     useState<CatalogSafetyFilter>("all");
+  const [catalogRuntimeAvailability, setCatalogRuntimeAvailability] =
+    useState<CatalogRuntimeAvailabilityFilter>("all");
+  const [selectedPendingPaths, setSelectedPendingPaths] = useState<
+    Set<string>
+  >(new Set());
+  const [routeBatchConfirmOpen, setRouteBatchConfirmOpen] =
+    useState(false);
+  const [confirmingRouteBatch, setConfirmingRouteBatch] =
+    useState(false);
   const [catalogBatchAction, setCatalogBatchAction] =
     useState<CatalogBatchAction>("publish");
   const [catalogBatchMarkupPercent, setCatalogBatchMarkupPercent] =
@@ -3055,6 +3141,82 @@ export function AdminClient() {
     catalogTag,
   ]);
 
+  const visibleRouteEndpoints = useMemo(() => {
+    if (catalog.status !== "ready") return [];
+    const query = catalogQuery.trim().toLocaleLowerCase("zh-CN");
+    return catalog.data.endpoints.filter((endpoint) => {
+      if (!endpoint.enabled && !catalogEndpointConfirmable(endpoint)) {
+        return false;
+      }
+      const matchesQuery =
+        !query ||
+        endpoint.path.toLocaleLowerCase("zh-CN").includes(query) ||
+        endpoint.platform.toLocaleLowerCase("zh-CN").includes(query) ||
+        endpoint.dataType.toLocaleLowerCase("zh-CN").includes(query) ||
+        endpoint.surface.toLocaleLowerCase("zh-CN").includes(query) ||
+        endpoint.operationId?.toLocaleLowerCase("zh-CN").includes(query) ||
+        endpoint.tags.some((tag) =>
+          tag.toLocaleLowerCase("zh-CN").includes(query),
+        ) ||
+        endpoint.summary?.toLocaleLowerCase("zh-CN").includes(query);
+      const matchesPlatform =
+        catalogPlatform === "all" || endpoint.platform === catalogPlatform;
+      const matchesDataType =
+        catalogDataType === "all" || endpoint.dataType === catalogDataType;
+      const matchesAvailability =
+        catalogRuntimeAvailability === "all" ||
+        (catalogRuntimeAvailability === "available" &&
+          endpoint.marketplaceAvailability === "available") ||
+        (catalogRuntimeAvailability === "unavailable" &&
+          endpoint.marketplaceAvailability !== "available");
+      return (
+        matchesQuery &&
+        matchesPlatform &&
+        matchesDataType &&
+        matchesAvailability
+      );
+    });
+  }, [
+    catalog,
+    catalogDataType,
+    catalogPlatform,
+    catalogQuery,
+    catalogRuntimeAvailability,
+  ]);
+
+  const displayedEndpoints =
+    catalogView === "routes" ? visibleRouteEndpoints : visibleEndpoints;
+  const publishedEndpointTotal =
+    catalog.status === "ready"
+      ? catalog.data.endpoints.filter((endpoint) => endpoint.enabled).length
+      : 0;
+  const availableEndpointTotal =
+    catalog.status === "ready"
+      ? catalog.data.endpoints.filter(
+          (endpoint) => endpoint.marketplaceAvailability === "available",
+        ).length
+      : 0;
+  const visibleConfirmableEndpoints = useMemo(
+    () =>
+      visibleRouteEndpoints.filter((endpoint) =>
+        catalogEndpointConfirmable(endpoint),
+      ),
+    [visibleRouteEndpoints],
+  );
+  const selectedConfirmableEndpoints = useMemo(() => {
+    if (catalog.status !== "ready") return [];
+    return catalog.data.endpoints.filter(
+      (endpoint) =>
+        selectedPendingPaths.has(endpoint.path) &&
+        catalogEndpointConfirmable(endpoint),
+    );
+  }, [catalog, selectedPendingPaths]);
+  const allVisiblePendingSelected =
+    visibleConfirmableEndpoints.length > 0 &&
+    visibleConfirmableEndpoints.every((endpoint) =>
+      selectedPendingPaths.has(endpoint.path),
+    );
+
   const filteredPendingEndpoints = useMemo(() => {
     if (pendingCatalog.status !== "ready") return [];
     const query = pendingCatalogQuery
@@ -3127,6 +3289,10 @@ export function AdminClient() {
     setPreviewingCatalogBatch(false);
     setRefreshingCatalogBatch(false);
     setApplyingCatalogBatch(false);
+    setSelectedPendingPaths(new Set());
+    setRouteBatchConfirmOpen(false);
+    setConfirmingRouteBatch(false);
+    setCatalogRuntimeAvailability("all");
     catalogBatchPreviewRetry.current = null;
     catalogBatchApplyRetry.current = null;
     setOverview({ status: "idle" });
@@ -3548,6 +3714,44 @@ export function AdminClient() {
     }
   }
 
+  async function confirmSelectedRoutes() {
+    if (!selectedConfirmableEndpoints.length) {
+      setNotice("请先选择至少一个待确认接口。");
+      setRouteBatchConfirmOpen(false);
+      return;
+    }
+    setConfirmingRouteBatch(true);
+    setNotice("");
+    try {
+      const result = await adminRequest(
+        "/api/admin/catalog/confirm",
+        adminSecret,
+        isCatalogConfirmResponse,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            items: selectedConfirmableEndpoints.map((endpoint) => ({
+              path: endpoint.path,
+              expectedRevision: endpoint.revision,
+            })),
+          }),
+        },
+      );
+      setNotice(`已确认 ${result.count} 个接口添加到前台。`);
+      setSelectedPendingPaths(new Set());
+      setRouteBatchConfirmOpen(false);
+      await Promise.all([loadCatalog(), loadOverview()]);
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "批量确认失败，整批未应用。",
+      );
+    } finally {
+      setConfirmingRouteBatch(false);
+    }
+  }
+
   async function savePendingEndpointPrice(
     endpoint: PendingCatalogEndpoint,
   ) {
@@ -3781,8 +3985,8 @@ export function AdminClient() {
         );
         setNotice(
           confirmAction.nextEnabled
-            ? `已上架 ${endpoint.path}。`
-            : `已下架 ${endpoint.path}，新请求将无法调用。`,
+            ? `已将 ${endpoint.path} 添加到前台；实际可用性以当前后端状态为准。`
+            : `已从前台移除 ${endpoint.path}，新请求将无法调用。`,
         );
         await Promise.all([loadCatalog(), loadOverview()]);
       } else if (confirmAction.kind === "credential") {
@@ -3919,10 +4123,20 @@ export function AdminClient() {
       ? paymentReviews.data.total
       : overviewData?.summary.manualReviewPayments;
   const catalogData = catalog.status === "ready" ? catalog.data : null;
-  const pendingCatalogCount =
-    pendingCatalog.status === "ready" ? pendingCatalog.data.total : 0;
   const publishedRouteCount =
     catalogData?.endpoints.filter((endpoint) => endpoint.enabled).length ?? 0;
+  const availableRouteCount =
+    catalogData?.endpoints.filter(
+      (endpoint) => endpoint.marketplaceAvailability === "available",
+    ).length ?? 0;
+  const unavailablePublishedRouteCount =
+    catalogData?.endpoints.filter(
+      (endpoint) =>
+        endpoint.enabled &&
+        endpoint.marketplaceAvailability !== "available",
+    ).length ?? 0;
+  const confirmableRouteCount =
+    catalogData?.endpoints.filter(catalogEndpointConfirmable).length ?? 0;
   const reviewRouteCount =
     catalogData?.endpoints.filter(
       (endpoint) =>
@@ -5215,7 +5429,7 @@ export function AdminClient() {
                 <h2 id="catalog-admin-title">路由与定价</h2>
                 <p>
                   从上游同步候选服务，补齐调用契约，再审核成本、客户价和发布状态。
-                  市场展示与 /v1 实际可调用目录共同读取这里的已发布结果。
+                  前台展示读取发布状态，/v1 调用再叠加运行就绪与上游可用性校验。
                 </p>
               </div>
               <div className="admin-section-actions">
@@ -5230,29 +5444,27 @@ export function AdminClient() {
                 >
                   刷新目录
                 </button>
-                <button
-                  className="button button-dark button-small"
-                  onClick={() => setConfirmAction({ kind: "sync" })}
-                >
-                  同步上游
-                </button>
               </div>
             </div>
             <div className="admin-module-summary" aria-label="路由目录摘要">
               <article className="is-success">
-                <span>已上架路由</span>
-                <strong>{publishedRouteCount.toLocaleString()}</strong>
-                <small>市场可见且 /v1 可调用</small>
+                <span>当前可用</span>
+                <strong>{availableRouteCount.toLocaleString()}</strong>
+                <small>已通过完整运行可用性校验</small>
               </article>
-              <article>
-                <span>待审核 / 已下架</span>
-                <strong>{reviewRouteCount.toLocaleString()}</strong>
-                <small>仅后台可见，不进入公开运行目录</small>
+              <article
+                className={unavailablePublishedRouteCount ? "is-warning" : ""}
+              >
+                <span>已添加但不可用</span>
+                <strong>
+                  {unavailablePublishedRouteCount.toLocaleString()}
+                </strong>
+                <small>前台可见，但当前无法实际调用</small>
               </article>
-              <article className={pendingCatalogCount ? "is-warning" : ""}>
-                <span>文档待同步</span>
-                <strong>{pendingCatalogCount.toLocaleString()}</strong>
-                <small>缺少方法或契约，严格不可调用</small>
+              <article className={confirmableRouteCount ? "is-warning" : ""}>
+                <span>待确认添加</span>
+                <strong>{confirmableRouteCount.toLocaleString()}</strong>
+                <small>已满足基础审核条件，等待运营确认</small>
               </article>
               <article>
                 <span>当前目录代次</span>
@@ -5272,7 +5484,6 @@ export function AdminClient() {
               {(
                 [
                   ["routes", "当前路由", "查看运行目录与发布状态"],
-                  ["add", "添加 / 同步", "发现并补齐新的候选服务"],
                   ["pricing", "定价发布", "批量定价、审核与上下架"],
                   ["consistency", "一致性证明", "核对快照、覆盖率与代次"],
                 ] as const
@@ -5295,25 +5506,29 @@ export function AdminClient() {
                   ✓
                 </span>
                 <div>
-                  <strong>一个发布状态，三处同时生效</strong>
+                  <strong>发布状态与运行可用性分开核对</strong>
                   <p>
-                    “已上架”同时代表数据市场可见、公开目录存在且 /v1 可调用；
-                    待同步、待复核和已下架记录只留在运营后台。
+                    “已添加到前台”只代表数据产品进入市场目录；“当前可用”
+                    由后端依据路由启用、最新同步、价格、安全策略和上游运行状态实时计算。
                   </p>
                 </div>
               </div>
               <dl>
                 <div>
-                  <dt>市场展示</dt>
+                  <dt>已添加到前台</dt>
                   <dd>{publishedRouteCount.toLocaleString()} 条</dd>
                 </div>
                 <div>
-                  <dt>/v1 运行目录</dt>
-                  <dd>{publishedRouteCount.toLocaleString()} 条</dd>
+                  <dt>当前可调用</dt>
+                  <dd>{availableRouteCount.toLocaleString()} 条</dd>
                 </div>
                 <div>
-                  <dt>阻断状态</dt>
-                  <dd>{(reviewRouteCount + pendingCatalogCount).toLocaleString()} 条</dd>
+                  <dt>不可用 / 待确认</dt>
+                  <dd>
+                    {(unavailablePublishedRouteCount +
+                      confirmableRouteCount).toLocaleString()}{" "}
+                    条
+                  </dd>
                 </div>
               </dl>
             </div>
@@ -5325,16 +5540,25 @@ export function AdminClient() {
                     <h3>添加新的数据服务</h3>
                     <p>
                       路由不允许直接手工写入运行目录。每条新服务都必须经过上游同步、
-                      调用契约补齐、定价与安全审核后才能上架。
+                      调用契约补齐、定价与安全审核后才能进入待确认清单。
                     </p>
                   </div>
-                  <button
-                    className="button button-dark button-small"
-                    type="button"
-                    onClick={() => setConfirmAction({ kind: "sync" })}
-                  >
-                    立即同步上游
-                  </button>
+                  <div className="admin-section-actions">
+                    <button
+                      className="button button-ghost button-small"
+                      type="button"
+                      onClick={() => setCatalogView("routes")}
+                    >
+                      返回当前路由
+                    </button>
+                    <button
+                      className="button button-dark button-small"
+                      type="button"
+                      onClick={() => setConfirmAction({ kind: "sync" })}
+                    >
+                      立即同步上游
+                    </button>
+                  </div>
                 </div>
                 <ol className="admin-flow-steps">
                   <li className="is-current">
@@ -5769,7 +5993,7 @@ export function AdminClient() {
                         <p>
                           {catalogView === "pricing"
                             ? "当前筛选同时控制下方列表与服务端批量预览；最终匹配数、阻断项和金额只以冻结回执为准。"
-                            : "按平台、数据类型、入口、状态和安全分类核对当前目录；此视图不修改价格或发布状态。"}
+                            : "先按平台与分类定位接口，再核对独立的前台发布状态和后端实际可用性；待确认项可直接单条或批量添加。"}
                         </p>
                       </div>
                       <span>
@@ -5816,124 +6040,149 @@ export function AdminClient() {
                           </select>
                         </label>
                         <label>
-                          <span>上架状态</span>
+                          <span>分类</span>
                           <select
-                            value={catalogStatus}
+                            value={catalogDataType}
                             onChange={(event) => {
                               const value = event.target.value;
-                              if (isCatalogFilterStatus(value)) {
-                                setCatalogStatus(value);
+                              if (
+                                value === "all" ||
+                                isCatalogDataType(value)
+                              ) {
+                                setCatalogDataType(value);
                               }
                             }}
                           >
-                            <option value="all">全部状态</option>
-                            <option value="enabled">已上架</option>
-                            <option value="disabled">已下架</option>
-                            <option value="review">待复核</option>
+                            <option value="all">全部分类</option>
+                            {catalogDataTypes.map((dataType) => (
+                              <option value={dataType} key={dataType}>
+                                {catalogDataTypeLabel(dataType)}
+                              </option>
+                            ))}
                           </select>
                         </label>
-                        <label>
-                          <span>安全分类</span>
-                          <select
-                            value={catalogSafety}
-                            onChange={(event) => {
-                              const value = event.target.value;
-                              if (isCatalogSafetyFilter(value)) {
-                                setCatalogSafety(value);
-                              }
-                            }}
-                          >
-                            <option value="all">全部安全分类</option>
-                            <option value="safe_data_read">
-                              安全数据读取
-                            </option>
-                            <option value="ambiguous">需人工判断</option>
-                            <option value="prohibited">禁止公开</option>
-                          </select>
-                        </label>
-                        <details className="admin-catalog-advanced-filters">
-                          <summary>
-                            更多筛选
-                            {catalogDataType !== "all" ||
-                            catalogTag !== null ||
-                            catalogSurface !== "all"
-                              ? " · 已启用"
-                              : ""}
-                          </summary>
-                          <div>
+                        {catalogView === "routes" ? (
+                          <label>
+                            <span>当前可用性</span>
+                            <select
+                              value={catalogRuntimeAvailability}
+                              onChange={(event) => {
+                                const value = event.target.value;
+                                if (
+                                  value === "all" ||
+                                  value === "available" ||
+                                  value === "unavailable"
+                                ) {
+                                  setCatalogRuntimeAvailability(value);
+                                }
+                              }}
+                            >
+                              <option value="all">全部可用性</option>
+                              <option value="available">当前可用</option>
+                              <option value="unavailable">当前不可用</option>
+                            </select>
+                          </label>
+                        ) : (
+                          <>
                             <label>
-                              <span>数据类型</span>
+                              <span>发布状态</span>
                               <select
-                                value={catalogDataType}
+                                value={catalogStatus}
                                 onChange={(event) => {
                                   const value = event.target.value;
-                                  if (
-                                    value === "all" ||
-                                    isCatalogDataType(value)
-                                  ) {
-                                    setCatalogDataType(value);
+                                  if (isCatalogFilterStatus(value)) {
+                                    setCatalogStatus(value);
                                   }
                                 }}
                               >
-                                <option value="all">全部数据类型</option>
-                                {catalogDataTypes.map((dataType) => (
-                                  <option value={dataType} key={dataType}>
-                                    {catalogDataTypeLabel(dataType)} · {dataType}
-                                  </option>
-                                ))}
+                                <option value="all">全部状态</option>
+                                <option value="enabled">已添加到前台</option>
+                                <option value="disabled">未添加到前台</option>
+                                <option value="review">待复核</option>
                               </select>
                             </label>
                             <label>
-                              <span>标签</span>
+                              <span>安全分类</span>
                               <select
-                                value={catalogTag ?? ""}
+                                value={catalogSafety}
                                 onChange={(event) => {
                                   const value = event.target.value;
-                                  if (value === "") {
-                                    setCatalogTag(null);
-                                  } else if (isCatalogTag(value)) {
-                                    setCatalogTag(value);
+                                  if (isCatalogSafetyFilter(value)) {
+                                    setCatalogSafety(value);
                                   }
                                 }}
                               >
-                                <option value="">全部标签</option>
-                                {catalogTags.map((tag) => (
-                                  <option
-                                    value={tag}
-                                    key={normalizeCatalogTagKey(tag)}
+                                <option value="all">全部安全分类</option>
+                                <option value="safe_data_read">
+                                  安全数据读取
+                                </option>
+                                <option value="ambiguous">需人工判断</option>
+                                <option value="prohibited">禁止公开</option>
+                              </select>
+                            </label>
+                            <details className="admin-catalog-advanced-filters">
+                              <summary>
+                                更多筛选
+                                {catalogTag !== null ||
+                                catalogSurface !== "all"
+                                  ? " · 已启用"
+                                  : ""}
+                              </summary>
+                              <div>
+                                <label>
+                                  <span>标签</span>
+                                  <select
+                                    value={catalogTag ?? ""}
+                                    onChange={(event) => {
+                                      const value = event.target.value;
+                                      if (value === "") {
+                                        setCatalogTag(null);
+                                      } else if (isCatalogTag(value)) {
+                                        setCatalogTag(value);
+                                      }
+                                    }}
                                   >
-                                    {tag}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                            <label>
-                              <span>调用入口</span>
-                              <select
-                                value={catalogSurface}
-                                onChange={(event) => {
-                                  const value = event.target.value;
-                                  if (
-                                    value === "all" ||
-                                    isCatalogSurface(value)
-                                  ) {
-                                    setCatalogSurface(value);
-                                  }
-                                }}
-                              >
-                                <option value="all">全部入口</option>
-                                {catalogSurfaces.map((surface) => (
-                                  <option value={surface} key={surface}>
-                                    {catalogSurfaceLabel(surface)} · {surface}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                          </div>
-                        </details>
+                                    <option value="">全部标签</option>
+                                    {catalogTags.map((tag) => (
+                                      <option
+                                        value={tag}
+                                        key={normalizeCatalogTagKey(tag)}
+                                      >
+                                        {tag}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label>
+                                  <span>调用入口</span>
+                                  <select
+                                    value={catalogSurface}
+                                    onChange={(event) => {
+                                      const value = event.target.value;
+                                      if (
+                                        value === "all" ||
+                                        isCatalogSurface(value)
+                                      ) {
+                                        setCatalogSurface(value);
+                                      }
+                                    }}
+                                  >
+                                    <option value="all">全部入口</option>
+                                    {catalogSurfaces.map((surface) => (
+                                      <option value={surface} key={surface}>
+                                        {catalogSurfaceLabel(surface)} ·{" "}
+                                        {surface}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                              </div>
+                            </details>
+                          </>
+                        )}
                         <p>
                           本地显示{" "}
-                          <strong>{visibleEndpoints.length}</strong> /{" "}
+                          <strong>{displayedEndpoints.length}</strong> /{" "}
                           {catalog.data.count} 条
                         </p>
                       </div>
@@ -6078,23 +6327,88 @@ export function AdminClient() {
                   {catalogView === "routes" ||
                   catalogView === "pricing" ? (
                     <>
-                  {visibleEndpoints.length ? (
+                  {catalogView === "routes" ? (
+                    <div className="admin-route-batch-bar">
+                      <div>
+                        <strong>
+                          已添加 {publishedEndpointTotal.toLocaleString()} ·
+                          当前可用 {availableEndpointTotal.toLocaleString()} ·
+                          待确认 {visibleConfirmableEndpoints.length.toLocaleString()}
+                        </strong>
+                        <small>
+                          已选择 {selectedConfirmableEndpoints.length} 个待确认接口
+                        </small>
+                      </div>
+                      <button
+                        className="button button-dark button-small"
+                        type="button"
+                        disabled={!selectedConfirmableEndpoints.length}
+                        onClick={() => setRouteBatchConfirmOpen(true)}
+                      >
+                        确认添加所选
+                        {selectedConfirmableEndpoints.length
+                          ? ` ${selectedConfirmableEndpoints.length} 项`
+                          : ""}
+                      </button>
+                    </div>
+                  ) : null}
+                  {displayedEndpoints.length ? (
                     <div className="admin-table-wrap admin-route-list-wrap">
-                      <table className="admin-table admin-route-list">
+                      <table
+                        className={`admin-table admin-route-list ${
+                          catalogView === "routes"
+                            ? "is-runtime-view"
+                            : "is-pricing-view"
+                        }`}
+                      >
                         <thead>
                           <tr>
+                            {catalogView === "routes" ? (
+                              <th className="admin-route-select-column">
+                                <input
+                                  type="checkbox"
+                                  aria-label="选择当前筛选中的全部待确认接口"
+                                  checked={allVisiblePendingSelected}
+                                  disabled={!visibleConfirmableEndpoints.length}
+                                  onChange={(event) => {
+                                    const paths = visibleConfirmableEndpoints.map(
+                                      (endpoint) => endpoint.path,
+                                    );
+                                    setSelectedPendingPaths((current) => {
+                                      const next = new Set(current);
+                                      for (const path of paths) {
+                                        if (event.target.checked) {
+                                          next.add(path);
+                                        } else {
+                                          next.delete(path);
+                                        }
+                                      }
+                                      return next;
+                                    });
+                                  }}
+                                />
+                              </th>
+                            ) : null}
                             <th>路由</th>
                             <th>平台 / 分类</th>
-                            <th>成本</th>
-                            <th>客户价</th>
-                            <th>毛利</th>
-                            <th>校验</th>
-                            <th>状态</th>
+                            <th className="admin-money-head">成本</th>
+                            <th className="admin-money-head">客户价</th>
+                            <th className="admin-money-head">毛利</th>
+                            <th>
+                              {catalogView === "routes"
+                                ? "当前可用性"
+                                : "校验"}
+                            </th>
+                            <th>
+                              {catalogView === "routes"
+                                ? "前台状态"
+                                : "发布状态"}
+                            </th>
                             <th>操作</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {visibleEndpoints.map((endpoint) => {
+                          {displayedEndpoints.map((endpoint) => {
                             const draft = priceDrafts[endpoint.path] ?? "";
                             const parsedDraft = parseUsdInput(draft);
                             const priceChanged =
@@ -6106,8 +6420,48 @@ export function AdminClient() {
                             const margin =
                               endpoint.customerPriceUsdMicros -
                               endpoint.upstreamPriceUsdMicros;
+                            const confirmable =
+                              catalogEndpointConfirmable(endpoint);
                             return (
-                              <tr key={endpoint.path}>
+                              <tr
+                                key={endpoint.path}
+                                className={
+                                  selectedPendingPaths.has(endpoint.path)
+                                    ? "is-selected"
+                                    : undefined
+                                }
+                              >
+                                {catalogView === "routes" ? (
+                                  <td className="admin-route-select-column">
+                                    {confirmable ? (
+                                      <input
+                                        type="checkbox"
+                                        aria-label={`选择待确认接口 ${endpoint.path}`}
+                                        checked={selectedPendingPaths.has(
+                                          endpoint.path,
+                                        )}
+                                        onChange={(event) => {
+                                          setSelectedPendingPaths((current) => {
+                                            const next = new Set(current);
+                                            if (event.target.checked) {
+                                              next.add(endpoint.path);
+                                            } else {
+                                              next.delete(endpoint.path);
+                                            }
+                                            return next;
+                                          });
+                                        }}
+                                      />
+                                    ) : (
+                                      <span
+                                        className="admin-route-select-placeholder"
+                                        aria-hidden="true"
+                                      >
+                                        ·
+                                      </span>
+                                    )}
+                                  </td>
+                                ) : null}
                                 <td className="admin-route-cell">
                                   <div className="admin-route-primary">
                                     <span className="admin-method">
@@ -6182,8 +6536,8 @@ export function AdminClient() {
                                     {catalogSurfaceLabel(endpoint.surface)}
                                   </small>
                                 </td>
-                                <td>
-                                  <strong>
+                                <td className="admin-money-cell">
+                                  <strong className="admin-money-value">
                                     {formatUsd(
                                       endpoint.upstreamPriceUsdMicros,
                                       6,
@@ -6191,7 +6545,7 @@ export function AdminClient() {
                                   </strong>
                                   <small>/ 次</small>
                                 </td>
-                                <td>
+                                <td className="admin-money-cell">
                                   {catalogView === "pricing" ? (
                                     <div className="admin-route-price-control">
                                       <span aria-hidden="true">$</span>
@@ -6225,7 +6579,7 @@ export function AdminClient() {
                                       </button>
                                     </div>
                                   ) : (
-                                    <strong>
+                                    <strong className="admin-money-value">
                                       {formatUsd(
                                         endpoint.customerPriceUsdMicros,
                                         6,
@@ -6236,54 +6590,83 @@ export function AdminClient() {
                                     <small className="is-error">不得低于成本</small>
                                   ) : null}
                                 </td>
-                                <td>
+                                <td className="admin-money-cell">
                                   <strong
-                                    className={
+                                    className={`admin-money-value ${
                                       margin < 0
                                         ? "is-negative-balance"
-                                        : undefined
-                                    }
+                                        : ""
+                                    }`}
                                   >
                                     {formatUsd(margin, 6)}
                                   </strong>
                                 </td>
                                 <td>
-                                  <div className="admin-route-checks">
-                                    <span
-                                      className={`admin-safety-badge is-${endpoint.safetyClassification}`}
-                                    >
-                                      {catalogSafetyLabel(
-                                        endpoint.safetyClassification,
-                                      )}
-                                    </span>
-                                    <small
-                                      className={
-                                        endpoint.presentInLatestSync &&
-                                        endpoint.priceVerified &&
-                                        endpoint.readOnly
-                                          ? "is-ok"
-                                          : "is-warning"
-                                      }
-                                    >
-                                      {endpoint.presentInLatestSync
-                                        ? endpoint.priceVerified
-                                          ? endpoint.readOnly
-                                            ? "同步 / 成本 / 只读已确认"
-                                            : "只读待确认"
-                                          : "成本待核验"
-                                        : "上游已缺失"}
-                                    </small>
-                                  </div>
+                                  {catalogView === "routes" ? (
+                                    <div className="admin-route-runtime">
+                                      <span
+                                        className={`admin-route-runtime-status ${
+                                          endpoint.marketplaceAvailability ===
+                                          "available"
+                                            ? "is-available"
+                                            : "is-unavailable"
+                                        }`}
+                                      >
+                                        {endpoint.marketplaceAvailability ===
+                                        "available"
+                                          ? "当前可用"
+                                          : "当前不可用"}
+                                      </span>
+                                      <small
+                                        title={catalogAvailabilitySummary(
+                                          endpoint,
+                                        )}
+                                      >
+                                        {catalogAvailabilitySummary(endpoint)}
+                                      </small>
+                                    </div>
+                                  ) : (
+                                    <div className="admin-route-checks">
+                                      <span
+                                        className={`admin-safety-badge is-${endpoint.safetyClassification}`}
+                                      >
+                                        {catalogSafetyLabel(
+                                          endpoint.safetyClassification,
+                                        )}
+                                      </span>
+                                      <small
+                                        className={
+                                          endpoint.presentInLatestSync &&
+                                          endpoint.priceVerified &&
+                                          endpoint.readOnly
+                                            ? "is-ok"
+                                            : "is-warning"
+                                        }
+                                      >
+                                        {endpoint.presentInLatestSync
+                                          ? endpoint.priceVerified
+                                            ? endpoint.readOnly
+                                              ? "同步 / 成本 / 只读已确认"
+                                              : "只读待确认"
+                                            : "成本待核验"
+                                          : "上游已缺失"}
+                                      </small>
+                                    </div>
+                                  )}
                                 </td>
                                 <td>
                                   <span
-                                    className={`admin-account-status ${
+                                    className={`admin-route-publish-status ${
                                       endpoint.enabled
-                                        ? "is-active"
-                                        : "is-suspended"
+                                        ? "is-added"
+                                        : "is-pending"
                                     }`}
                                   >
-                                    {endpoint.enabled ? "已上架" : "已下架"}
+                                    {endpoint.enabled
+                                      ? "已添加到前台"
+                                      : catalogView === "routes"
+                                        ? "待确认"
+                                        : "未添加到前台"}
                                   </span>
                                   <small>
                                     {endpoint.reviewedAt
@@ -6318,15 +6701,31 @@ export function AdminClient() {
                                         })
                                       }
                                     >
-                                      {endpoint.enabled ? "下架" : "审核上架"}
+                                      {endpoint.enabled
+                                        ? "移除"
+                                        : "添加到前台"}
                                     </button>
                                   ) : (
                                     <button
-                                      className="button button-ghost button-small"
+                                      className={`button button-small ${
+                                        confirmable
+                                          ? "button-dark"
+                                          : "button-ghost"
+                                      }`}
                                       type="button"
-                                      onClick={() => setCatalogView("pricing")}
+                                      onClick={() => {
+                                        if (confirmable) {
+                                          setConfirmAction({
+                                            kind: "endpoint",
+                                            endpoint,
+                                            nextEnabled: true,
+                                          });
+                                        } else {
+                                          setCatalogView("pricing");
+                                        }
+                                      }}
                                     >
-                                      管理
+                                      {confirmable ? "确认添加" : "管理"}
                                     </button>
                                   )}
                                 </td>
@@ -6344,6 +6743,23 @@ export function AdminClient() {
                       </p>
                     </div>
                   )}
+                  {catalogView === "routes" ? (
+                    <details className="admin-route-secondary-actions">
+                      <summary>低频操作 · 新增或同步路由</summary>
+                      <div>
+                        <p>
+                          新接口需要先同步上游目录并补齐调用契约，再进入待确认清单。
+                        </p>
+                        <button
+                          className="button button-ghost button-small"
+                          type="button"
+                          onClick={() => setCatalogView("add")}
+                        >
+                          打开新增 / 同步流程
+                        </button>
+                      </div>
+                    </details>
+                  ) : null}
                 </>
               ) : null}
                 </>
@@ -6686,6 +7102,18 @@ export function AdminClient() {
         </div>
       </div>
 
+      {routeBatchConfirmOpen ? (
+        <ConfirmDialog
+          busy={confirmingRouteBatch}
+          title="批量确认添加到前台？"
+          description={`将 ${selectedConfirmableEndpoints.length} 个已通过最新同步、成本和安全基础校验的接口添加到前台目录。完成后，后端仍会独立计算实际运行可用性。`}
+          confirmLabel={`确认添加 ${selectedConfirmableEndpoints.length} 项`}
+          onCancel={() => {
+            if (!confirmingRouteBatch) setRouteBatchConfirmOpen(false);
+          }}
+          onConfirm={() => void confirmSelectedRoutes()}
+        />
+      ) : null}
       {confirmAction ? (
         <ConfirmDialog
           busy={mutating}
@@ -6704,8 +7132,8 @@ export function AdminClient() {
                 : "恢复该用户的 API 调用？"
               : confirmAction.kind === "endpoint"
                 ? confirmAction.nextEnabled
-                  ? "审核并上架此接口？"
-                  : "下架此接口？"
+                  ? "确认添加此接口到前台？"
+                  : "从前台移除此接口？"
                 : confirmAction.kind === "credential"
                   ? confirmAction.action === "activate"
                     ? "验证并切换上游数据源？"
@@ -6719,8 +7147,8 @@ export function AdminClient() {
                 : `${confirmAction.user.email} 的账户会恢复正常；暂停时撤销的 API Key 不会恢复，用户需要创建新 Key。`
               : confirmAction.kind === "endpoint"
                 ? confirmAction.nextEnabled
-                  ? `将 ${confirmAction.endpoint.path} 标记为只读已复核并按当前客户价上架。`
-                  : `${confirmAction.endpoint.path} 将立即停止接受新调用，历史账单不受影响。`
+                  ? `将 ${confirmAction.endpoint.path} 标记为只读已复核并添加到前台目录；实际可用性仍由后端运行条件独立计算。`
+                  : `${confirmAction.endpoint.path} 将从前台目录移除并停止接受新调用，历史账单不受影响。`
                 : confirmAction.kind === "credential"
                   ? confirmAction.action === "activate"
                     ? `服务端会先向上游验证 ${confirmAction.credential.label}，成功后用版本比较切换唯一活动凭据。`
@@ -6736,8 +7164,8 @@ export function AdminClient() {
                 : "确认恢复"
               : confirmAction.kind === "endpoint"
                 ? confirmAction.nextEnabled
-                  ? "确认上架"
-                  : "确认下架"
+                  ? "确认添加"
+                  : "确认移除"
                 : confirmAction.kind === "credential"
                   ? confirmAction.action === "activate"
                     ? "验证并切换"

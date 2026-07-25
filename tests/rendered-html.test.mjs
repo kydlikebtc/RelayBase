@@ -7545,6 +7545,262 @@ test("publishes reviewed catalog prices and creates idempotent recoverable payme
   assert.equal(dashboardData.payments[0].reviewStatus, null);
 });
 
+test("uses one backend availability result for admin and Data Market", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  enableCatalogEndpoint(db);
+  const catalogSecret = "catalog-availability-secret-32-characters-minimum";
+  const envOptions = {
+    DB: db,
+    UPSTREAM_API_KEY: "upstream-key",
+    RESELLER_AUTHORIZED: "true",
+    LEGAL_REVIEW_CONFIRMED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
+    CATALOG_SYNC_SECRET: catalogSecret,
+    RECONCILIATION_SECRET:
+      "catalog-availability-reconcile-secret-32-minimum",
+  };
+  const readyEnv = baseEnv(envOptions);
+  const adminReady = await fetchWorker(
+    "/api/admin/catalog?limit=10&offset=0",
+    {
+      headers: { authorization: `Bearer ${catalogSecret}` },
+    },
+    readyEnv,
+  );
+  assert.equal(adminReady.status, 200);
+  const adminReadyEndpoint = (await adminReady.json()).endpoints.find(
+    (endpoint) =>
+      endpoint.path === "/v1/tiktok/web/fetch_user_profile",
+  );
+  assert.equal(adminReadyEndpoint.marketplaceAvailability, "available");
+  assert.deepEqual(adminReadyEndpoint.availabilityReasons, []);
+
+  const marketReady = await fetchWorker(
+    "/api/marketplace?platform=tiktok&limit=100&offset=0",
+    {},
+    readyEnv,
+  );
+  assert.equal(marketReady.status, 200);
+  const marketReadyEndpoint = (await marketReady.json()).endpoints.find(
+    (endpoint) =>
+      endpoint.path === "/v1/tiktok/web/fetch_user_profile",
+  );
+  assert.equal(marketReadyEndpoint.availability, "available");
+
+  const disable = await fetchWorker(
+    "/api/admin/catalog",
+    {
+      method: "PATCH",
+      headers: {
+        authorization: `Bearer ${catalogSecret}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        path: "/v1/tiktok/web/fetch_user_profile",
+        enabled: false,
+        readOnly: false,
+        customerPriceUsdMicros:
+          adminReadyEndpoint.customerPriceUsdMicros,
+        expectedRevision: adminReadyEndpoint.revision,
+      }),
+    },
+    readyEnv,
+  );
+  assert.equal(disable.status, 200, await disable.clone().text());
+  const adminPending = await fetchWorker(
+    "/api/admin/catalog?limit=10&offset=0",
+    {
+      headers: { authorization: `Bearer ${catalogSecret}` },
+    },
+    readyEnv,
+  );
+  assert.equal(adminPending.status, 200);
+  const adminPendingEndpoint = (await adminPending.json()).endpoints.find(
+    (endpoint) =>
+      endpoint.path === "/v1/tiktok/web/fetch_user_profile",
+  );
+  assert.equal(adminPendingEndpoint.marketplaceAvailability, "pending");
+  assert.ok(
+    adminPendingEndpoint.availabilityReasons.includes(
+      "pending_confirmation",
+    ),
+  );
+  assert.ok(
+    adminPendingEndpoint.availabilityReasons.includes(
+      "read_only_not_confirmed",
+    ),
+  );
+
+  const marketPending = await fetchWorker(
+    "/api/marketplace?platform=tiktok&limit=100&offset=0",
+    {},
+    readyEnv,
+  );
+  assert.equal(marketPending.status, 200);
+  const marketPendingEndpoint = (await marketPending.json()).endpoints.find(
+    (endpoint) =>
+      endpoint.path === "/v1/tiktok/web/fetch_user_profile",
+  );
+  assert.equal(marketPendingEndpoint.availability, "pending");
+});
+
+test("atomically confirms selected pending routes for the frontend", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  enableCatalogEndpoint(db);
+  db.raw
+    .prepare(
+      `UPDATE endpoint_catalog
+       SET enabled = 0, read_only = 0, reviewed_at = NULL, revision = 7
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO endpoint_catalog
+       (path, platform, http_method, data_type, tags_json, surface,
+        operation_id, summary, upstream_price_usd_micros,
+        customer_price_usd_micros, price_verified, enabled, read_only,
+        safety_classification, safety_reasons_json, safety_policy_version,
+        revision, sync_generation)
+       VALUES ('/v1/tiktok/web/fetch_user_posts', 'tiktok', 'GET',
+               'profile_creator', '["TikTok-Web-API"]', 'web',
+               'fetch_user_posts', 'Fetch user posts', 1000, 2000,
+               1, 0, 0, 'safe_data_read', '["test_fixture"]', 1, 4,
+               'sync_test_complete_0001')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `UPDATE catalog_sync_state
+       SET openapi_operation_count = 2, raw_price_row_count = 2,
+           normalized_price_count = 2, openapi_price_mapped_count = 2,
+           price_only_count = 0, openapi_only_count = 0,
+           scope_excluded_count = 0, matched_price_count = 2,
+           positive_price_count = 2, zero_price_count = 0,
+           awaiting_price_count = 0
+       WHERE id = 1`,
+    )
+    .run();
+  const catalogSecret = "catalog-confirm-secret-32-characters-minimum";
+  const env = baseEnv({
+    DB: db,
+    CATALOG_SYNC_SECRET: catalogSecret,
+  });
+  const confirm = await fetchWorker(
+    "/api/admin/catalog/confirm",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${catalogSecret}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        items: [
+          {
+            path: "/v1/tiktok/web/fetch_user_profile",
+            expectedRevision: 7,
+          },
+          {
+            path: "/v1/tiktok/web/fetch_user_posts",
+            expectedRevision: 4,
+          },
+        ],
+      }),
+    },
+    env,
+  );
+  assert.equal(confirm.status, 200, await confirm.clone().text());
+  assert.deepEqual(await confirm.json(), {
+    ok: true,
+    count: 2,
+    paths: [
+      "/v1/tiktok/web/fetch_user_profile",
+      "/v1/tiktok/web/fetch_user_posts",
+    ],
+  });
+  assert.deepEqual(
+    db.raw
+      .prepare(
+        `SELECT path, enabled, read_only, revision
+         FROM endpoint_catalog
+         WHERE path IN (
+           '/v1/tiktok/web/fetch_user_profile',
+           '/v1/tiktok/web/fetch_user_posts'
+         )
+         ORDER BY path`,
+      )
+      .all()
+      .map((row) => ({ ...row })),
+    [
+      {
+        path: "/v1/tiktok/web/fetch_user_posts",
+        enabled: 1,
+        read_only: 1,
+        revision: 5,
+      },
+      {
+        path: "/v1/tiktok/web/fetch_user_profile",
+        enabled: 1,
+        read_only: 1,
+        revision: 8,
+      },
+    ],
+  );
+
+  db.raw
+    .prepare(
+      `UPDATE endpoint_catalog
+       SET enabled = 0, read_only = 0
+       WHERE path IN (
+         '/v1/tiktok/web/fetch_user_profile',
+         '/v1/tiktok/web/fetch_user_posts'
+       )`,
+    )
+    .run();
+  const conflict = await fetchWorker(
+    "/api/admin/catalog/confirm",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${catalogSecret}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        items: [
+          {
+            path: "/v1/tiktok/web/fetch_user_profile",
+            expectedRevision: 8,
+          },
+          {
+            path: "/v1/tiktok/web/fetch_user_posts",
+            expectedRevision: 999,
+          },
+        ],
+      }),
+    },
+    env,
+  );
+  assert.equal(conflict.status, 409);
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM endpoint_catalog
+         WHERE path IN (
+           '/v1/tiktok/web/fetch_user_profile',
+           '/v1/tiktok/web/fetch_user_posts'
+         )
+           AND enabled = 1`,
+      )
+      .get().count,
+    0,
+  );
+});
+
 test("freezes, atomically applies and replays catalog batch plans", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());

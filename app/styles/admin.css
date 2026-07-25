@@ -6141,9 +6141,7 @@
 .admin-catalog-batch-selector {
   grid-template-columns:
     minmax(280px, 2fr)
-    minmax(130px, 0.8fr)
-    minmax(120px, 0.7fr)
-    minmax(140px, 0.8fr)
+    repeat(4, minmax(120px, 0.8fr))
     auto
     auto;
 }
@@ -6197,7 +6195,7 @@
   z-index: 30;
   display: grid;
   width: min(520px, 76vw);
-  grid-template-columns: repeat(3, minmax(140px, 1fr));
+  grid-template-columns: repeat(2, minmax(160px, 1fr));
   gap: 8px;
   padding: 10px;
   border: 1px solid #d9dde3;
@@ -6212,37 +6210,64 @@
 }
 
 .admin-route-list {
-  min-width: 1180px;
+  min-width: 1060px;
   table-layout: fixed;
 }
 
-.admin-route-list th:nth-child(1) {
-  width: 30%;
+.admin-route-list.is-runtime-view th:nth-child(1) {
+  width: 3%;
 }
 
-.admin-route-list th:nth-child(2) {
-  width: 12%;
+.admin-route-list.is-runtime-view th:nth-child(2) {
+  width: 22%;
 }
 
-.admin-route-list th:nth-child(3),
-.admin-route-list th:nth-child(5) {
-  width: 9%;
+.admin-route-list.is-runtime-view th:nth-child(3) {
+  width: 11%;
 }
 
-.admin-route-list th:nth-child(4) {
+.admin-route-list.is-runtime-view th:nth-child(4),
+.admin-route-list.is-runtime-view th:nth-child(5),
+.admin-route-list.is-runtime-view th:nth-child(6) {
+  width: 10%;
+}
+
+.admin-route-list.is-runtime-view th:nth-child(7) {
   width: 15%;
 }
 
-.admin-route-list th:nth-child(6) {
+.admin-route-list.is-runtime-view th:nth-child(8) {
+  width: 11%;
+}
+
+.admin-route-list.is-runtime-view th:nth-child(9) {
+  width: 8%;
+}
+
+.admin-route-list.is-pricing-view th:nth-child(1) {
+  width: 22%;
+}
+
+.admin-route-list.is-pricing-view th:nth-child(2) {
+  width: 11%;
+}
+
+.admin-route-list.is-pricing-view th:nth-child(3),
+.admin-route-list.is-pricing-view th:nth-child(5) {
+  width: 10%;
+}
+
+.admin-route-list.is-pricing-view th:nth-child(4) {
+  width: 20%;
+}
+
+.admin-route-list.is-pricing-view th:nth-child(6) {
   width: 13%;
 }
 
-.admin-route-list th:nth-child(7) {
-  width: 7%;
-}
-
-.admin-route-list th:nth-child(8) {
-  width: 9%;
+.admin-route-list.is-pricing-view th:nth-child(7),
+.admin-route-list.is-pricing-view th:nth-child(8) {
+  width: 8%;
 }
 
 .admin-route-list td {
@@ -6250,8 +6275,45 @@
   vertical-align: top;
 }
 
-.admin-route-list td:nth-child(n + 3) {
+.admin-route-list td:not(.admin-route-cell) {
   vertical-align: middle;
+}
+
+.admin-route-list tbody tr.is-selected {
+  background: #f7f2eb;
+}
+
+.admin-route-select-column {
+  padding-right: 2px !important;
+  padding-left: 8px !important;
+  text-align: center;
+}
+
+.admin-route-select-column input {
+  width: 13px;
+  height: 13px;
+  accent-color: #8d5a35;
+}
+
+.admin-route-select-placeholder {
+  color: #c8cdd3;
+}
+
+.admin-route-list .admin-money-head,
+.admin-route-list .admin-money-cell {
+  text-align: right;
+}
+
+.admin-money-value,
+.admin-money-cell input {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.admin-money-cell > small {
+  display: block;
+  margin-top: 2px;
+  text-align: right;
 }
 
 .admin-route-cell {
@@ -6379,6 +6441,10 @@
   gap: 4px;
 }
 
+.admin-route-price-control {
+  justify-content: flex-end;
+}
+
 .admin-route-price-control > span,
 .admin-pending-price-control > span {
   color: #7d8590;
@@ -6394,6 +6460,10 @@
   border-radius: 4px;
   font-family: var(--font-mono);
   font-size: 9px;
+}
+
+.admin-route-price-control input {
+  text-align: right;
 }
 
 .admin-route-checks {
@@ -6414,6 +6484,165 @@
 .admin-route-checks small.is-warning,
 .admin-route-list small.is-error {
   color: #a75e3f;
+}
+
+.admin-route-batch-bar {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 7px 10px;
+  border: 1px solid #dfe3e8;
+  border-radius: 7px;
+  background: #f8f9fa;
+}
+
+.admin-route-batch-bar > div {
+  display: grid;
+  gap: 2px;
+}
+
+.admin-route-batch-bar strong {
+  color: #343b44;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-route-batch-bar small {
+  color: #7b8490;
+  font-size: 8px;
+}
+
+.admin-route-runtime {
+  display: grid;
+  gap: 4px;
+}
+
+.admin-route-runtime-status,
+.admin-route-publish-status {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  font-size: 8px;
+  font-weight: 750;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.admin-route-runtime-status {
+  padding: 5px 7px;
+}
+
+.admin-route-runtime-status::before {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  content: "";
+}
+
+.admin-route-runtime-status.is-available {
+  color: #346744;
+  background: #eaf4ec;
+}
+
+.admin-route-runtime-status.is-available::before {
+  background: #4b925e;
+}
+
+.admin-route-runtime-status.is-unavailable {
+  color: #994b35;
+  background: #f8ebe6;
+}
+
+.admin-route-runtime-status.is-unavailable::before {
+  background: #be674d;
+}
+
+.admin-route-runtime small {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #7b8490;
+  font-size: 8px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.admin-route-publish-status {
+  padding: 4px 6px;
+}
+
+.admin-route-publish-status.is-added {
+  color: #285f76;
+  background: #e7f2f6;
+}
+
+.admin-route-publish-status.is-pending {
+  color: #8a5a27;
+  background: #f7efe2;
+}
+
+.admin-route-publish-status + small {
+  display: block;
+  margin-top: 4px;
+  color: #8a929d;
+  font-size: 8px;
+  white-space: nowrap;
+}
+
+.admin-route-list td:last-child .button {
+  min-width: 66px;
+  padding-right: 8px;
+  padding-left: 8px;
+  white-space: nowrap;
+}
+
+.admin-route-secondary-actions {
+  margin-top: 10px;
+  border: 1px dashed #d7dce2;
+  border-radius: 7px;
+  background: #fbfbfc;
+}
+
+.admin-route-secondary-actions > summary {
+  padding: 9px 11px;
+  color: #67707b;
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.admin-route-secondary-actions > summary::-webkit-details-marker {
+  display: none;
+}
+
+.admin-route-secondary-actions > summary::after {
+  float: right;
+  content: "＋";
+}
+
+.admin-route-secondary-actions[open] > summary::after {
+  content: "－";
+}
+
+.admin-route-secondary-actions > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  border-top: 1px solid #e5e8ec;
+}
+
+.admin-route-secondary-actions p {
+  margin: 0;
+  color: #737c87;
+  font-size: 9px;
 }
 
 .admin-pending-catalog-table {

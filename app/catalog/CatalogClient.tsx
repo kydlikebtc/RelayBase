@@ -173,8 +173,8 @@ const catalogCopy = {
     pendingPrice: "Price pending",
     surfaceOther: "Other",
     availability: {
-      available: "Callable",
-      pending: "Pending",
+      available: "Online",
+      pending: "Offline",
       restricted: "Restricted",
     },
     loadingProducts: "Loading data products",
@@ -298,7 +298,11 @@ const catalogCopy = {
   zh: {
     pendingPrice: "待定价",
     surfaceOther: "其他",
-    availability: { available: "可调用", pending: "待开放", restricted: "受限" },
+    availability: {
+      available: "在线可用",
+      pending: "暂不可用",
+      restricted: "受限",
+    },
     loadingProducts: "正在加载数据产品",
     parameter: "参数",
     required: "必填",

@@ -739,6 +739,13 @@ export async function handlePlatformRequest(
     }
 
     if (
+      url.pathname === "/api/admin/catalog/confirm" &&
+      request.method === "POST"
+    ) {
+      return await handleCatalogConfirm(request, env, requestId);
+    }
+
+    if (
       url.pathname === "/api/admin/overview" &&
       request.method === "GET"
     ) {
@@ -5650,9 +5657,58 @@ async function handleCatalogList(
       synced_at: string;
       coverage_verified: number;
     }>();
+  const marketplaceOverlay = await marketplaceCatalogOverlay(env);
+  const marketplaceAvailabilityByKey = new Map<
+    string,
+    MarketplaceAvailability
+  >(
+    mergedMarketplaceEndpoints(marketplaceOverlay)
+      .filter((endpoint) => endpoint.method !== null)
+      .map((endpoint) => [
+        `${endpoint.method}:${endpoint.path}`,
+        endpoint.availability,
+      ] as const),
+  );
   const total = Number(totalRow?.count ?? 0);
   const endpoints = (rows.results ?? []).map((row) => {
     const taxonomy = strictStoredCatalogTaxonomy(row);
+    const marketplaceAvailability =
+      marketplaceAvailabilityByKey.get(
+        `${row.http_method.toUpperCase()}:${row.path}`,
+      ) ?? "pending";
+    const availabilityReasons: string[] = [];
+    if (!marketplaceAvailabilityByKey.has(
+      `${row.http_method.toUpperCase()}:${row.path}`,
+    )) {
+      availabilityReasons.push("not_in_public_catalog");
+    }
+    if (row.enabled !== 1) {
+      availabilityReasons.push("pending_confirmation");
+    }
+    if (row.read_only !== 1) {
+      availabilityReasons.push("read_only_not_confirmed");
+    }
+    if (row.price_verified !== 1) {
+      availabilityReasons.push("price_unverified");
+    }
+    if (row.present_in_latest_sync !== 1) {
+      availabilityReasons.push("not_in_latest_sync");
+    }
+    if (
+      row.safety_classification !== "safe_data_read" ||
+      row.safety_policy_version !== CATALOG_SAFETY_POLICY_VERSION
+    ) {
+      availabilityReasons.push("safety_not_approved");
+    }
+    if (!marketplaceOverlay.catalogReady) {
+      availabilityReasons.push("runtime_not_ready");
+    }
+    if (
+      marketplaceAvailability === "restricted" &&
+      !availabilityReasons.includes("safety_not_approved")
+    ) {
+      availabilityReasons.push("safety_restricted");
+    }
     return {
       path: row.path,
       platform: row.platform,
@@ -5675,6 +5731,8 @@ async function handleCatalogList(
       revision: row.revision,
       sourceUpdatedAt: row.source_updated_at,
       presentInLatestSync: row.present_in_latest_sync === 1,
+      marketplaceAvailability,
+      availabilityReasons,
       reviewedAt: row.reviewed_at,
       updatedAt: row.updated_at,
     };
@@ -10835,6 +10893,7 @@ async function handleCatalogUpdate(
       "目录在审核期间发生变化，请刷新后重新确认成本与状态。",
     );
   }
+  marketplaceOverlayCache.delete(env as object);
   return jsonResponse(
     {
       ok: true,
@@ -10842,6 +10901,231 @@ async function handleCatalogUpdate(
       enabled: body.enabled,
       readOnly: body.readOnly,
       revision: nextRevision,
+    },
+    200,
+    requestId,
+  );
+}
+
+async function handleCatalogConfirm(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  requireAdminSecret(request, env, "catalog");
+  const body = await readJsonBody<{ items?: unknown }>(
+    request,
+    MAX_DASHBOARD_BODY_BYTES,
+  );
+  if (
+    !Array.isArray(body.items) ||
+    body.items.length < 1 ||
+    body.items.length > 100
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_catalog_confirmation",
+      "请选择 1–100 个待确认端点。",
+    );
+  }
+  const items = body.items.map((value) => {
+    if (
+      !isPlainRecord(value) ||
+      typeof value.path !== "string" ||
+      !Number.isSafeInteger(value.expectedRevision) ||
+      Number(value.expectedRevision) < 0 ||
+      Number(value.expectedRevision) > 2_147_483_647
+    ) {
+      throw new PlatformError(
+        400,
+        "invalid_catalog_confirmation",
+        "待确认端点必须包含有效路径与当前 revision。",
+      );
+    }
+    return {
+      path: normalizeCatalogPath(value.path),
+      expectedRevision: Number(value.expectedRevision),
+    };
+  });
+  if (new Set(items.map((item) => item.path)).size !== items.length) {
+    throw new PlatformError(
+      400,
+      "duplicate_catalog_confirmation",
+      "待确认端点不能重复。",
+    );
+  }
+
+  const db = requireDb(env);
+  await assertStoredCatalogTaxonomyIntegrity(db);
+  const pathPlaceholders = items.map(() => "?").join(", ");
+  const existingRows = await db
+    .prepare(
+      `SELECT path, http_method, upstream_price_usd_micros,
+              customer_price_usd_micros, price_verified, enabled,
+              read_only, safety_classification, safety_policy_version,
+              revision, sync_generation,
+              (
+                SELECT last_success_generation
+                FROM catalog_sync_state
+                WHERE id = 1
+              ) AS last_success_generation
+       FROM endpoint_catalog
+       WHERE path IN (${pathPlaceholders})`,
+    )
+    .bind(...items.map((item) => item.path))
+    .all<{
+      path: string;
+      http_method: string;
+      upstream_price_usd_micros: number;
+      customer_price_usd_micros: number;
+      price_verified: number;
+      enabled: number;
+      read_only: number;
+      safety_classification: CatalogSafetyClassification;
+      safety_policy_version: number;
+      revision: number;
+      sync_generation: string | null;
+      last_success_generation: string | null;
+    }>();
+  const existingByPath = new Map(
+    (existingRows.results ?? []).map((row) => [row.path, row]),
+  );
+  for (const item of items) {
+    const existing = existingByPath.get(item.path);
+    if (!existing) {
+      throw new PlatformError(
+        404,
+        "endpoint_not_found",
+        "待确认列表中包含目录不存在的端点，请刷新后重试。",
+      );
+    }
+    if (
+      existing.revision !== item.expectedRevision ||
+      existing.enabled === 1
+    ) {
+      throw new PlatformError(
+        409,
+        "catalog_confirmation_conflict",
+        "待确认端点的状态已经变化，请刷新后重新选择。",
+      );
+    }
+    if (
+      existing.sync_generation == null ||
+      existing.sync_generation !== existing.last_success_generation ||
+      existing.price_verified !== 1 ||
+      existing.customer_price_usd_micros <
+        existing.upstream_price_usd_micros ||
+      (existing.http_method !== "GET" &&
+        existing.http_method !== "POST") ||
+      existing.safety_classification !== "safe_data_read" ||
+      existing.safety_policy_version !== CATALOG_SAFETY_POLICY_VERSION ||
+      isHardProhibitedCatalogOperation(
+        item.path,
+        existing.http_method as "GET" | "POST",
+      )
+    ) {
+      throw new PlatformError(
+        409,
+        "catalog_confirmation_blocked",
+        "待确认端点尚未满足最新同步、成本和安全策略要求。",
+      );
+    }
+  }
+
+  const selection = (prefix: string) =>
+    items
+      .map(() => `(${prefix}path = ? AND ${prefix}revision = ?)`)
+      .join(" OR ");
+  const selectionBindings = items.flatMap((item) => [
+    item.path,
+    item.expectedRevision,
+  ]);
+  const eligibility = (prefix: string) =>
+    `${prefix}enabled = 0
+     AND ${prefix}price_verified = 1
+     AND ${prefix}customer_price_usd_micros >=
+         ${prefix}upstream_price_usd_micros
+     AND ${prefix}http_method IN ('GET', 'POST')
+     AND ${prefix}safety_classification = 'safe_data_read'
+     AND ${prefix}safety_policy_version =
+         ${CATALOG_SAFETY_POLICY_VERSION}
+     AND ${prefix}sync_generation = (
+       SELECT last_success_generation
+       FROM catalog_sync_state
+       WHERE id = 1
+     )`;
+  const update = db
+    .prepare(
+      `UPDATE endpoint_catalog
+       SET enabled = 1, read_only = 1,
+           reviewed_at = CURRENT_TIMESTAMP,
+           revision = revision + 1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE (${selection("")})
+         AND ${eligibility("")}
+         AND ? = (
+           SELECT COUNT(*)
+           FROM endpoint_catalog candidate
+           WHERE (${selection("candidate.")})
+             AND ${eligibility("candidate.")}
+         )`,
+    )
+    .bind(
+      ...selectionBindings,
+      items.length,
+      ...selectionBindings,
+    );
+  const supplied = bearerToken(request);
+  if (!supplied) {
+    throw new PlatformError(401, "admin_unauthorized", "管理员凭证无效。");
+  }
+  const selectionDigest = await sha256Hex(
+    JSON.stringify(
+      [...items].sort((left, right) =>
+        left.path.localeCompare(right.path, "en-US"),
+      ),
+    ),
+  );
+  const auditId = `aud_${(
+    await sha256Hex(`catalog.endpoints_confirmed:${selectionDigest}`)
+  ).slice(0, 32)}`;
+  const audit = db
+    .prepare(
+      `INSERT OR IGNORE INTO admin_audit_logs
+       (id, actor_fingerprint, action, target_type, target_id,
+        details_json, created_at)
+       SELECT ?, ?, 'catalog.endpoints_confirmed',
+              'catalog_endpoint_batch', ?, ?, CURRENT_TIMESTAMP
+       WHERE changes() = ?`,
+    )
+    .bind(
+      auditId,
+      (await sha256Hex(supplied)).slice(0, 16),
+      `confirm_${selectionDigest.slice(0, 24)}`,
+      JSON.stringify({
+        count: items.length,
+        selectionDigest,
+        samplePaths: items.slice(0, 20).map((item) => item.path),
+      }),
+      items.length,
+    );
+  const results = await db.batch([update, audit]);
+  if (
+    Number(results[0]?.meta?.changes ?? 0) !== items.length ||
+    Number(results[1]?.meta?.changes ?? 0) !== 1
+  ) {
+    throw new PlatformError(
+      409,
+      "catalog_confirmation_conflict",
+      "待确认端点在操作期间发生变化，整批未应用，请刷新后重试。",
+    );
+  }
+  marketplaceOverlayCache.delete(env as object);
+  return jsonResponse(
+    {
+      ok: true,
+      count: items.length,
+      paths: items.map((item) => item.path),
     },
     200,
     requestId,
