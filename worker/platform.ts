@@ -689,6 +689,13 @@ export async function handlePlatformRequest(
     }
 
     if (
+      url.pathname === "/api/x402/batches" &&
+      request.method === "GET"
+    ) {
+      return await handleX402BatchList(request, env, requestId);
+    }
+
+    if (
       url.pathname === "/api/admin/upstream-credentials" &&
       request.method === "GET"
     ) {
@@ -2064,6 +2071,7 @@ async function handleDashboard(
     keysResult,
     paymentsResult,
     callsResult,
+    prepaidDailyResult,
   ] = await db.batch([
     db
       .prepare(
@@ -2147,6 +2155,16 @@ async function handleDashboard(
          LIMIT 20`,
       )
       .bind(user.id),
+    db
+      .prepare(
+        `SELECT date(created_at) AS day, COUNT(*) AS call_count
+         FROM api_calls
+         WHERE user_id = ?
+           AND date(created_at) >= date('now', '-29 days')
+         GROUP BY date(created_at)
+         ORDER BY day ASC`,
+      )
+      .bind(user.id),
   ]);
 
   const balanceRow = firstResult<{ balance: number }>(balanceResult);
@@ -2157,6 +2175,116 @@ async function handleDashboard(
   }>(statsResult);
   const calls30d = Number(statsRow?.calls_30d ?? 0);
   const successful30d = Number(statsRow?.successful_30d ?? 0);
+  const dailyUsage = new Map<
+    string,
+    { day: string; prepaidCalls: number; x402Calls: number }
+  >();
+  for (const row of resultRows<{
+    day: string;
+    call_count: number;
+  }>(prepaidDailyResult)) {
+    dailyUsage.set(row.day, {
+      day: row.day,
+      prepaidCalls: Number(row.call_count),
+      x402Calls: 0,
+    });
+  }
+
+  let x402Calls30d = 0;
+  let x402SettledAmount30d = 0;
+  let x402SettledBatches30d = 0;
+  let x402PendingBatches = 0;
+  if (
+    user.walletAddress &&
+    readiness.capabilities.x402SchemaReady
+  ) {
+    const [x402StatsResult, x402DailyResult] = await db.batch([
+      db
+        .prepare(
+          `SELECT
+             COALESCE(SUM(
+               CASE
+                 WHEN execution_started_at IS NOT NULL
+                  AND date(execution_started_at) >= date('now', '-29 days')
+                 THEN verified_quantity ELSE 0
+               END
+             ), 0) AS target_calls_30d,
+             COALESCE(SUM(
+               CASE
+                 WHEN revenue_recognized_at IS NOT NULL
+                  AND transaction_hash IS NOT NULL
+                  AND datetime(revenue_recognized_at) >= datetime('now', '-30 days')
+                 THEN amount_usdc_atomic ELSE 0
+               END
+             ), 0) AS settled_amount_30d,
+             COALESCE(SUM(
+               CASE
+                 WHEN revenue_recognized_at IS NOT NULL
+                  AND transaction_hash IS NOT NULL
+                  AND datetime(revenue_recognized_at) >= datetime('now', '-30 days')
+                 THEN 1 ELSE 0
+               END
+             ), 0) AS settled_batches_30d,
+             COALESCE(SUM(
+               CASE
+                 WHEN revenue_recognized_at IS NULL
+                  AND status IN (
+                    'quoted', 'payment_verifying', 'payment_verified',
+                    'settlement_pending', 'settled', 'executing'
+                  )
+                 THEN 1 ELSE 0
+               END
+             ), 0) AS pending_batches
+           FROM x402_batches
+           WHERE lower(payer_address) = ?`,
+        )
+        .bind(user.walletAddress.toLowerCase()),
+      db
+        .prepare(
+          `SELECT date(execution_started_at) AS day,
+                  COALESCE(SUM(verified_quantity), 0) AS call_count
+           FROM x402_batches
+           WHERE lower(payer_address) = ?
+             AND execution_started_at IS NOT NULL
+             AND date(execution_started_at) >= date('now', '-29 days')
+           GROUP BY date(execution_started_at)
+           ORDER BY day ASC`,
+        )
+        .bind(user.walletAddress.toLowerCase()),
+    ]);
+    const x402Stats = firstResult<{
+      target_calls_30d: number;
+      settled_amount_30d: number;
+      settled_batches_30d: number;
+      pending_batches: number;
+    }>(x402StatsResult);
+    x402Calls30d = Number(x402Stats?.target_calls_30d ?? 0);
+    x402SettledAmount30d = Number(
+      x402Stats?.settled_amount_30d ?? 0,
+    );
+    x402SettledBatches30d = Number(
+      x402Stats?.settled_batches_30d ?? 0,
+    );
+    x402PendingBatches = Number(x402Stats?.pending_batches ?? 0);
+    for (const row of resultRows<{
+      day: string;
+      call_count: number;
+    }>(x402DailyResult)) {
+      const existing = dailyUsage.get(row.day);
+      dailyUsage.set(row.day, {
+        day: row.day,
+        prepaidCalls: existing?.prepaidCalls ?? 0,
+        x402Calls: Number(row.call_count),
+      });
+    }
+  }
+  const prepaidCalls30d = Array.from(dailyUsage.values()).reduce(
+    (total, row) => total + row.prepaidCalls,
+    0,
+  );
+  const usageDaily = Array.from(dailyUsage.values()).sort((left, right) =>
+    left.day.localeCompare(right.day),
+  );
 
   return jsonResponse(
     {
@@ -2173,6 +2301,31 @@ async function handleDashboard(
           calls30d === 0
             ? 1
             : Math.round((successful30d / calls30d) * 10000) / 10000,
+      },
+      usage: {
+        periodDays: 30,
+        totalCalls30d: prepaidCalls30d + x402Calls30d,
+        prepaidCalls30d,
+        x402Calls30d,
+        prepaidSpend30dUsdMicros: Number(statsRow?.spend_30d ?? 0),
+        x402Settled30dUsdMicros: x402SettledAmount30d,
+        x402SettledBatches30d,
+        x402PendingBatches,
+        daily: usageDaily,
+      },
+      x402: {
+        runtime: {
+          available: readiness.capabilities.x402Available,
+          enabled: readiness.capabilities.x402Enabled,
+          configured: readiness.capabilities.x402Configured,
+          mode: readiness.capabilities.x402Mode,
+        },
+        historyScope: {
+          kind: user.walletAddress
+            ? "signed_in_wallet"
+            : "wallet_not_linked",
+          walletAddress: user.walletAddress,
+        },
       },
       keys: resultRows<{
         id: string;
@@ -2261,6 +2414,126 @@ async function handleX402BatchLookup(
   }
   return jsonResponse(
     { batch: publicX402Batch(batch) },
+    200,
+    requestId,
+    { "cache-control": "private, no-store" },
+  );
+}
+
+async function handleX402BatchList(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  const db = requireDb(env);
+  const user = await requireAuthenticatedUser(request, db, env);
+  const url = new URL(request.url);
+  const page = Number(url.searchParams.get("page") ?? "1");
+  const limit = Number(url.searchParams.get("limit") ?? "20");
+  const view = url.searchParams.get("view")?.trim() ?? "all";
+  const allowedViews = new Set([
+    "all",
+    "settled",
+    "pending",
+    "failed",
+    "succeeded",
+  ]);
+  if (
+    !Number.isSafeInteger(page) ||
+    page < 1 ||
+    page > 10_000 ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 50 ||
+    !allowedViews.has(view)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_x402_history_filter",
+      "x402 批次历史筛选参数无效。",
+    );
+  }
+  if (!(await hasX402Schema(db))) {
+    throw new PlatformError(
+      503,
+      "x402_schema_unavailable",
+      "x402 数据库迁移尚未完成。",
+    );
+  }
+  if (!user.walletAddress) {
+    return jsonResponse(
+      {
+        scope: {
+          kind: "wallet_not_linked",
+          walletAddress: null,
+        },
+        page,
+        limit,
+        total: 0,
+        hasNext: false,
+        batches: [],
+      },
+      200,
+      requestId,
+      { "cache-control": "private, no-store" },
+    );
+  }
+
+  const viewClause =
+    view === "settled"
+      ? "AND revenue_recognized_at IS NOT NULL AND transaction_hash IS NOT NULL"
+      : view === "pending"
+        ? `AND revenue_recognized_at IS NULL
+           AND status IN (
+             'quoted', 'payment_verifying', 'payment_verified',
+             'settlement_pending', 'settled', 'executing'
+           )`
+        : view === "failed"
+          ? `AND status IN (
+               'payment_rejected', 'settlement_failed',
+               'execution_failed', 'expired'
+             )`
+          : view === "succeeded"
+            ? "AND status = 'succeeded'"
+            : "";
+  const offset = (page - 1) * limit;
+  const normalizedWallet = user.walletAddress.toLowerCase();
+  const [rowsResult, countResult] = await db.batch([
+    db
+      .prepare(
+        `SELECT * FROM x402_batches
+         WHERE lower(payer_address) = ?
+         ${viewClause}
+         ORDER BY created_at DESC, id DESC
+         LIMIT ? OFFSET ?`,
+      )
+      .bind(normalizedWallet, limit, offset),
+    db
+      .prepare(
+        `SELECT COUNT(*) AS batch_count
+         FROM x402_batches
+         WHERE lower(payer_address) = ?
+         ${viewClause}`,
+      )
+      .bind(normalizedWallet),
+  ]);
+  const total = Number(
+    firstResult<{ batch_count: number }>(countResult)?.batch_count ?? 0,
+  );
+  return jsonResponse(
+    {
+      scope: {
+        kind: "signed_in_wallet",
+        walletAddress: user.walletAddress,
+      },
+      page,
+      limit,
+      total,
+      hasNext: offset + limit < total,
+      batches: resultRows<X402BatchRecord>(rowsResult).map((batch) =>
+        publicX402Batch(batch, { maskPayer: false }),
+      ),
+    },
     200,
     requestId,
     { "cache-control": "private, no-store" },
@@ -2606,7 +2879,10 @@ async function handleAdminX402Config(
   );
 }
 
-function publicX402Batch(batch: X402BatchRecord) {
+function publicX402Batch(
+  batch: X402BatchRecord,
+  options: { maskPayer?: boolean } = {},
+) {
   const payer = batch.payer_address;
   return {
     id: batch.id,
@@ -2617,10 +2893,13 @@ function publicX402Batch(batch: X402BatchRecord) {
     amountUsdcAtomic: batch.amount_usdc_atomic,
     network: batch.network,
     asset: batch.asset,
-    payer:
-      payer && payer.length === 42
-        ? `${payer.slice(0, 8)}…${payer.slice(-6)}`
-        : null,
+    payer: payer
+      ? options.maskPayer === false
+        ? payer
+        : payer.length === 42
+          ? `${payer.slice(0, 8)}…${payer.slice(-6)}`
+          : null
+      : null,
     transaction: batch.transaction_hash,
     paymentStatus: batch.revenue_recognized_at
       ? "settled"

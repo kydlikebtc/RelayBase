@@ -8991,4 +8991,156 @@ test("quotes, settles and executes one x402 wallet-paid batch without touching b
       .get().count,
     0,
   );
+  const publicReceipt = await fetchWorker(
+    `/api/x402/batches/${batchId}`,
+    {},
+    env,
+  );
+  assert.equal(publicReceipt.status, 200);
+  const publicReceiptData = await publicReceipt.json();
+  assert.equal(
+    publicReceiptData.batch.transaction,
+    `0x${"4".repeat(64)}`,
+  );
+  assert.equal(
+    publicReceiptData.batch.payer,
+    `0x${"3".repeat(6)}…${"3".repeat(6)}`,
+  );
+
+  const walletAddress = `0x${"3".repeat(40)}`;
+  const walletUserId = "usr_x402_console_wallet";
+  const sessionToken = "x402_console_wallet_session_token_000000000001";
+  db.raw
+    .prepare(
+      `INSERT INTO users (id, email, display_name)
+       VALUES (?, 'x402-console@example.com', 'x402 Console')`,
+    )
+    .run(walletUserId);
+  db.raw
+    .prepare(
+      `INSERT INTO auth_identities
+       (id, user_id, provider, subject, email, wallet_address)
+       VALUES ('aid_x402_console_wallet', ?, 'wallet', ?, NULL, ?)`,
+    )
+    .run(walletUserId, walletAddress, walletAddress);
+  db.raw
+    .prepare(
+      `INSERT INTO auth_sessions
+       (token_hash, user_id, provider, expires_at)
+       VALUES (?, ?, 'wallet', datetime('now', '+1 day'))`,
+    )
+    .run(
+      createHash("sha256").update(sessionToken).digest("hex"),
+      walletUserId,
+    );
+  db.raw
+    .prepare(
+      `INSERT INTO api_keys
+       (id, user_id, label, key_prefix, key_hash)
+       VALUES ('key_x402_console', ?, 'Console test',
+               'rb_live_console…', ?)`,
+    )
+    .run(
+      walletUserId,
+      createHash("sha256").update("console-key-secret").digest("hex"),
+    );
+  db.raw
+    .prepare(
+      `INSERT INTO api_calls
+       (id, user_id, api_key_id, method, upstream_path, platform,
+        status_code, cost_usd_micros, upstream_cost_usd_micros,
+        latency_ms, refunded)
+       VALUES ('call_x402_console', ?, 'key_x402_console', 'GET', ?,
+               'tiktok', 200, 2000, 1000, 120, 0)`,
+    )
+    .run(walletUserId, endpoint);
+
+  const consoleHeaders = {
+    cookie: `rb_session=${sessionToken}`,
+  };
+  const history = await fetchWorker(
+    "/api/x402/batches?page=1&limit=20&view=all",
+    { headers: consoleHeaders },
+    env,
+  );
+  assert.equal(history.status, 200);
+  const historyData = await history.json();
+  assert.equal(historyData.scope.kind, "signed_in_wallet");
+  assert.equal(historyData.scope.walletAddress, walletAddress);
+  assert.equal(historyData.total, 1);
+  assert.equal(historyData.hasNext, false);
+  assert.equal(historyData.batches[0].id, batchId);
+  assert.equal(historyData.batches[0].payer, walletAddress);
+  assert.equal(
+    historyData.batches[0].transaction,
+    `0x${"4".repeat(64)}`,
+  );
+  assert.equal(historyData.batches[0].paymentStatus, "settled");
+  assert.equal(historyData.batches[0].status, "succeeded");
+  assert.equal(historyData.batches[0].verifiedQuantity, 2);
+  assert.equal(historyData.batches[0].amountUsdcAtomic, 6000);
+  assert.ok(historyData.batches[0].settledAt);
+  assert.ok(historyData.batches[0].completedAt);
+
+  const settledHistory = await fetchWorker(
+    "/api/x402/batches?page=1&limit=20&view=settled",
+    { headers: consoleHeaders },
+    env,
+  );
+  assert.equal((await settledHistory.json()).total, 1);
+  const pendingHistory = await fetchWorker(
+    "/api/x402/batches?page=1&limit=20&view=pending",
+    { headers: consoleHeaders },
+    env,
+  );
+  assert.equal((await pendingHistory.json()).total, 0);
+
+  const dashboard = await fetchWorker(
+    "/api/dashboard",
+    { headers: consoleHeaders },
+    env,
+  );
+  assert.equal(dashboard.status, 200);
+  const dashboardData = await dashboard.json();
+  assert.deepEqual(
+    {
+      total: dashboardData.usage.totalCalls30d,
+      prepaid: dashboardData.usage.prepaidCalls30d,
+      x402: dashboardData.usage.x402Calls30d,
+      prepaidSpend: dashboardData.usage.prepaidSpend30dUsdMicros,
+      x402Settled: dashboardData.usage.x402Settled30dUsdMicros,
+      settledBatches: dashboardData.usage.x402SettledBatches30d,
+    },
+    {
+      total: 3,
+      prepaid: 1,
+      x402: 2,
+      prepaidSpend: 2000,
+      x402Settled: 6000,
+      settledBatches: 1,
+    },
+  );
+  assert.equal(
+    dashboardData.usage.daily.reduce(
+      (total, day) =>
+        total + day.prepaidCalls + day.x402Calls,
+      0,
+    ),
+    dashboardData.usage.totalCalls30d,
+  );
+  assert.equal(dashboardData.x402.historyScope.kind, "signed_in_wallet");
+  assert.equal(
+    dashboardData.x402.historyScope.walletAddress,
+    walletAddress,
+  );
+
+  const unlinkedHistory = await fetchWorker(
+    "/api/x402/batches?page=1&limit=20&view=all",
+    { headers: signedInHeaders() },
+    env,
+  );
+  assert.equal(unlinkedHistory.status, 200);
+  const unlinkedHistoryData = await unlinkedHistory.json();
+  assert.equal(unlinkedHistoryData.scope.kind, "wallet_not_linked");
+  assert.equal(unlinkedHistoryData.total, 0);
 });

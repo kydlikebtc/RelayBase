@@ -66,11 +66,44 @@ type DashboardData = {
     schemaReady: boolean;
     taxonomyReady: boolean;
     catalogReady: boolean;
+    x402Enabled: boolean;
+    x402Configured: boolean;
+    x402Available: boolean;
+    x402SchemaReady: boolean;
+    x402Mode: "live" | "disabled" | "unconfigured";
+    x402Missing: string[];
   };
   stats: {
     calls30d: number;
     spend30dUsdMicros: number;
     successRate: number;
+  };
+  usage: {
+    periodDays: 30;
+    totalCalls30d: number;
+    prepaidCalls30d: number;
+    x402Calls30d: number;
+    prepaidSpend30dUsdMicros: number;
+    x402Settled30dUsdMicros: number;
+    x402SettledBatches30d: number;
+    x402PendingBatches: number;
+    daily: Array<{
+      day: string;
+      prepaidCalls: number;
+      x402Calls: number;
+    }>;
+  };
+  x402: {
+    runtime: {
+      available: boolean;
+      enabled: boolean;
+      configured: boolean;
+      mode: "live" | "disabled" | "unconfigured";
+    };
+    historyScope: {
+      kind: "signed_in_wallet" | "wallet_not_linked";
+      walletAddress: string | null;
+    };
   };
   keys: ApiKeyRecord[];
   payments: PaymentRecord[];
@@ -133,8 +166,22 @@ type X402Batch = {
   quotedAt: string;
   expiresAt: string;
   settledAt: string | null;
+  revenueRecognizedAt: string | null;
+  executionStartedAt: string | null;
   completedAt: string | null;
   updatedAt: string;
+};
+
+type X402HistoryResponse = {
+  scope: {
+    kind: "signed_in_wallet" | "wallet_not_linked";
+    walletAddress: string | null;
+  };
+  page: number;
+  limit: number;
+  total: number;
+  hasNext: boolean;
+  batches: X402Batch[];
 };
 
 export type ConsoleWorkspace =
@@ -525,6 +572,204 @@ const consoleCopy = {
   },
 } as const;
 
+const x402Copy = {
+  en: {
+    readiness: "x402 availability",
+    available: "Available",
+    notReady: "Not ready",
+    runtimeLive: "Wallet settlement is configured and callable.",
+    runtimeDisabled: "The x402 entry is not enabled.",
+    runtimeUnconfigured: "Settlement configuration is incomplete.",
+    runtimeBlocked: "Runtime prerequisites are not all ready.",
+    targetCalls: "30-day x402 calls",
+    settledAmount: "30-day wallet-settled",
+    batchStatus: "30-day settled / open batches",
+    batchStatusSub: "Settled 30d / Pending now",
+    paymentBoundary:
+      "Availability describes whether new batches can be quoted. Only a persisted Base transaction hash marks a batch as settled.",
+    balanceBoundary:
+      "x402 wallet payments never top up or deduct the platform balance.",
+    history: "Batch history",
+    historyEyebrow: "WALLET-SCOPED RECORDS",
+    historyDescription:
+      "Every batch paid by the wallet used for this sign-in. Use an exact batch ID for receipts from another caller wallet.",
+    walletScope: "Signed-in wallet",
+    noWalletScope: "No wallet linked to this sign-in",
+    filter: "Status",
+    filterAll: "All batches",
+    filterSettled: "Settled on Base",
+    filterPending: "Payment pending",
+    filterFailed: "Needs attention",
+    filterSucceeded: "Execution succeeded",
+    batchId: "Batch",
+    product: "Data product",
+    quantity: "Quantity",
+    amount: "Amount",
+    wallet: "Wallet",
+    payment: "Payment",
+    execution: "Execution",
+    transaction: "Base transaction",
+    updated: "Updated",
+    actions: "Actions",
+    view: "View",
+    noTransaction: "No on-chain transaction",
+    notRecorded: "Not recorded",
+    paymentSettled: "Settled",
+    paymentPending: "Pending",
+    paymentReview: "Review required",
+    paymentRejected: "Rejected",
+    executionSucceeded: "Succeeded",
+    executionFailed: "Failed",
+    executionRunning: "Executing",
+    executionNotStarted: "Not started",
+    quoteExpired: "Expired",
+    loadingHistory: "Loading wallet batch history…",
+    noHistory:
+      "No x402 batches were found for the signed-in wallet and selected status.",
+    noWalletHistory:
+      "This account is not signed in with a wallet, so wallet-scoped history cannot be derived. Paste a batch ID to inspect a receipt.",
+    page: (current: number, pages: number) => `Page ${current} of ${pages}`,
+    records: "batches",
+    previous: "Previous",
+    next: "Next",
+    lookupLabel: "Find a specific receipt",
+    lookupPlaceholder: "xb_...",
+    lookupButton: "Find receipt",
+    lookupLoading: "Loading…",
+    detail: "Batch receipt",
+    detailEyebrow: "SETTLEMENT / EXECUTION",
+    detailEmpty:
+      "Select a history row or enter a batch ID to inspect settlement and execution evidence.",
+    copyBatch: "Copy batch ID",
+    batchCopied: "Batch ID copied.",
+    copyWallet: "Copy wallet",
+    walletCopied: "Wallet copied.",
+    copyTransaction: "Copy transaction hash",
+    transactionCopied: "Transaction hash copied.",
+    viewTransaction: "View on BaseScan ↗",
+    settlementEvidence: "Settlement evidence",
+    executionEvidence: "Execution evidence",
+    unitPrice: "Unit price",
+    quoted: "Quoted",
+    settled: "Settled",
+    started: "Execution started",
+    completed: "Completed",
+    failureCode: "Failure code",
+    receiptConfirmed:
+      "A Base transaction hash is recorded. Payment settlement and execution remain separate states.",
+    receiptMissing:
+      "No Base transaction hash is recorded, so this batch is not presented as chain-settled.",
+    runtimeClarification:
+      "“Not ready” is a runtime availability state. It never means a payment settled on-chain.",
+    callsChart: "Daily API usage",
+    callsChartEyebrow: "30 DAYS / DAILY",
+    callsChartDescription:
+      "Stacked daily volume. The total equals API Key balance calls plus x402 target calls.",
+    prepaidCalls: "API Key / balance",
+    x402Calls: "x402 wallet",
+    totalCalls: "Total calls",
+    prepaidSpend: "Prepaid usage",
+    x402Spend: "x402 wallet-settled",
+    chartEmpty: "No calls in the last 30 days.",
+  },
+  zh: {
+    readiness: "x402 可用状态",
+    available: "当前可用",
+    notReady: "当前未就绪",
+    runtimeLive: "钱包结算配置完整，当前可创建新批次。",
+    runtimeDisabled: "x402 入口尚未启用。",
+    runtimeUnconfigured: "结算配置尚未完整。",
+    runtimeBlocked: "运行所需条件尚未全部满足。",
+    targetCalls: "30 天 x402 调用",
+    settledAmount: "30 天钱包实结算",
+    batchStatus: "30 天已结算 / 当前待处理",
+    batchStatusSub: "30 天已结算 / 当前待处理",
+    paymentBoundary:
+      "可用状态只说明能否创建新批次；只有已持久化的 Base 交易哈希，才表示该批次已完成链上结算。",
+    balanceBoundary: "x402 钱包付款不会充值或扣减平台余额。",
+    history: "批次历史",
+    historyEyebrow: "钱包范围记录",
+    historyDescription:
+      "完整展示本次登录钱包支付的批次；其他调用方钱包的回执可通过准确批次编号查询。",
+    walletScope: "当前登录钱包",
+    noWalletScope: "当前登录未关联钱包",
+    filter: "状态筛选",
+    filterAll: "全部批次",
+    filterSettled: "已在 Base 结算",
+    filterPending: "付款处理中",
+    filterFailed: "需要处理",
+    filterSucceeded: "执行成功",
+    batchId: "批次",
+    product: "数据产品",
+    quantity: "数量",
+    amount: "金额",
+    wallet: "付款钱包",
+    payment: "付款状态",
+    execution: "执行状态",
+    transaction: "Base 交易",
+    updated: "更新时间",
+    actions: "操作",
+    view: "查看",
+    noTransaction: "无链上交易",
+    notRecorded: "尚未记录",
+    paymentSettled: "已结算",
+    paymentPending: "待付款",
+    paymentReview: "需要复核",
+    paymentRejected: "已拒绝",
+    executionSucceeded: "执行成功",
+    executionFailed: "执行失败",
+    executionRunning: "执行中",
+    executionNotStarted: "尚未执行",
+    quoteExpired: "已过期",
+    loadingHistory: "正在加载钱包批次历史…",
+    noHistory: "当前登录钱包在所选状态下暂无 x402 批次。",
+    noWalletHistory:
+      "当前账户不是通过钱包登录，无法可靠推导钱包范围历史。你仍可粘贴批次编号查询具体回执。",
+    page: (current: number, pages: number) => `第 ${current} / ${pages} 页`,
+    records: "个批次",
+    previous: "上一页",
+    next: "下一页",
+    lookupLabel: "查询指定批次回执",
+    lookupPlaceholder: "xb_...",
+    lookupButton: "查询回执",
+    lookupLoading: "查询中…",
+    detail: "批次回执",
+    detailEyebrow: "结算 / 执行",
+    detailEmpty: "选择历史记录或输入批次编号，查看结算与执行证据。",
+    copyBatch: "复制批次编号",
+    batchCopied: "批次编号已复制。",
+    copyWallet: "复制钱包地址",
+    walletCopied: "钱包地址已复制。",
+    copyTransaction: "复制交易哈希",
+    transactionCopied: "交易哈希已复制。",
+    viewTransaction: "在 BaseScan 查看 ↗",
+    settlementEvidence: "结算证据",
+    executionEvidence: "执行证据",
+    unitPrice: "单价",
+    quoted: "报价时间",
+    settled: "结算时间",
+    started: "开始执行",
+    completed: "完成时间",
+    failureCode: "失败代码",
+    receiptConfirmed:
+      "已记录 Base 交易哈希。付款结算状态与批次执行状态仍分别呈现。",
+    receiptMissing:
+      "尚未记录 Base 交易哈希，因此不会将该批次显示为已完成链上结算。",
+    runtimeClarification:
+      "“当前未就绪”属于运行可用状态，绝不代表该批次已经链上结算。",
+    callsChart: "每日调用量",
+    callsChartEyebrow: "30 天 / 按日",
+    callsChartDescription:
+      "按日堆叠展示；总调用量等于 API Key 余额调用与 x402 目标调用之和。",
+    prepaidCalls: "API Key / 余额",
+    x402Calls: "x402 钱包",
+    totalCalls: "总调用",
+    prepaidSpend: "余额消费",
+    x402Spend: "x402 钱包实结算",
+    chartEmpty: "最近 30 天暂无调用。",
+  },
+} as const;
+
 class ApiRequestError extends Error {
   constructor(
     message: string,
@@ -680,11 +925,75 @@ function isCallRecord(value: unknown): value is CallRecord {
   );
 }
 
+function isX402Batch(value: unknown): value is X402Batch {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === "string" &&
+    /^xb_[A-Za-z0-9_-]{20,80}$/.test(value.id) &&
+    typeof value.endpoint === "string" &&
+    typeof value.status === "string" &&
+    isNonNegativeInteger(value.verifiedQuantity) &&
+    isNonNegativeInteger(value.unitPriceUsdMicros) &&
+    isNonNegativeInteger(value.amountUsdcAtomic) &&
+    typeof value.network === "string" &&
+    typeof value.asset === "string" &&
+    isNullableString(value.payer) &&
+    isNullableString(value.transaction) &&
+    typeof value.paymentStatus === "string" &&
+    typeof value.revenueStatus === "string" &&
+    value.balanceImpactUsdMicros === 0 &&
+    isNullableString(value.failureCode) &&
+    typeof value.quotedAt === "string" &&
+    typeof value.expiresAt === "string" &&
+    isNullableString(value.settledAt) &&
+    isNullableString(value.revenueRecognizedAt) &&
+    isNullableString(value.executionStartedAt) &&
+    isNullableString(value.completedAt) &&
+    typeof value.updatedAt === "string"
+  );
+}
+
+function isX402HistoryResponse(
+  value: unknown,
+): value is X402HistoryResponse {
+  if (!isRecord(value) || !isRecord(value.scope)) return false;
+  return (
+    (value.scope.kind === "signed_in_wallet" ||
+      value.scope.kind === "wallet_not_linked") &&
+    isNullableString(value.scope.walletAddress) &&
+    isNonNegativeInteger(value.page) &&
+    value.page >= 1 &&
+    isNonNegativeInteger(value.limit) &&
+    value.limit >= 1 &&
+    isNonNegativeInteger(value.total) &&
+    typeof value.hasNext === "boolean" &&
+    Array.isArray(value.batches) &&
+    value.batches.every(isX402Batch)
+  );
+}
+
 function isDashboardData(value: unknown): value is DashboardData {
   if (!isRecord(value)) return false;
 
-  const { user, capabilities, stats, keys, payments, calls } = value;
-  if (!isRecord(user) || !isRecord(capabilities) || !isRecord(stats)) {
+  const {
+    user,
+    capabilities,
+    stats,
+    usage,
+    x402,
+    keys,
+    payments,
+    calls,
+  } = value;
+  if (
+    !isRecord(user) ||
+    !isRecord(capabilities) ||
+    !isRecord(stats) ||
+    !isRecord(usage) ||
+    !isRecord(x402) ||
+    !isRecord(x402.runtime) ||
+    !isRecord(x402.historyScope)
+  ) {
     return false;
   }
 
@@ -708,11 +1017,47 @@ function isDashboardData(value: unknown): value is DashboardData {
     typeof capabilities.schemaReady === "boolean" &&
     typeof capabilities.taxonomyReady === "boolean" &&
     typeof capabilities.catalogReady === "boolean" &&
+    typeof capabilities.x402Enabled === "boolean" &&
+    typeof capabilities.x402Configured === "boolean" &&
+    typeof capabilities.x402Available === "boolean" &&
+    typeof capabilities.x402SchemaReady === "boolean" &&
+    (capabilities.x402Mode === "live" ||
+      capabilities.x402Mode === "disabled" ||
+      capabilities.x402Mode === "unconfigured") &&
+    Array.isArray(capabilities.x402Missing) &&
+    capabilities.x402Missing.every((item) => typeof item === "string") &&
     isNonNegativeInteger(stats.calls30d) &&
     isNonNegativeInteger(stats.spend30dUsdMicros) &&
     isFiniteNumber(stats.successRate) &&
     stats.successRate >= 0 &&
     stats.successRate <= 1 &&
+    usage.periodDays === 30 &&
+    isNonNegativeInteger(usage.totalCalls30d) &&
+    isNonNegativeInteger(usage.prepaidCalls30d) &&
+    isNonNegativeInteger(usage.x402Calls30d) &&
+    usage.totalCalls30d ===
+      usage.prepaidCalls30d + usage.x402Calls30d &&
+    isNonNegativeInteger(usage.prepaidSpend30dUsdMicros) &&
+    isNonNegativeInteger(usage.x402Settled30dUsdMicros) &&
+    isNonNegativeInteger(usage.x402SettledBatches30d) &&
+    isNonNegativeInteger(usage.x402PendingBatches) &&
+    Array.isArray(usage.daily) &&
+    usage.daily.every(
+      (item) =>
+        isRecord(item) &&
+        /^\d{4}-\d{2}-\d{2}$/.test(String(item.day)) &&
+        isNonNegativeInteger(item.prepaidCalls) &&
+        isNonNegativeInteger(item.x402Calls),
+    ) &&
+    typeof x402.runtime.available === "boolean" &&
+    typeof x402.runtime.enabled === "boolean" &&
+    typeof x402.runtime.configured === "boolean" &&
+    (x402.runtime.mode === "live" ||
+      x402.runtime.mode === "disabled" ||
+      x402.runtime.mode === "unconfigured") &&
+    (x402.historyScope.kind === "signed_in_wallet" ||
+      x402.historyScope.kind === "wallet_not_linked") &&
+    isNullableString(x402.historyScope.walletAddress) &&
     Array.isArray(keys) &&
     keys.every(isApiKeyRecord) &&
     Array.isArray(payments) &&
@@ -753,6 +1098,62 @@ function formatDate(
     day: "2-digit",
     ...(includeTime ? { hour: "2-digit", minute: "2-digit" } : {}),
   }).format(date);
+}
+
+function recentUsageDays(
+  daily: DashboardData["usage"]["daily"] | undefined,
+) {
+  const values = new Map(
+    (daily ?? []).map((item) => [item.day, item] as const),
+  );
+  const days: DashboardData["usage"]["daily"] = [];
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  for (let offset = 29; offset >= 0; offset -= 1) {
+    const date = new Date(today);
+    date.setUTCDate(today.getUTCDate() - offset);
+    const day = date.toISOString().slice(0, 10);
+    days.push(
+      values.get(day) ?? {
+        day,
+        prepaidCalls: 0,
+        x402Calls: 0,
+      },
+    );
+  }
+  return days;
+}
+
+function compactValue(value: string | null, head = 8, tail = 6) {
+  if (!value) return "—";
+  if (value.length <= head + tail + 1) return value;
+  return `${value.slice(0, head)}…${value.slice(-tail)}`;
+}
+
+function x402PaymentLabel(status: string, locale: Locale) {
+  const copy = x402Copy[locale];
+  if (status === "settled") return copy.paymentSettled;
+  if (status === "review_required") return copy.paymentReview;
+  if (status === "rejected") return copy.paymentRejected;
+  return copy.paymentPending;
+}
+
+function x402ExecutionLabel(status: string, locale: Locale) {
+  const copy = x402Copy[locale];
+  if (status === "succeeded") return copy.executionSucceeded;
+  if (status === "execution_failed") return copy.executionFailed;
+  if (status === "executing") return copy.executionRunning;
+  if (status === "expired") return copy.quoteExpired;
+  return copy.executionNotStarted;
+}
+
+function x402ExecutionClass(status: string) {
+  if (status === "succeeded") return "is-success";
+  if (status === "execution_failed" || status === "expired") {
+    return "is-danger";
+  }
+  if (status === "executing") return "is-progress";
+  return "is-muted";
 }
 
 function paymentStatus(status: string, locale: Locale) {
@@ -866,6 +1267,7 @@ export function ConsoleClient({
   workspace: ConsoleWorkspace;
 }) {
   const c = consoleCopy[locale];
+  const x = x402Copy[locale];
   const [sessionUser, setSessionUser] = useState<SessionUser | null>(() =>
     chatGPTUser
       ? {
@@ -895,6 +1297,11 @@ export function ConsoleClient({
   const [x402BatchId, setX402BatchId] = useState("");
   const [x402Batch, setX402Batch] = useState<X402Batch | null>(null);
   const [loadingX402Batch, setLoadingX402Batch] = useState(false);
+  const [x402History, setX402History] =
+    useState<X402HistoryResponse | null>(null);
+  const [x402HistoryPage, setX402HistoryPage] = useState(1);
+  const [x402HistoryView, setX402HistoryView] = useState("all");
+  const [loadingX402History, setLoadingX402History] = useState(false);
   const paymentAttemptKey = useRef<string | null>(null);
   const latestInvoicePayment = invoice
     ? dashboard?.payments.find((payment) => payment.id === invoice.id)
@@ -947,6 +1354,47 @@ export function ConsoleClient({
     }
   }, [c.dashboardLoadFailed, locale, loginPath, user]);
 
+  const loadX402History = useCallback(
+    async (page: number, view: string) => {
+      if (!user || workspace !== "x402") return;
+      setLoadingX402History(true);
+      setError(null);
+      try {
+        const payload = await apiRequest<unknown>(
+          `/api/x402/batches?page=${page}&limit=20&view=${encodeURIComponent(view)}`,
+          locale,
+          { cache: "no-store" },
+        );
+        if (!isX402HistoryResponse(payload)) {
+          throw new Error(
+            locale === "zh"
+              ? "x402 批次历史数据格式异常。"
+              : "The x402 batch history returned an invalid data shape.",
+          );
+        }
+        setX402History(payload);
+      } catch (requestError) {
+        if (
+          requestError instanceof ApiRequestError &&
+          requestError.status === 401
+        ) {
+          window.location.replace(loginPath);
+          return;
+        }
+        setError(
+          requestError instanceof Error
+            ? requestError.message
+            : locale === "zh"
+              ? "无法加载 x402 批次历史。"
+              : "The x402 batch history could not be loaded.",
+        );
+      } finally {
+        setLoadingX402History(false);
+      }
+    },
+    [locale, loginPath, user, workspace],
+  );
+
   useEffect(() => {
     if (chatGPTUser) return;
     const controller = new AbortController();
@@ -995,6 +1443,13 @@ export function ConsoleClient({
     }, 0);
     return () => window.clearTimeout(timer);
   }, [refreshDashboard]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadX402History(x402HistoryPage, x402HistoryView);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadX402History, x402HistoryPage, x402HistoryView]);
 
   useEffect(() => {
     if (
@@ -1134,11 +1589,18 @@ export function ConsoleClient({
     setError(null);
     setNotice(null);
     try {
-      const result = await apiRequest<{ batch: X402Batch }>(
+      const result = await apiRequest<unknown>(
         `/api/x402/batches/${encodeURIComponent(id)}`,
         locale,
         { cache: "no-store" },
       );
+      if (!isRecord(result) || !isX402Batch(result.batch)) {
+        throw new Error(
+          locale === "zh"
+            ? "x402 批次回执数据格式异常。"
+            : "The x402 batch receipt returned an invalid data shape.",
+        );
+      }
       setX402Batch(result.batch);
     } catch (requestError) {
       setX402Batch(null);
@@ -1230,6 +1692,29 @@ export function ConsoleClient({
   const paymentsEnabled = dashboard?.capabilities.paymentsEnabled ?? false;
   const commercialClearanceConfirmed =
     dashboard?.capabilities.commercialClearanceConfirmed ?? false;
+  const usageDays = recentUsageDays(dashboard?.usage.daily);
+  const usagePeak = Math.max(
+    1,
+    ...usageDays.map((day) => day.prepaidCalls + day.x402Calls),
+  );
+  const usageTotal = usageDays.reduce(
+    (total, day) => total + day.prepaidCalls + day.x402Calls,
+    0,
+  );
+  const x402Runtime = dashboard?.x402.runtime;
+  const x402RuntimeDescription = x402Runtime?.available
+    ? x.runtimeLive
+    : x402Runtime?.enabled === false
+      ? x.runtimeDisabled
+      : x402Runtime?.configured === false
+        ? x.runtimeUnconfigured
+        : x.runtimeBlocked;
+  const x402HistoryScope =
+    x402History?.scope ?? dashboard?.x402.historyScope ?? null;
+  const x402HistoryPages = Math.max(
+    1,
+    Math.ceil((x402History?.total ?? 0) / (x402History?.limit ?? 20)),
+  );
   const workspaceMeta = c.workspaces[workspace];
   const setupSteps = [
     {
@@ -1244,7 +1729,7 @@ export function ConsoleClient({
     },
     {
       label: c.checklistRequest,
-      complete: (dashboard?.stats.calls30d ?? 0) > 0,
+      complete: (dashboard?.usage.totalCalls30d ?? 0) > 0,
       href: "/docs",
     },
   ];
@@ -1339,10 +1824,20 @@ export function ConsoleClient({
           <button
             className="console-refresh"
             type="button"
-            onClick={() => void refreshDashboard()}
-            disabled={!user || loading}
+            onClick={() => {
+              void refreshDashboard();
+              if (workspace === "x402") {
+                void loadX402History(
+                  x402HistoryPage,
+                  x402HistoryView,
+                );
+              }
+            }}
+            disabled={!user || loading || loadingX402History}
           >
-            {loading ? c.refreshing : c.refreshStatus}
+            {loading || loadingX402History
+              ? c.refreshing
+              : c.refreshStatus}
           </button>
         </header>
 
@@ -1361,7 +1856,18 @@ export function ConsoleClient({
             <div className="console-alert console-alert-error">
               <span>!</span>
               <p>{error}</p>
-              <button type="button" onClick={() => void refreshDashboard()}>
+              <button
+                type="button"
+                onClick={() => {
+                  void refreshDashboard();
+                  if (workspace === "x402") {
+                    void loadX402History(
+                      x402HistoryPage,
+                      x402HistoryView,
+                    );
+                  }
+                }}
+              >
                 {c.retry}
               </button>
             </div>
@@ -1383,34 +1889,55 @@ export function ConsoleClient({
 
         {workspace === "dashboard" ? (
           <>
-            <section className="console-metric-grid" aria-label={c.accountOverview}>
+            <section
+              className="console-metric-grid console-usage-metrics"
+              aria-label={c.accountOverview}
+            >
               <article className="console-metric console-metric-primary">
                 <span>{c.availableBalance}</span>
                 <strong className={loading ? "loading-value" : ""}>
                   {formatUsd(dashboard?.balanceUsdMicros)}
                 </strong>
-                <small>USD</small>
+                <small>PREPAID BALANCE</small>
               </article>
               <article className="console-metric">
-                <span>{c.calls30d}</span>
+                <span>{x.totalCalls}</span>
                 <strong className={loading ? "loading-value" : ""}>
-                  {dashboard?.stats.calls30d?.toLocaleString() ?? "—"}
+                  {dashboard?.usage.totalCalls30d.toLocaleString() ?? "—"}
                 </strong>
-                <small>API REQUESTS</small>
+                <small>PREPAID + X402</small>
               </article>
               <article className="console-metric">
-                <span>{c.spend30d}</span>
+                <span>{x.prepaidCalls}</span>
                 <strong className={loading ? "loading-value" : ""}>
-                  {formatUsd(dashboard?.stats.spend30dUsdMicros)}
+                  {dashboard?.usage.prepaidCalls30d.toLocaleString() ?? "—"}
                 </strong>
-                <small>USAGE SPEND</small>
+                <small>API KEY / BALANCE</small>
               </article>
               <article className="console-metric">
-                <span>{c.successRate}</span>
+                <span>{x.x402Calls}</span>
                 <strong className={loading ? "loading-value" : ""}>
-                  {formatRate(dashboard?.stats.successRate)}
+                  {dashboard?.usage.x402Calls30d.toLocaleString() ?? "—"}
                 </strong>
-                <small>LAST 30 DAYS</small>
+                <small>WALLET TARGETS</small>
+              </article>
+              <article className="console-metric">
+                <span>{x.prepaidSpend}</span>
+                <strong className={loading ? "loading-value" : ""}>
+                  {formatUsd(
+                    dashboard?.usage.prepaidSpend30dUsdMicros,
+                  )}
+                </strong>
+                <small>PREPAID LEDGER</small>
+              </article>
+              <article className="console-metric">
+                <span>{x.x402Spend}</span>
+                <strong className={loading ? "loading-value" : ""}>
+                  {formatUsd(
+                    dashboard?.usage.x402Settled30dUsdMicros,
+                  )}
+                </strong>
+                <small>BASE USDC · BALANCE $0</small>
               </article>
             </section>
 
@@ -1443,6 +1970,74 @@ export function ConsoleClient({
                 </small>
                 <i>→</i>
               </a>
+            </section>
+
+            <section className="console-panel console-usage-chart">
+              <div className="panel-heading">
+                <div>
+                  <span>{x.callsChartEyebrow}</span>
+                  <h2>{x.callsChart}</h2>
+                  <p>{x.callsChartDescription}</p>
+                </div>
+                <div
+                  className="usage-chart-total"
+                  aria-label={`${x.totalCalls}: ${usageTotal.toLocaleString()}`}
+                >
+                  <span>{x.totalCalls}</span>
+                  <strong>{usageTotal.toLocaleString()}</strong>
+                </div>
+              </div>
+              <div className="usage-chart-legend" aria-label={x.callsChart}>
+                <span><i className="is-prepaid" />{x.prepaidCalls}</span>
+                <span><i className="is-x402" />{x.x402Calls}</span>
+              </div>
+              {usageTotal > 0 ? (
+                <div
+                  className="usage-bars-wrap"
+                  role="img"
+                  aria-label={`${x.totalCalls}: ${usageTotal.toLocaleString()}`}
+                >
+                  <div className="usage-bars">
+                    {usageDays.map((day, index) => {
+                      const total = day.prepaidCalls + day.x402Calls;
+                      const prepaidHeight =
+                        (day.prepaidCalls / usagePeak) * 100;
+                      const x402Height = (day.x402Calls / usagePeak) * 100;
+                      return (
+                        <div
+                          className="usage-day"
+                          key={day.day}
+                          title={`${day.day} · ${x.prepaidCalls}: ${day.prepaidCalls} · ${x.x402Calls}: ${day.x402Calls}`}
+                        >
+                          <div className="usage-bar-value">
+                            {total > 0 ? total.toLocaleString() : ""}
+                          </div>
+                          <div className="usage-bar-track">
+                            <span
+                              className="usage-bar-segment is-x402"
+                              style={{ height: `${x402Height}%` }}
+                            />
+                            <span
+                              className="usage-bar-segment is-prepaid"
+                              style={{ height: `${prepaidHeight}%` }}
+                            />
+                          </div>
+                          <span className="usage-day-label">
+                            {index % 5 === 0 || index === usageDays.length - 1
+                              ? day.day.slice(5)
+                              : ""}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                <div className="panel-empty panel-empty-inline">
+                  <span>CALL_00</span>
+                  <p>{x.chartEmpty}</p>
+                </div>
+              )}
             </section>
 
             <div className="console-dashboard-grid">
@@ -1550,6 +2145,24 @@ export function ConsoleClient({
                       <dd className={paymentsEnabled ? "status-ready" : "status-warning"}>
                         {paymentsEnabled ? c.enabled : c.unavailable}
                       </dd>
+                    </div>
+                    <div>
+                      <dt>x402</dt>
+                      <dd
+                        className={
+                          dashboard?.x402.runtime.available
+                            ? "status-ready"
+                            : "status-warning"
+                        }
+                      >
+                        {dashboard?.x402.runtime.available
+                          ? x.available
+                          : x.notReady}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{c.successRate}</dt>
+                      <dd>{formatRate(dashboard?.stats.successRate)}</dd>
                     </div>
                   </dl>
                 </section>
@@ -1856,147 +2469,472 @@ export function ConsoleClient({
         {workspace === "x402" ? (
           <>
             <section
-              className="console-compact-metrics billing-metrics"
-              aria-label={locale === "zh" ? "x402 支付边界" : "x402 payment boundary"}
+              className="console-compact-metrics console-x402-metrics"
+              aria-label={x.readiness}
             >
-              <article className="is-primary">
-                <span>{locale === "zh" ? "付款身份" : "Payment identity"}</span>
-                <strong>{locale === "zh" ? "调用方钱包" : "Caller wallet"}</strong>
+              <article
+                className={
+                  x402Runtime?.available
+                    ? "is-primary is-ready"
+                    : "is-primary is-not-ready"
+                }
+              >
+                <span>{x.readiness}</span>
+                <strong>
+                  {x402Runtime?.available ? x.available : x.notReady}
+                </strong>
+                <small>{x402RuntimeDescription}</small>
               </article>
               <article>
-                <span>{locale === "zh" ? "结算网络" : "Settlement network"}</span>
-                <strong>Base</strong>
+                <span>{x.targetCalls}</span>
+                <strong>
+                  {dashboard?.usage.x402Calls30d.toLocaleString() ?? "—"}
+                </strong>
+                <small>{x.quantity}</small>
               </article>
               <article>
-                <span>{locale === "zh" ? "结算资产" : "Settlement asset"}</span>
-                <strong>USDC</strong>
+                <span>{x.settledAmount}</span>
+                <strong>
+                  {formatUsd(
+                    dashboard?.usage.x402Settled30dUsdMicros,
+                  )}
+                </strong>
+                <small>BASE USDC · {x.balanceBoundary}</small>
               </article>
               <article>
-                <span>{locale === "zh" ? "余额影响" : "Balance impact"}</span>
-                <strong>$0.00</strong>
+                <span>{x.batchStatus}</span>
+                <strong>
+                  {dashboard
+                    ? `${dashboard.usage.x402SettledBatches30d} / ${dashboard.usage.x402PendingBatches}`
+                    : "—"}
+                </strong>
+                <small>{x.batchStatusSub}</small>
               </article>
             </section>
 
-            <div className="console-billing-grid console-x402-grid">
-              <section className="console-panel topup-panel">
-                <div className="panel-heading">
-                  <div>
-                    <span>BATCH RECEIPT</span>
-                    <h2>{locale === "zh" ? "查询 x402 批次" : "Look up an x402 batch"}</h2>
-                  </div>
-                  <span className="pay-badge">EXACT</span>
+            <section className="console-x402-boundary" role="note">
+              <div>
+                <span
+                  className={
+                    x402Runtime?.available
+                      ? "x402-runtime-dot is-ready"
+                      : "x402-runtime-dot is-not-ready"
+                  }
+                />
+                <div>
+                  <strong>
+                    {x402Runtime?.available ? x.available : x.notReady}
+                  </strong>
+                  <p>{x402RuntimeDescription}</p>
                 </div>
-                <p>
-                  {locale === "zh"
-                    ? "粘贴服务端返回的 xb_ 批次编号，核对钱包付款、Base 交易与整批执行状态。批次记录不计入平台余额。"
-                    : "Paste the xb_ batch ID returned by the service to verify wallet payment, the Base transaction and whole-batch execution. It never posts to your platform balance."}
-                </p>
-                <form className="key-form" onSubmit={lookupX402Batch}>
-                  <label htmlFor="x402-batch-id">
-                    {locale === "zh" ? "批次编号" : "Batch ID"}
-                  </label>
+              </div>
+              <p>{x.paymentBoundary}</p>
+              <p>{x.balanceBoundary}</p>
+              <a href="/docs#x402">
+                {locale === "zh" ? "查看接入文档 →" : "Open integration docs →"}
+              </a>
+            </section>
+
+            <section className="console-panel console-x402-history">
+              <div className="panel-heading">
+                <div>
+                  <span>{x.historyEyebrow}</span>
+                  <h2>{x.history}</h2>
+                  <p>{x.historyDescription}</p>
+                </div>
+                <div className="x402-scope">
+                  <span>
+                    {x402HistoryScope?.kind === "signed_in_wallet"
+                      ? x.walletScope
+                      : x.noWalletScope}
+                  </span>
+                  <code>
+                    {compactValue(
+                      x402HistoryScope?.walletAddress ?? null,
+                      8,
+                      6,
+                    )}
+                  </code>
+                </div>
+              </div>
+
+              <div className="x402-history-toolbar">
+                <label>
+                  <span>{x.filter}</span>
+                  <select
+                    value={x402HistoryView}
+                    onChange={(event) => {
+                      setX402HistoryPage(1);
+                      setX402HistoryView(event.target.value);
+                    }}
+                  >
+                    <option value="all">{x.filterAll}</option>
+                    <option value="settled">{x.filterSettled}</option>
+                    <option value="pending">{x.filterPending}</option>
+                    <option value="failed">{x.filterFailed}</option>
+                    <option value="succeeded">{x.filterSucceeded}</option>
+                  </select>
+                </label>
+                <form onSubmit={lookupX402Batch}>
+                  <label htmlFor="x402-batch-id">{x.lookupLabel}</label>
                   <div>
                     <input
                       id="x402-batch-id"
                       value={x402BatchId}
                       onChange={(event) => setX402BatchId(event.target.value)}
-                      placeholder="xb_..."
+                      placeholder={x.lookupPlaceholder}
                       maxLength={83}
                       autoComplete="off"
                       required
                     />
                     <button
-                      className="button button-blue"
                       type="submit"
                       disabled={loadingX402Batch}
                     >
                       {loadingX402Batch
-                        ? locale === "zh"
-                          ? "查询中…"
-                          : "Loading…"
-                        : locale === "zh"
-                          ? "查询回执"
-                          : "Find receipt"}
+                        ? x.lookupLoading
+                        : x.lookupButton}
                     </button>
                   </div>
                 </form>
-              </section>
+              </div>
 
-              <aside className="console-panel billing-help">
-                <div className="panel-heading">
-                  <div>
-                    <span>CHOOSE THE ENTRY</span>
-                    <h2>{locale === "zh" ? "两种调用方式互不切换" : "Two explicit, separate paths"}</h2>
-                  </div>
+              {loadingX402History && !x402History ? (
+                <div className="panel-loading">{x.loadingHistory}</div>
+              ) : x402HistoryScope?.kind !== "signed_in_wallet" ? (
+                <div className="table-empty">
+                  <span>WALLET_SCOPE_00</span>
+                  <p>{x.noWalletHistory}</p>
+                  <a href="/docs#x402">{c.quickstart}</a>
                 </div>
-                <ol>
-                  <li>
-                    <span>1</span>
-                    {locale === "zh"
-                      ? "标准 /v1 接口：Authorization: Bearer rb_live_…，始终扣预充值余额。"
-                      : "Standard /v1: Authorization: Bearer rb_live_… always charges prepaid balance."}
-                  </li>
-                  <li>
-                    <span>2</span>
-                    {locale === "zh"
-                      ? "x402 批量入口：调用方钱包签署 PAYMENT-SIGNATURE，一批只结算一次。"
-                      : "x402 batch: the caller wallet signs PAYMENT-SIGNATURE and settles once per batch."}
-                  </li>
-                  <li>
-                    <span>3</span>
-                    {locale === "zh"
-                      ? "API Key 不是 x402 付款凭据；RelayBase 不创建或托管调用方私钥。"
-                      : "An API Key is not an x402 payment credential; RelayBase never creates or custodies caller private keys."}
-                  </li>
-                </ol>
-                <a href="/docs#x402">
-                  {locale === "zh" ? "查看 x402 Agent 快速开始 →" : "Open the x402 Agent quickstart →"}
-                </a>
-              </aside>
-            </div>
+              ) : x402History?.batches.length ? (
+                <>
+                  <div className="x402-table-wrap">
+                    <table className="x402-table">
+                      <thead>
+                        <tr>
+                          <th>{x.batchId} / {x.product}</th>
+                          <th className="is-number">{x.quantity}</th>
+                          <th className="is-number">{x.amount}</th>
+                          <th>{x.wallet}</th>
+                          <th>{x.payment}</th>
+                          <th>{x.execution}</th>
+                          <th>{x.transaction}</th>
+                          <th>{x.updated}</th>
+                          <th aria-label={x.actions} />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {x402History.batches.map((batch) => (
+                          <tr
+                            className={
+                              x402Batch?.id === batch.id
+                                ? "is-selected"
+                                : undefined
+                            }
+                            key={batch.id}
+                          >
+                            <td>
+                              <button
+                                className="x402-batch-link"
+                                type="button"
+                                onClick={() => setX402Batch(batch)}
+                              >
+                                <code>{compactValue(batch.id, 10, 6)}</code>
+                                <span>{batch.endpoint}</span>
+                              </button>
+                            </td>
+                            <td className="is-number">
+                              {batch.verifiedQuantity.toLocaleString()}
+                            </td>
+                            <td className="is-number">
+                              <strong>
+                                {formatUsd(batch.amountUsdcAtomic, 6)}
+                              </strong>
+                              <span>USDC</span>
+                            </td>
+                            <td>
+                              <code title={batch.payer ?? undefined}>
+                                {compactValue(batch.payer)}
+                              </code>
+                            </td>
+                            <td>
+                              <span
+                                className={`x402-status is-${batch.paymentStatus}`}
+                              >
+                                {x402PaymentLabel(
+                                  batch.paymentStatus,
+                                  locale,
+                                )}
+                              </span>
+                            </td>
+                            <td>
+                              <span
+                                className={`x402-status ${x402ExecutionClass(batch.status)}`}
+                              >
+                                {x402ExecutionLabel(batch.status, locale)}
+                              </span>
+                            </td>
+                            <td>
+                              {batch.transaction ? (
+                                <code title={batch.transaction}>
+                                  {compactValue(batch.transaction)}
+                                </code>
+                              ) : (
+                                <span className="x402-no-value">
+                                  {x.noTransaction}
+                                </span>
+                              )}
+                            </td>
+                            <td>{formatDate(batch.updatedAt, locale, true)}</td>
+                            <td>
+                              <button
+                                className="x402-row-action"
+                                type="button"
+                                onClick={() => setX402Batch(batch)}
+                              >
+                                {x.view}
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="x402-pagination">
+                    <span>
+                      {x.page(x402History.page, x402HistoryPages)}
+                      {" · "}
+                      {x402History.total.toLocaleString()} {x.records}
+                    </span>
+                    <div>
+                      <button
+                        type="button"
+                        disabled={x402History.page <= 1}
+                        onClick={() =>
+                          setX402HistoryPage((page) => Math.max(1, page - 1))
+                        }
+                      >
+                        ← {x.previous}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!x402History.hasNext}
+                        onClick={() =>
+                          setX402HistoryPage((page) => page + 1)
+                        }
+                      >
+                        {x.next} →
+                      </button>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="table-empty">
+                  <span>X402_00</span>
+                  <p>{x.noHistory}</p>
+                  <a href="/catalog">{c.dataMarket} →</a>
+                </div>
+              )}
+            </section>
 
-            {x402Batch ? (
-              <section className="console-panel payment-history console-x402-receipt">
-                <div className="panel-heading">
-                  <div>
-                    <span>SETTLEMENT / EXECUTION</span>
-                    <h2>{x402Batch.id}</h2>
-                  </div>
-                  <span className={`key-active is-${x402Batch.paymentStatus}`}>
-                    {x402Batch.paymentStatus.replaceAll("_", " ").toUpperCase()}
-                  </span>
+            <section className="console-panel console-x402-detail">
+              <div className="panel-heading">
+                <div>
+                  <span>{x.detailEyebrow}</span>
+                  <h2>{x.detail}</h2>
                 </div>
-                <dl className="invoice-grid">
-                  <div>
-                    <span>{locale === "zh" ? "数据产品" : "Data product"}</span>
-                    <code>{x402Batch.endpoint}</code>
-                    <small>{x402Batch.verifiedQuantity.toLocaleString()} × {formatUsd(x402Batch.unitPriceUsdMicros, 6)}</small>
-                  </div>
-                  <div>
-                    <span>{locale === "zh" ? "钱包结算" : "Wallet settlement"}</span>
-                    <strong>{formatUsd(x402Batch.amountUsdcAtomic, 6)} USDC</strong>
-                    <small>{x402Batch.payer ?? (locale === "zh" ? "尚未验证付款人" : "Payer not verified")}</small>
-                  </div>
-                  <div>
-                    <span>{locale === "zh" ? "执行状态" : "Execution status"}</span>
-                    <strong>{x402Batch.status.replaceAll("_", " ").toUpperCase()}</strong>
-                    <small>{locale === "zh" ? "平台余额影响：$0.00" : "Platform balance impact: $0.00"}</small>
-                  </div>
-                </dl>
-                {x402Batch.transaction ? (
-                  <p className="topup-warning">
-                    {locale === "zh" ? "Base 交易：" : "Base transaction: "}
-                    <code>{x402Batch.transaction}</code>
-                  </p>
+                {x402Batch ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void copyText(x402Batch.id, x.batchCopied)
+                    }
+                  >
+                    {x.copyBatch}
+                  </button>
                 ) : null}
-                {x402Batch.failureCode ? (
-                  <p className="topup-warning">
-                    {locale === "zh" ? "失败代码：" : "Failure code: "}
-                    <code>{x402Batch.failureCode}</code>
-                  </p>
-                ) : null}
-              </section>
-            ) : null}
+              </div>
+              {x402Batch ? (
+                <>
+                  <div className="x402-detail-summary">
+                    <div className="x402-detail-title">
+                      <code>{x402Batch.id}</code>
+                      <div>
+                        <span
+                          className={`x402-status is-${x402Batch.paymentStatus}`}
+                        >
+                          {x402PaymentLabel(
+                            x402Batch.paymentStatus,
+                            locale,
+                          )}
+                        </span>
+                        <span
+                          className={`x402-status ${x402ExecutionClass(x402Batch.status)}`}
+                        >
+                          {x402ExecutionLabel(x402Batch.status, locale)}
+                        </span>
+                      </div>
+                    </div>
+                    <dl>
+                      <div>
+                        <dt>{x.product}</dt>
+                        <dd><code>{x402Batch.endpoint}</code></dd>
+                      </div>
+                      <div>
+                        <dt>{x.quantity}</dt>
+                        <dd>{x402Batch.verifiedQuantity.toLocaleString()}</dd>
+                      </div>
+                      <div>
+                        <dt>{x.unitPrice}</dt>
+                        <dd>{formatUsd(x402Batch.unitPriceUsdMicros, 6)}</dd>
+                      </div>
+                      <div>
+                        <dt>{x.amount}</dt>
+                        <dd>{formatUsd(x402Batch.amountUsdcAtomic, 6)} USDC</dd>
+                      </div>
+                    </dl>
+                  </div>
+
+                  <div className="x402-evidence-grid">
+                    <article>
+                      <div className="x402-evidence-heading">
+                        <span>01</span>
+                        <h3>{x.settlementEvidence}</h3>
+                      </div>
+                      <dl>
+                        <div>
+                          <dt>{x.wallet}</dt>
+                          <dd className="x402-full-value">
+                            <code>{x402Batch.payer ?? x.notRecorded}</code>
+                            {x402Batch.payer &&
+                            /^0x[a-fA-F0-9]{40}$/.test(x402Batch.payer) ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void copyText(
+                                    x402Batch.payer ?? "",
+                                    x.walletCopied,
+                                  )
+                                }
+                              >
+                                {x.copyWallet}
+                              </button>
+                            ) : null}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>{x.transaction}</dt>
+                          <dd className="x402-full-value">
+                            <code>
+                              {x402Batch.transaction ?? x.notRecorded}
+                            </code>
+                            {x402Batch.transaction ? (
+                              <div>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void copyText(
+                                      x402Batch.transaction ?? "",
+                                      x.transactionCopied,
+                                    )
+                                  }
+                                >
+                                  {x.copyTransaction}
+                                </button>
+                                <a
+                                  href={`https://basescan.org/tx/${x402Batch.transaction}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  {x.viewTransaction}
+                                </a>
+                              </div>
+                            ) : null}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>{x.settled}</dt>
+                          <dd>
+                            {x402Batch.settledAt
+                              ? formatDate(
+                                  x402Batch.settledAt,
+                                  locale,
+                                  true,
+                                )
+                              : x.notRecorded}
+                          </dd>
+                        </div>
+                      </dl>
+                      <p
+                        className={
+                          x402Batch.transaction
+                            ? "x402-evidence-note is-confirmed"
+                            : "x402-evidence-note is-pending"
+                        }
+                      >
+                        {x402Batch.transaction
+                          ? x.receiptConfirmed
+                          : x.receiptMissing}
+                      </p>
+                    </article>
+
+                    <article>
+                      <div className="x402-evidence-heading">
+                        <span>02</span>
+                        <h3>{x.executionEvidence}</h3>
+                      </div>
+                      <dl>
+                        <div>
+                          <dt>{x.quoted}</dt>
+                          <dd>{formatDate(x402Batch.quotedAt, locale, true)}</dd>
+                        </div>
+                        <div>
+                          <dt>{x.started}</dt>
+                          <dd>
+                            {x402Batch.executionStartedAt
+                              ? formatDate(
+                                  x402Batch.executionStartedAt,
+                                  locale,
+                                  true,
+                                )
+                              : x.notRecorded}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>{x.completed}</dt>
+                          <dd>
+                            {x402Batch.completedAt
+                              ? formatDate(
+                                  x402Batch.completedAt,
+                                  locale,
+                                  true,
+                                )
+                              : x.notRecorded}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>{x.failureCode}</dt>
+                          <dd>
+                            <code>
+                              {x402Batch.failureCode ?? x.notRecorded}
+                            </code>
+                          </dd>
+                        </div>
+                      </dl>
+                      <p className="x402-evidence-note">
+                        {x.runtimeClarification}
+                      </p>
+                    </article>
+                  </div>
+                </>
+              ) : (
+                <div className="panel-empty">
+                  <span>RECEIPT_00</span>
+                  <p>{x.detailEmpty}</p>
+                </div>
+              )}
+            </section>
           </>
         ) : null}
       </div>
