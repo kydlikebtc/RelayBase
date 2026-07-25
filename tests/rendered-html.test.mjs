@@ -181,6 +181,8 @@ const migrationFiles = [
   "drizzle/0012_mute_wasp.sql",
   "drizzle/0013_overrated_thunderball.sql",
   "drizzle/0014_reflective_firestar.sql",
+  "drizzle/0015_tan_lila_cheney.sql",
+  "drizzle/0016_windy_lord_tyger.sql",
 ];
 
 async function migrate(db, names = migrationFiles) {
@@ -5877,6 +5879,18 @@ test("syncs the real Synthetic Provider price shape, verifies zero cost and dedu
       verified: true,
     },
     rateLimitRps: 5,
+    x402: {
+      enabled: false,
+      available: false,
+      route: "/v1/x402/batch",
+      scheme: "exact",
+      network: "eip155:8453",
+      asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      unitPriceUsdMicros: null,
+      maxBatchSize: null,
+      paymentIdentity: "caller_wallet",
+      apiKeyUsedForPayment: false,
+    },
     documentationStatus: "pending",
   });
   assert.doesNotMatch(
@@ -8781,4 +8795,200 @@ test("reconciles missed payment callbacks without double credit", async (t) => {
     )
     .get();
   assert.equal(credits.count, 1);
+});
+
+test("quotes, settles and executes one x402 wallet-paid batch without touching balance", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const endpoint = "/v1/tiktok/web/fetch_user_profile";
+  enableCatalogEndpoint(db, endpoint, 2000);
+  db.raw
+    .prepare(
+      `INSERT INTO endpoint_x402_config
+       (path, enabled, unit_price_usd_micros, max_batch_size, revision)
+       VALUES (?, 1, 3000, 10, 1)`,
+    )
+    .run(endpoint);
+
+  const env = baseEnv({
+    DB: db,
+    UPSTREAM_API_KEY: "upstream-key",
+    RESELLER_AUTHORIZED: "true",
+    LEGAL_REVIEW_CONFIRMED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
+    RECONCILIATION_SECRET: "x402-reconcile-secret-32-characters",
+    X402_ENABLED: "true",
+    X402_PAY_TO_ADDRESS: `0x${"1".repeat(40)}`,
+    X402_FACILITATOR_URL: "https://facilitator.example/x402",
+    X402_FACILITATOR_ALLOW_UNAUTHENTICATED: "true",
+  });
+  const body = JSON.stringify({
+    endpoint,
+    requests: [
+      { uniqueId: "alpha" },
+      { uniqueId: "beta" },
+    ],
+  });
+  const headers = {
+    "content-type": "application/json",
+    "idempotency-key": "agent-batch-test-0001",
+  };
+
+  const apiKeyAttempt = await fetchWorker(
+    "/v1/x402/batch",
+    {
+      method: "POST",
+      headers: {
+        ...headers,
+        authorization: "Bearer rb_live_not_a_payment_credential",
+      },
+      body,
+    },
+    env,
+  );
+  assert.equal(apiKeyAttempt.status, 400);
+  assert.equal(
+    (await apiKeyAttempt.json()).error.code,
+    "api_key_not_used_for_x402",
+  );
+
+  const quote = await fetchWorker(
+    "/v1/x402/batch",
+    { method: "POST", headers, body },
+    env,
+  );
+  assert.equal(quote.status, 402);
+  const batchId = quote.headers.get("x-relaybase-x402-batch-id");
+  assert.match(batchId, /^xb_[A-Za-z0-9_-]{20,80}$/);
+  const paymentRequired = JSON.parse(
+    Buffer.from(
+      quote.headers.get("payment-required"),
+      "base64",
+    ).toString("utf8"),
+  );
+  assert.equal(paymentRequired.x402Version, 2);
+  assert.equal(paymentRequired.accepts[0].scheme, "exact");
+  assert.equal(paymentRequired.accepts[0].network, "eip155:8453");
+  assert.equal(paymentRequired.accepts[0].amount, "6000");
+  assert.equal(
+    paymentRequired.extensions.relaybaseBatch.info.verifiedQuantity,
+    2,
+  );
+
+  const paymentPayload = {
+    x402Version: 2,
+    accepted: paymentRequired.accepts[0],
+    payload: {
+      signature: `0x${"2".repeat(130)}`,
+      authorization: { from: `0x${"3".repeat(40)}` },
+    },
+    extensions: paymentRequired.extensions,
+  };
+  const paymentSignature = Buffer.from(
+    JSON.stringify(paymentPayload),
+  ).toString("base64");
+  const nativeFetch = globalThis.fetch;
+  let verifyCalls = 0;
+  let settleCalls = 0;
+  let upstreamCalls = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(
+      typeof input === "string" || input instanceof URL
+        ? input
+        : input.url,
+    );
+    if (url.origin === "https://facilitator.example") {
+      const facilitatorBody = JSON.parse(init.body);
+      assert.equal(facilitatorBody.x402Version, 2);
+      assert.deepEqual(
+        facilitatorBody.paymentRequirements,
+        paymentRequired.accepts[0],
+      );
+      if (url.pathname.endsWith("/verify")) {
+        verifyCalls += 1;
+        return Response.json({
+          isValid: true,
+          payer: `0x${"3".repeat(40)}`,
+        });
+      }
+      assert.ok(url.pathname.endsWith("/settle"));
+      settleCalls += 1;
+      return Response.json({
+        success: true,
+        payer: `0x${"3".repeat(40)}`,
+        transaction: `0x${"4".repeat(64)}`,
+        network: "eip155:8453",
+      });
+    }
+    assert.equal(url.origin, TEST_UPSTREAM_ORIGIN);
+    assert.equal(url.pathname, `/api${endpoint}`);
+    upstreamCalls += 1;
+    return Response.json({
+      code: 200,
+      data: { uniqueId: url.searchParams.get("uniqueId") },
+    });
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const executed = await fetchWorker(
+    "/v1/x402/batch",
+    {
+      method: "POST",
+      headers: {
+        ...headers,
+        "payment-signature": paymentSignature,
+      },
+      body,
+    },
+    env,
+  );
+  assert.equal(executed.status, 200);
+  assert.equal(verifyCalls, 1);
+  assert.equal(settleCalls, 1);
+  assert.equal(upstreamCalls, 2);
+  const receipt = await executed.json();
+  assert.equal(receipt.success, true);
+  assert.equal(receipt.batch.id, batchId);
+  assert.equal(receipt.batch.amountUsdcAtomic, 6000);
+  assert.equal(receipt.batch.revenueStatus, "recognized");
+  assert.equal(receipt.results.length, 2);
+  assert.ok(executed.headers.get("payment-response"));
+
+  const replay = await fetchWorker(
+    "/v1/x402/batch",
+    {
+      method: "POST",
+      headers: {
+        ...headers,
+        "payment-signature": paymentSignature,
+      },
+      body,
+    },
+    env,
+  );
+  assert.equal(replay.status, 200);
+  assert.equal(verifyCalls, 1);
+  assert.equal(settleCalls, 1);
+  assert.equal(upstreamCalls, 2);
+
+  const stored = db.raw
+    .prepare(
+      `SELECT status, amount_usdc_atomic, transaction_hash,
+              revenue_recognized_at
+       FROM x402_batches WHERE id = ?`,
+    )
+    .get(batchId);
+  assert.equal(stored.status, "succeeded");
+  assert.equal(stored.amount_usdc_atomic, 6000);
+  assert.equal(stored.transaction_hash, `0x${"4".repeat(64)}`);
+  assert.ok(stored.revenue_recognized_at);
+  assert.equal(
+    db.raw
+      .prepare("SELECT COUNT(*) AS count FROM balance_ledger")
+      .get().count,
+    0,
+  );
 });

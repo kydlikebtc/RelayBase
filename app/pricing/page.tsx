@@ -7,12 +7,12 @@ export async function generateMetadata(): Promise<Metadata> {
   return locale === "zh"
     ? {
         title: "透明定价",
-        description: "无订阅，使用稳定币充值美元余额，只为上游成功请求扣费。",
+        description: "无订阅；标准 API 使用预充值余额，Agent 批量任务可通过 x402 使用 Base USDC 一批结算一次。",
       }
     : {
         title: "Transparent pricing",
         description:
-          "No subscriptions. Top up a USD balance with stablecoins and pay only for successful upstream requests.",
+          "No subscriptions. Use prepaid balance for standard APIs or settle an Agent batch once in Base USDC through x402.",
       };
 }
 
@@ -26,7 +26,14 @@ const content = {
       </>
     ),
     heroBody:
-      "Top up a USD balance with USDT or USDC and pay per successful API call. No monthly fee and no forced subscription.",
+      "Use prepaid balance for standard API Key calls, or let an Agent wallet settle a whole x402 batch once in Base USDC. No monthly fee and no forced subscription.",
+    pathsTitle: "Choose the payment path before you call.",
+    paths: [
+      ["STANDARD /v1", "API Key + prepaid balance", "An rb_live_ Key authenticates the server call. Each successful request recognizes usage from the account balance; failures refund the reservation."],
+      ["AGENT /x402", "Caller wallet + one batch settlement", "The Agent requests one fixed quote, signs it with its own wallet and settles one exact Base USDC payment before the whole batch executes."],
+    ],
+    pathsNote:
+      "These are separate entry points and ledgers. An API Key never becomes a wallet payment credential, RelayBase does not custody caller private keys, and the service does not switch payment methods automatically.",
     topupTitle: "Choose a top-up amount",
     topupIntro:
       "Funds appear as a USD balance and are deducted at the actual price of each endpoint.",
@@ -80,7 +87,14 @@ const content = {
       </>
     ),
     heroBody:
-      "使用 USDT 或 USDC 充值美元余额，按每次 API 成功调用扣费。没有月费，没有强制订阅。",
+      "标准 API Key 调用使用预充值余额；Agent 批量任务也可由调用方钱包通过 x402，用 Base USDC 为整批一次结算。没有月费，没有强制订阅。",
+    pathsTitle: "调用前，先明确选择支付入口。",
+    paths: [
+      ["标准 /v1", "API Key + 预充值余额", "rb_live_ Key 鉴权服务端请求；每个成功请求从账户余额确认用量，失败请求自动退回预留。"],
+      ["AGENT /x402", "调用方钱包 + 整批一次结算", "Agent 先获取固定报价，再用自持钱包签名，在整批执行前完成一次 exact Base USDC 结算。"],
+    ],
+    pathsNote:
+      "两种入口和账本彼此独立。API Key 不会变成钱包付款凭据；RelayBase 不托管调用方私钥，也不会自动切换支付方式。",
     topupTitle: "选择充值金额",
     topupIntro: "到账后以美元余额显示，调用时按接口实际价格扣除。",
     recommended: "推荐",
@@ -139,8 +153,35 @@ export default async function PricingPage() {
         <div className="pricing-flags">
           <span>NO SUBSCRIPTION</span>
           <span>REQUEST-LEVEL LEDGER</span>
-          <span>STABLECOIN TOP-UP</span>
+          <span>PREPAID + X402</span>
         </div>
+      </section>
+
+      <section className="pricing-principles pricing-payment-paths">
+        <div className="principles-heading">
+          <span>00</span>
+          <h2>{c.pathsTitle}</h2>
+        </div>
+        <div className="principles-grid">
+          {c.paths.map(([eyebrow, title, body], index) => (
+            <article key={eyebrow}>
+              <span className="principle-symbol">{index === 0 ? "K" : "402"}</span>
+              <small>{eyebrow}</small>
+              <h3>{title}</h3>
+              <p>{body}</p>
+              <Link href={index === 0 ? "/console/keys" : "/docs#x402"}>
+                {index === 0
+                  ? locale === "zh"
+                    ? "管理 API Key →"
+                    : "Manage API Keys →"
+                  : locale === "zh"
+                    ? "阅读 x402 快速开始 →"
+                    : "Read the x402 quickstart →"}
+              </Link>
+            </article>
+          ))}
+        </div>
+        <p className="topup-fineprint">{c.pathsNote}</p>
       </section>
 
       <section className="topup-section" aria-labelledby="topup-title">

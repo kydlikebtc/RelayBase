@@ -119,8 +119,8 @@ const coreCapabilities = [
     code: "CONSUME",
     title: { en: "Consume data through one protocol", zh: "用统一协议消费数据" },
     body: {
-      en: "One Bearer Key reaches approved multi-platform products. RelayBase JSON gives products, agents and automations a reusable integration contract.",
-      zh: "一个 Bearer Key 即可调用已开放的多平台数据产品，响应统一为 RelayBase JSON，让产品、Agent 与自动化流程复用同一接入方式。",
+      en: "Use a Bearer Key with prepaid balance for standard /v1 calls, or let an Agent wallet settle one Base USDC payment for a whole x402 batch.",
+      zh: "标准 /v1 调用使用 Bearer Key 与预充值余额；Agent 批量任务也可由调用方钱包通过 x402 用 Base USDC 一批结算一次。",
     },
     href: "/console",
     link: { en: "Start using data", zh: "开始使用数据" },
@@ -129,8 +129,8 @@ const coreCapabilities = [
     code: "SETTLE",
     title: { en: "Settle transparently by usage", zh: "按真实用量透明结算" },
     body: {
-      en: "Every request records status, latency, source, price and final charge. Only successful requests become billable; failed requests are refunded.",
-      zh: "每次消费的状态、延迟、数据来源、价格和最终扣费逐条记录；只有成功请求形成费用，失败请求自动退款。",
+      en: "Prepaid usage and x402 wallet settlements use separate ledgers and receipts. Every amount remains traceable to a request or batch.",
+      zh: "预充值用量与 x402 钱包结算分别进入独立账本和回执；每笔金额都能追溯到具体请求或批次。",
     },
     href: "/pricing",
     link: { en: "Understand settlement", zh: "了解市场结算" },
@@ -160,8 +160,8 @@ const workflow = [
     number: "03",
     title: { en: "Ship through one protocol", zh: "通过统一协议投入生产" },
     body: {
-      en: "Create a RelayBase Key and use the same authentication, path and response conventions across platforms.",
-      zh: "创建 RelayBase Key，以同一套鉴权、路径和响应规范调用不同平台的数据产品。",
+      en: "Choose explicitly: standard /v1 + API Key charges prepaid balance; /v1/x402/batch + wallet payment settles a whole batch once.",
+      zh: "明确选择入口：标准 /v1 + API Key 扣预充值余额；/v1/x402/batch + 钱包支付为整批一次结算。",
     },
     accent: "dark",
   },
@@ -169,8 +169,8 @@ const workflow = [
     number: "04",
     title: { en: "Settle against real consumption", zh: "按真实消费完成结算" },
     body: {
-      en: "Status, latency, price and charge enter the request ledger. Failed requests are refunded and never become final cost.",
-      zh: "每次请求的状态、耗时、价格与扣费进入账本；失败请求自动退款，不形成最终费用。",
+      en: "Prepaid calls enter the account ledger. x402 batches enter a separate Base USDC settlement ledger with transaction and execution receipts.",
+      zh: "预充值调用进入账户用量账本；x402 批次进入独立的 Base USDC 结算账本，保存交易与执行回执。",
     },
     accent: "brown",
   },
@@ -438,15 +438,15 @@ export default async function Home() {
           <h2>
             {isZh ? "数据消费，" : "Data consumption,"}
             <br />
-            {isZh ? "按真实请求结算" : "settled per real request"}
+            {isZh ? "两条明确的结算路径" : "with two explicit payment paths"}
           </h2>
           <p className="heading-note">
             {isZh
-              ? "不预设套餐，不锁定月费。价格直接附着在数据产品上，余额只用于真实消费，每笔费用都能回到具体请求。只有成功请求最终扣费，失败请求自动退款。"
-              : "No preset plans or monthly lock-in. Price belongs to each data product, every charge maps to a request, and failed requests are automatically refunded."}
+              ? "标准 /v1 请求使用 API Key 并扣预充值余额；Agent 批量任务使用调用方自持钱包，通过 x402 在 Base 上用 USDC 一批结算一次。两者不会隐式切换，也不会混用账本。"
+              : "Standard /v1 requests use an API Key and prepaid balance. Agent batches use a caller-controlled wallet to settle once in Base USDC through x402. The service never switches implicitly or mixes their ledgers."}
           </p>
           <Link className="button button-dark" href="/pricing">
-            {isZh ? "查看充值与计费" : "View top-up and billing"}
+            {isZh ? "比较两种支付方式" : "Compare payment paths"}
             <span aria-hidden="true">→</span>
           </Link>
         </div>

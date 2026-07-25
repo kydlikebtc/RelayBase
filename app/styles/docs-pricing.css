@@ -1168,3 +1168,25 @@
     grid-column: 1 / -1;
   }
 }
+
+.pricing-payment-paths {
+  border-top: 1px solid var(--border);
+}
+
+.pricing-payment-paths .principles-grid article {
+  min-height: 250px;
+}
+
+.pricing-payment-paths .principles-grid small {
+  color: var(--ink-muted);
+  font: 700 10px/1.3 var(--font-mono);
+  letter-spacing: 0.12em;
+}
+
+.pricing-payment-paths .principles-grid a {
+  display: inline-flex;
+  margin-top: auto;
+  color: inherit;
+  font-weight: 700;
+  text-decoration: none;
+}

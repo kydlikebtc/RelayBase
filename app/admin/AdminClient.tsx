@@ -10,7 +10,12 @@ type AdminTab =
   | "catalog"
   | "payments";
 type UpstreamView = "current" | "add" | "contract";
-type CatalogView = "routes" | "add" | "pricing" | "consistency";
+type CatalogView =
+  | "routes"
+  | "add"
+  | "pricing"
+  | "x402"
+  | "consistency";
 type RemoteState<T> =
   | { status: "idle" | "loading" }
   | { status: "ready"; data: T }
@@ -25,6 +30,12 @@ type OverviewResponse = {
     grossRevenueUsdMicros: number;
     upstreamCostUsdMicros: number;
     grossMarginUsdMicros: number;
+    prepaidRevenueUsdMicros: number;
+    prepaidUpstreamCostUsdMicros: number;
+    topupCashInUsdMicros: number;
+    x402RevenueUsdMicros: number;
+    x402UpstreamCostUsdMicros: number;
+    x402PendingBatches: number;
     outstandingBalanceUsdMicros: number;
     manualReviewPayments: number;
   };
@@ -158,6 +169,12 @@ type CatalogEndpoint = {
   presentInLatestSync: boolean;
   marketplaceAvailability: CatalogMarketplaceAvailability;
   availabilityReasons: string[];
+  x402: {
+    enabled: boolean;
+    unitPriceUsdMicros: number | null;
+    maxBatchSize: number | null;
+    revision: number;
+  };
   reviewedAt: string | null;
   updatedAt: string;
 };
@@ -399,6 +416,71 @@ type PaymentsResponse = {
   total: number;
   offset: number;
   nextOffset: number | null;
+};
+
+type X402Runtime = {
+  configured: boolean;
+  enabled: boolean;
+  mode: "live" | "disabled" | "unconfigured";
+  missing: string[];
+  facilitatorUrl: string;
+  facilitatorProvider: "cdp" | "custom";
+  payTo: string | null;
+};
+
+type AdminX402Batch = {
+  id: string;
+  endpoint: string;
+  status: string;
+  verifiedQuantity: number;
+  amountUsdcAtomic: number;
+  upstreamCostUsdMicros: number;
+  grossMarginUsdMicros: number;
+  paymentStatus: string;
+  revenueStatus: string;
+  payer: string | null;
+  transaction: string | null;
+  failureCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type AdminX402Response = {
+  runtime: X402Runtime;
+  accounting: {
+    period: "30d";
+    recognizedRevenueUsdMicros: number;
+    prepaid: {
+      recognizedUsageRevenueUsdMicros: number;
+      upstreamCostUsdMicros: number;
+      fulfilledCalls: number;
+      topupCashInUsdMicros: number;
+      topupRecognition: "deferred_balance_liability";
+      recognitionTrigger: "api_call_completed_without_refund";
+    };
+    x402: {
+      recognizedRevenueUsdMicros: number;
+      upstreamCostUsdMicros: number;
+      settledBatches: number;
+      pendingBatches: number;
+      pendingAmountUsdMicros: number;
+      balanceImpactUsdMicros: 0;
+      recognitionTrigger:
+        "facilitator_settlement_success_with_base_transaction_hash";
+    };
+  };
+  batches: AdminX402Batch[];
+};
+
+type X402ConfigMutationResponse = {
+  config: {
+    path: string;
+    enabled: boolean;
+    unitPriceUsdMicros: number;
+    maxBatchSize: number;
+    revision: number;
+  };
+  runtime: X402Runtime;
 };
 
 type PaymentRecoveryResponse = {
@@ -719,6 +801,12 @@ function isOverviewResponse(value: unknown): value is OverviewResponse {
     isSafeNonNegativeInteger(summary.grossRevenueUsdMicros) &&
     isSafeNonNegativeInteger(summary.upstreamCostUsdMicros) &&
     isSafeInteger(summary.grossMarginUsdMicros) &&
+    isSafeNonNegativeInteger(summary.prepaidRevenueUsdMicros) &&
+    isSafeNonNegativeInteger(summary.prepaidUpstreamCostUsdMicros) &&
+    isSafeNonNegativeInteger(summary.topupCashInUsdMicros) &&
+    isSafeNonNegativeInteger(summary.x402RevenueUsdMicros) &&
+    isSafeNonNegativeInteger(summary.x402UpstreamCostUsdMicros) &&
+    isSafeNonNegativeInteger(summary.x402PendingBatches) &&
     isSafeNonNegativeInteger(summary.outstandingBalanceUsdMicros) &&
     isSafeNonNegativeInteger(summary.manualReviewPayments) &&
     typeof readiness.ready === "boolean" &&
@@ -905,6 +993,7 @@ function isCatalogBatchSelection(
 
 function isCatalogEndpoint(value: unknown): value is CatalogEndpoint {
   if (!isObject(value)) return false;
+  const x402 = value.x402;
   return (
     isSafePath(value.path) &&
     isNonEmptyString(value.platform, 80) &&
@@ -940,6 +1029,15 @@ function isCatalogEndpoint(value: unknown): value is CatalogEndpoint {
     value.availabilityReasons.every((reason) =>
       isNonEmptyString(reason, 80),
     ) &&
+    isObject(x402) &&
+    typeof x402.enabled === "boolean" &&
+    (x402.unitPriceUsdMicros === null ||
+      isSafeNonNegativeInteger(x402.unitPriceUsdMicros)) &&
+    (x402.maxBatchSize === null ||
+      (isSafeNonNegativeInteger(x402.maxBatchSize) &&
+        x402.maxBatchSize >= 1 &&
+        x402.maxBatchSize <= 1_000)) &&
+    isSafeNonNegativeInteger(x402.revision) &&
     isNullableDateString(value.reviewedAt) &&
     isDateString(value.updatedAt)
   );
@@ -1353,6 +1451,101 @@ function isPaymentsResponse(value: unknown): value is PaymentsResponse {
         value.nextOffset <= 100_000)) &&
     value.payments.length <= 200 &&
     value.payments.every(isAdminPayment)
+  );
+}
+
+function isX402Runtime(value: unknown): value is X402Runtime {
+  return (
+    isObject(value) &&
+    typeof value.configured === "boolean" &&
+    typeof value.enabled === "boolean" &&
+    (value.mode === "live" ||
+      value.mode === "disabled" ||
+      value.mode === "unconfigured") &&
+    Array.isArray(value.missing) &&
+    value.missing.length <= 16 &&
+    value.missing.every((item) => isNonEmptyString(item, 100)) &&
+    isNonEmptyString(value.facilitatorUrl, 2_000) &&
+    (value.facilitatorProvider === "cdp" ||
+      value.facilitatorProvider === "custom") &&
+    isNullableString(value.payTo, 80)
+  );
+}
+
+function isAdminX402Batch(value: unknown): value is AdminX402Batch {
+  return (
+    isObject(value) &&
+    isNonEmptyString(value.id, 100) &&
+    /^xb_[A-Za-z0-9_-]{20,80}$/.test(value.id) &&
+    isSafePath(value.endpoint) &&
+    isNonEmptyString(value.status, 40) &&
+    isSafeNonNegativeInteger(value.verifiedQuantity) &&
+    isSafeNonNegativeInteger(value.amountUsdcAtomic) &&
+    isSafeNonNegativeInteger(value.upstreamCostUsdMicros) &&
+    isSafeInteger(value.grossMarginUsdMicros) &&
+    isNonEmptyString(value.paymentStatus, 40) &&
+    isNonEmptyString(value.revenueStatus, 40) &&
+    isNullableString(value.payer, 80) &&
+    isNullableString(value.transaction, 100) &&
+    isNullableString(value.failureCode, 100) &&
+    isDateString(value.createdAt) &&
+    isDateString(value.updatedAt)
+  );
+}
+
+function isAdminX402Response(
+  value: unknown,
+): value is AdminX402Response {
+  if (!isObject(value) || !isX402Runtime(value.runtime)) {
+    return false;
+  }
+  const accounting = value.accounting;
+  if (
+    !isObject(accounting) ||
+    !isObject(accounting.prepaid) ||
+    !isObject(accounting.x402) ||
+    !Array.isArray(value.batches)
+  ) {
+    return false;
+  }
+  const prepaid = accounting.prepaid;
+  const x402 = accounting.x402;
+  return (
+    accounting.period === "30d" &&
+    isSafeNonNegativeInteger(accounting.recognizedRevenueUsdMicros) &&
+    isSafeNonNegativeInteger(prepaid.recognizedUsageRevenueUsdMicros) &&
+    isSafeNonNegativeInteger(prepaid.upstreamCostUsdMicros) &&
+    isSafeNonNegativeInteger(prepaid.fulfilledCalls) &&
+    isSafeNonNegativeInteger(prepaid.topupCashInUsdMicros) &&
+    prepaid.topupRecognition === "deferred_balance_liability" &&
+    prepaid.recognitionTrigger === "api_call_completed_without_refund" &&
+    isSafeNonNegativeInteger(x402.recognizedRevenueUsdMicros) &&
+    isSafeNonNegativeInteger(x402.upstreamCostUsdMicros) &&
+    isSafeNonNegativeInteger(x402.settledBatches) &&
+    isSafeNonNegativeInteger(x402.pendingBatches) &&
+    isSafeNonNegativeInteger(x402.pendingAmountUsdMicros) &&
+    x402.balanceImpactUsdMicros === 0 &&
+    x402.recognitionTrigger ===
+      "facilitator_settlement_success_with_base_transaction_hash" &&
+    value.batches.length <= 200 &&
+    value.batches.every(isAdminX402Batch)
+  );
+}
+
+function isX402ConfigMutationResponse(
+  value: unknown,
+): value is X402ConfigMutationResponse {
+  return (
+    isObject(value) &&
+    isObject(value.config) &&
+    isSafePath(value.config.path) &&
+    typeof value.config.enabled === "boolean" &&
+    isSafeNonNegativeInteger(value.config.unitPriceUsdMicros) &&
+    isSafeNonNegativeInteger(value.config.maxBatchSize) &&
+    value.config.maxBatchSize >= 1 &&
+    value.config.maxBatchSize <= 1_000 &&
+    isSafeNonNegativeInteger(value.config.revision) &&
+    isX402Runtime(value.runtime)
   );
 }
 
@@ -2468,6 +2661,9 @@ export function AdminClient() {
   const [payments, setPayments] = useState<RemoteState<PaymentsResponse>>({
     status: "idle",
   });
+  const [x402Admin, setX402Admin] = useState<
+    RemoteState<AdminX402Response>
+  >({ status: "idle" });
   const [paymentReviews, setPaymentReviews] = useState<
     RemoteState<PaymentReviewsResponse>
   >({ status: "idle" });
@@ -2528,6 +2724,10 @@ export function AdminClient() {
     useState(false);
   const [priceDrafts, setPriceDrafts] = useState<Record<string, string>>({});
   const [savingPath, setSavingPath] = useState("");
+  const [x402Drafts, setX402Drafts] = useState<
+    Record<string, { price: string; maxBatchSize: string }>
+  >({});
+  const [savingX402Path, setSavingX402Path] = useState("");
   const [pendingPriceDrafts, setPendingPriceDrafts] = useState<
     Record<string, string>
   >({});
@@ -2671,6 +2871,20 @@ export function AdminClient() {
           data.endpoints.map((endpoint) => [
             endpoint.path,
             usdInputValue(endpoint.customerPriceUsdMicros),
+          ]),
+        ),
+      );
+      setX402Drafts(
+        Object.fromEntries(
+          data.endpoints.map((endpoint) => [
+            endpoint.path,
+            {
+              price: usdInputValue(
+                endpoint.x402.unitPriceUsdMicros ??
+                  endpoint.customerPriceUsdMicros,
+              ),
+              maxBatchSize: String(endpoint.x402.maxBatchSize ?? 25),
+            },
           ]),
         ),
       );
@@ -2849,6 +3063,27 @@ export function AdminClient() {
     }
   }, [adminSecret]);
 
+  const loadX402Admin = useCallback(async (secret = adminSecret) => {
+    if (!secret) return;
+    setX402Admin({ status: "loading" });
+    try {
+      const data = await adminRequest(
+        "/api/admin/x402?limit=200",
+        secret,
+        isAdminX402Response,
+      );
+      setX402Admin({ status: "ready", data });
+    } catch (error) {
+      setX402Admin({
+        status: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "无法读取 x402 结算账本。",
+      });
+    }
+  }, [adminSecret]);
+
   const loadPaymentReviews = useCallback(async (secret = adminSecret) => {
     if (!secret) return;
     setPaymentReviews({ status: "loading" });
@@ -2921,6 +3156,7 @@ export function AdminClient() {
         void loadPendingCatalog(secret);
         void loadPayments(secret);
         void loadPaymentReviews(secret);
+        void loadX402Admin(secret);
       } catch (error) {
         sessionStorage.removeItem(SESSION_SECRET_KEY);
         setOverview({ status: "idle" });
@@ -2936,6 +3172,7 @@ export function AdminClient() {
       loadPendingCatalog,
       loadPaymentReviews,
       loadPayments,
+      loadX402Admin,
       loadUpstreamConfig,
       loadUpstreamCredentials,
       loadUsers,
@@ -3302,6 +3539,7 @@ export function AdminClient() {
     setCatalog({ status: "idle" });
     setPendingCatalog({ status: "idle" });
     setPayments({ status: "idle" });
+    setX402Admin({ status: "idle" });
     setPaymentReviews({ status: "idle" });
     setReviewResolution(null);
   }
@@ -3711,6 +3949,61 @@ export function AdminClient() {
       setNotice(error instanceof Error ? error.message : "价格保存失败。");
     } finally {
       setSavingPath("");
+    }
+  }
+
+  async function saveX402Config(
+    endpoint: CatalogEndpoint,
+    enabled: boolean,
+  ) {
+    const draft = x402Drafts[endpoint.path];
+    const unitPriceUsdMicros = parseUsdInput(draft?.price ?? "");
+    const maxBatchSize = Number(draft?.maxBatchSize ?? "");
+    if (
+      unitPriceUsdMicros === null ||
+      unitPriceUsdMicros < endpoint.upstreamPriceUsdMicros
+    ) {
+      setNotice("x402 单目标价格必须有效且不得低于当前上游成本。");
+      return;
+    }
+    if (
+      !Number.isSafeInteger(maxBatchSize) ||
+      maxBatchSize < 1 ||
+      maxBatchSize > 1_000
+    ) {
+      setNotice("x402 每批上限必须是 1–1000 的整数。");
+      return;
+    }
+    setSavingX402Path(endpoint.path);
+    setNotice("");
+    try {
+      const result = await adminRequest(
+        "/api/admin/x402/config",
+        adminSecret,
+        isX402ConfigMutationResponse,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            path: endpoint.path,
+            enabled,
+            unitPriceUsdMicros,
+            maxBatchSize,
+            expectedRevision: endpoint.x402.revision,
+          }),
+        },
+      );
+      setNotice(
+        `${result.config.path} 的 x402 批量入口已${
+          result.config.enabled ? "启用" : "停用"
+        }；前台实际在线状态仍由路由与结算运行条件共同决定。`,
+      );
+      await Promise.all([loadCatalog(), loadX402Admin(), loadOverview()]);
+    } catch (error) {
+      setNotice(
+        error instanceof Error ? error.message : "x402 配置保存失败。",
+      );
+    } finally {
+      setSavingX402Path("");
     }
   }
 
@@ -4422,13 +4715,22 @@ export function AdminClient() {
                       <small>近 30 日全部请求</small>
                     </article>
                     <article>
-                      <span>近 30 日收入</span>
+                      <span>近 30 日确认收入</span>
                       <strong>
                         {formatUsd(
                           overviewData.summary.grossRevenueUsdMicros,
                         )}
                       </strong>
-                      <small>客户实际扣费</small>
+                      <small>
+                        余额用量{" "}
+                        {formatUsd(
+                          overviewData.summary.prepaidRevenueUsdMicros,
+                        )}{" "}
+                        · x402{" "}
+                        {formatUsd(
+                          overviewData.summary.x402RevenueUsdMicros,
+                        )}
+                      </small>
                     </article>
                     <article>
                       <span>近 30 日上游成本</span>
@@ -4437,7 +4739,17 @@ export function AdminClient() {
                           overviewData.summary.upstreamCostUsdMicros,
                         )}
                       </strong>
-                      <small>同步自实际调用快照</small>
+                      <small>
+                        余额用量{" "}
+                        {formatUsd(
+                          overviewData.summary
+                            .prepaidUpstreamCostUsdMicros,
+                        )}{" "}
+                        · x402{" "}
+                        {formatUsd(
+                          overviewData.summary.x402UpstreamCostUsdMicros,
+                        )}
+                      </small>
                     </article>
                     <article
                       className={
@@ -4466,9 +4778,15 @@ export function AdminClient() {
                         )}
                       </strong>
                       <small>
-                        待支付复核{" "}
+                        30 天充值现金流入{" "}
+                        {formatUsd(
+                          overviewData.summary.topupCashInUsdMicros,
+                        )}{" "}
+                        · 待复核{" "}
                         {overviewData.summary.manualReviewPayments.toLocaleString()}{" "}
-                        笔
+                        笔 · x402 待处理{" "}
+                        {overviewData.summary.x402PendingBatches.toLocaleString()}{" "}
+                        批
                       </small>
                     </article>
                   </div>
@@ -5485,6 +5803,7 @@ export function AdminClient() {
                 [
                   ["routes", "当前路由", "查看运行目录与发布状态"],
                   ["pricing", "定价发布", "批量定价、审核与上下架"],
+                  ["x402", "x402 批量", "配置 Agent 钱包批量入口"],
                   ["consistency", "一致性证明", "核对快照、覆盖率与代次"],
                 ] as const
               ).map(([id, label, description]) => (
@@ -5855,6 +6174,288 @@ export function AdminClient() {
               >
               {catalog.status === "ready" ? (
                 <>
+                  {catalogView === "x402" ? (
+                    <section className="admin-catalog-batch">
+                      <div className="admin-catalog-batch-head">
+                        <div>
+                          <p className="section-kicker">
+                            AGENT WALLET / BATCH SETTLEMENT
+                          </p>
+                          <h3>x402 批量入口配置</h3>
+                          <p>
+                            这里只配置每个已发布数据产品的 x402
+                            单目标价格和每批上限。API Key 仍只用于标准
+                            /v1 余额调用；x402 由调用方钱包付款，两类账本不会混用。
+                          </p>
+                        </div>
+                        <span>
+                          {x402Admin.status === "ready"
+                            ? x402Admin.data.runtime.mode === "live"
+                              ? "结算运行时已就绪"
+                              : `运行时：${x402Admin.data.runtime.mode}`
+                            : "正在读取结算运行时"}
+                        </span>
+                      </div>
+                      <div className="admin-toolbar admin-catalog-batch-selector">
+                        <label>
+                          <span>搜索路由</span>
+                          <input
+                            type="search"
+                            maxLength={120}
+                            value={catalogQuery}
+                            onChange={(event) =>
+                              setCatalogQuery(event.target.value)
+                            }
+                            placeholder="平台、摘要或 /v1/ 路径"
+                          />
+                        </label>
+                        <label>
+                          <span>平台</span>
+                          <select
+                            value={catalogPlatform}
+                            onChange={(event) =>
+                              setCatalogPlatform(event.target.value)
+                            }
+                          >
+                            <option value="all">全部平台</option>
+                            {catalogPlatforms.map((platform) => (
+                              <option value={platform} key={platform}>
+                                {platform}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          <span>分类</span>
+                          <select
+                            value={catalogDataType}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              if (
+                                value === "all" ||
+                                isCatalogDataType(value)
+                              ) {
+                                setCatalogDataType(value);
+                              }
+                            }}
+                          >
+                            <option value="all">全部分类</option>
+                            {catalogDataTypes.map((dataType) => (
+                              <option value={dataType} key={dataType}>
+                                {catalogDataTypeLabel(dataType)}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                      <div className="admin-source-truth">
+                        <div>
+                          <span
+                            className="admin-source-truth-mark"
+                            aria-hidden="true"
+                          >
+                            ≠
+                          </span>
+                          <div>
+                            <strong>发布、配置与实际在线是三层状态</strong>
+                            <p>
+                              前台 x402 在线需要同时满足：路由当前可用、端点
+                              x402 已启用，以及收款地址与 facilitator
+                              运行配置完整。只启用开关不会伪造在线状态。
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                      {displayedEndpoints.length ? (
+                        <div className="admin-table-wrap admin-route-list-wrap">
+                          <table className="admin-table admin-route-list is-pricing-view">
+                            <thead>
+                              <tr>
+                                <th>路由</th>
+                                <th>平台 / 分类</th>
+                                <th>标准路由</th>
+                                <th className="admin-money-head">
+                                  x402 单目标价
+                                </th>
+                                <th>每批上限</th>
+                                <th>实际状态</th>
+                                <th>操作</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {displayedEndpoints.map((endpoint) => {
+                                const draft = x402Drafts[endpoint.path] ?? {
+                                  price: usdInputValue(
+                                    endpoint.customerPriceUsdMicros,
+                                  ),
+                                  maxBatchSize: "25",
+                                };
+                                const price = parseUsdInput(draft.price);
+                                const maxBatchSize = Number(
+                                  draft.maxBatchSize,
+                                );
+                                const eligible =
+                                  endpoint.enabled &&
+                                  endpoint.marketplaceAvailability ===
+                                    "available";
+                                const runtimeLive =
+                                  x402Admin.status === "ready" &&
+                                  x402Admin.data.runtime.mode === "live";
+                                const online =
+                                  eligible &&
+                                  endpoint.x402.enabled &&
+                                  runtimeLive;
+                                const invalid =
+                                  price === null ||
+                                  price < endpoint.upstreamPriceUsdMicros ||
+                                  !Number.isSafeInteger(maxBatchSize) ||
+                                  maxBatchSize < 1 ||
+                                  maxBatchSize > 1_000;
+                                return (
+                                  <tr key={endpoint.path}>
+                                    <td className="admin-route-cell">
+                                      <div className="admin-route-primary">
+                                        <span className="admin-method">
+                                          {endpoint.method}
+                                        </span>
+                                        <code title={endpoint.path}>
+                                          {endpoint.path}
+                                        </code>
+                                      </div>
+                                      <small>
+                                        {endpoint.summary ?? "无摘要"}
+                                      </small>
+                                    </td>
+                                    <td>
+                                      <strong>{endpoint.platform}</strong>
+                                      <small>
+                                        {catalogDataTypeLabel(
+                                          endpoint.dataType,
+                                        )}
+                                      </small>
+                                    </td>
+                                    <td>
+                                      <span
+                                        className={`admin-route-runtime-status ${
+                                          eligible
+                                            ? "is-available"
+                                            : "is-unavailable"
+                                        }`}
+                                      >
+                                        {eligible ? "当前可用" : "当前不可用"}
+                                      </span>
+                                    </td>
+                                    <td className="admin-money-cell">
+                                      <div className="admin-route-price-control">
+                                        <span aria-hidden="true">$</span>
+                                        <input
+                                          inputMode="decimal"
+                                          aria-label={`${endpoint.path} x402 单目标价`}
+                                          value={draft.price}
+                                          onChange={(event) =>
+                                            setX402Drafts((current) => ({
+                                              ...current,
+                                              [endpoint.path]: {
+                                                ...draft,
+                                                price: event.target.value,
+                                              },
+                                            }))
+                                          }
+                                        />
+                                      </div>
+                                      <small>
+                                        成本{" "}
+                                        {formatUsd(
+                                          endpoint.upstreamPriceUsdMicros,
+                                          6,
+                                        )}
+                                      </small>
+                                    </td>
+                                    <td>
+                                      <input
+                                        className="admin-compact-number-input"
+                                        type="number"
+                                        min="1"
+                                        max="1000"
+                                        step="1"
+                                        aria-label={`${endpoint.path} x402 每批上限`}
+                                        value={draft.maxBatchSize}
+                                        onChange={(event) =>
+                                          setX402Drafts((current) => ({
+                                            ...current,
+                                            [endpoint.path]: {
+                                              ...draft,
+                                              maxBatchSize:
+                                                event.target.value,
+                                            },
+                                          }))
+                                        }
+                                      />
+                                    </td>
+                                    <td>
+                                      <span
+                                        className={`admin-route-runtime-status ${
+                                          online
+                                            ? "is-available"
+                                            : "is-unavailable"
+                                        }`}
+                                      >
+                                        {online
+                                          ? "x402 当前在线"
+                                          : endpoint.x402.enabled
+                                            ? "x402 当前不可用"
+                                            : "x402 未启用"}
+                                      </span>
+                                      <small>
+                                        {!eligible
+                                          ? "先恢复标准路由可用性"
+                                          : !runtimeLive
+                                            ? "结算运行时未就绪"
+                                            : "Base USDC · exact"}
+                                      </small>
+                                    </td>
+                                    <td>
+                                      <button
+                                        className={`button button-small ${
+                                          endpoint.x402.enabled
+                                            ? "admin-button-danger-ghost"
+                                            : "button-dark"
+                                        }`}
+                                        type="button"
+                                        disabled={
+                                          savingX402Path === endpoint.path ||
+                                          invalid ||
+                                          (!endpoint.x402.enabled &&
+                                            !eligible)
+                                        }
+                                        onClick={() =>
+                                          void saveX402Config(
+                                            endpoint,
+                                            !endpoint.x402.enabled,
+                                          )
+                                        }
+                                      >
+                                        {savingX402Path === endpoint.path
+                                          ? "保存中"
+                                          : endpoint.x402.enabled
+                                            ? "停用"
+                                            : "保存并启用"}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <div className="admin-empty">
+                          <strong>没有符合条件的路由</strong>
+                          <p>调整平台、分类或搜索词后重试。</p>
+                        </div>
+                      )}
+                    </section>
+                  ) : null}
                   {catalogView === "consistency" ? (
                     <div className="admin-catalog-proof">
                     <div>
@@ -6780,12 +7381,199 @@ export function AdminClient() {
               <button
                 className="button button-ghost button-small"
                 onClick={() =>
-                  void Promise.all([loadPaymentReviews(), loadPayments()])
+                  void Promise.all([
+                    loadPaymentReviews(),
+                    loadPayments(),
+                    loadX402Admin(),
+                  ])
                 }
               >
                 刷新支付
               </button>
             </div>
+            <StatePanel
+              state={x402Admin}
+              label="统一收入与 x402 结算账本"
+              onRetry={() => void loadX402Admin()}
+            >
+              {x402Admin.status === "ready" ? (
+                <div className="admin-x402-ledger">
+                  <div className="admin-payment-records-head">
+                    <span className="admin-index">00</span>
+                    <div>
+                      <h3>两类账本与统一经营口径</h3>
+                      <p>
+                        充值现金流入不等于收入；预充值用量完成且未退款才确认收入。
+                        x402 只有 facilitator 结算成功并保存 Base
+                        交易哈希后确认收入，且永不计入用户余额。
+                      </p>
+                    </div>
+                  </div>
+                  <div className="admin-stat-grid admin-stat-grid-compact">
+                    <article>
+                      <span>30 天确认收入</span>
+                      <strong>
+                        {formatUsd(
+                          x402Admin.data.accounting
+                            .recognizedRevenueUsdMicros,
+                        )}
+                      </strong>
+                      <small>预充值用量 + x402 已结算</small>
+                    </article>
+                    <article>
+                      <span>预充值用量收入</span>
+                      <strong>
+                        {formatUsd(
+                          x402Admin.data.accounting.prepaid
+                            .recognizedUsageRevenueUsdMicros,
+                        )}
+                      </strong>
+                      <small>
+                        充值现金流入{" "}
+                        {formatUsd(
+                          x402Admin.data.accounting.prepaid
+                            .topupCashInUsdMicros,
+                        )}{" "}
+                        · 递延余额负债
+                      </small>
+                    </article>
+                    <article>
+                      <span>x402 链上结算收入</span>
+                      <strong>
+                        {formatUsd(
+                          x402Admin.data.accounting.x402
+                            .recognizedRevenueUsdMicros,
+                        )}
+                      </strong>
+                      <small>
+                        {x402Admin.data.accounting.x402.settledBatches}{" "}
+                        个已结算批次 · 余额影响 $0
+                      </small>
+                    </article>
+                    <article>
+                      <span>x402 待处理</span>
+                      <strong>
+                        {x402Admin.data.accounting.x402.pendingBatches}
+                      </strong>
+                      <small>
+                        金额{" "}
+                        {formatUsd(
+                          x402Admin.data.accounting.x402
+                            .pendingAmountUsdMicros,
+                        )}
+                      </small>
+                    </article>
+                  </div>
+                  <div className="admin-source-truth">
+                    <div>
+                      <span
+                        className="admin-source-truth-mark"
+                        aria-hidden="true"
+                      >
+                        {x402Admin.data.runtime.mode === "live" ? "✓" : "!"}
+                      </span>
+                      <div>
+                        <strong>
+                          x402 运行时：{x402Admin.data.runtime.mode}
+                        </strong>
+                        <p>
+                          {x402Admin.data.runtime.mode === "live"
+                            ? `${x402Admin.data.runtime.facilitatorProvider.toUpperCase()} facilitator 与收款地址已配置。`
+                            : `缺少：${
+                                x402Admin.data.runtime.missing.join("、") ||
+                                "已关闭运行开关"
+                              }。未就绪时系统不会发出付款报价。`}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                  {x402Admin.data.batches.length ? (
+                    <div className="admin-table-wrap admin-saas-table-wrap">
+                      <table className="admin-table admin-saas-table">
+                        <thead>
+                          <tr>
+                            <th>批次 / 数据产品</th>
+                            <th>付款与收入</th>
+                            <th className="admin-money-head">结算金额</th>
+                            <th className="admin-money-head">上游成本</th>
+                            <th className="admin-money-head">毛利</th>
+                            <th>Base 回执</th>
+                            <th>更新时间</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {x402Admin.data.batches.map((batch) => (
+                            <tr key={batch.id}>
+                              <td>
+                                <code>{batch.id}</code>
+                                <small title={batch.endpoint}>
+                                  {batch.endpoint} ·{" "}
+                                  {batch.verifiedQuantity} targets
+                                </small>
+                              </td>
+                              <td>
+                                <span
+                                  className={`admin-payment-status is-${
+                                    batch.paymentStatus === "settled"
+                                      ? "success"
+                                      : "warning"
+                                  }`}
+                                >
+                                  {batch.paymentStatus}
+                                </span>
+                                <small>
+                                  执行 {batch.status} · 收入{" "}
+                                  {batch.revenueStatus}
+                                </small>
+                              </td>
+                              <td className="admin-money-cell">
+                                <strong className="admin-money-value">
+                                  {formatUsd(batch.amountUsdcAtomic, 6)}
+                                </strong>
+                                <small>USDC</small>
+                              </td>
+                              <td className="admin-money-cell">
+                                <strong className="admin-money-value">
+                                  {formatUsd(
+                                    batch.upstreamCostUsdMicros,
+                                    6,
+                                  )}
+                                </strong>
+                              </td>
+                              <td className="admin-money-cell">
+                                <strong className="admin-money-value">
+                                  {formatUsd(batch.grossMarginUsdMicros, 6)}
+                                </strong>
+                              </td>
+                              <td>
+                                <code title={batch.transaction ?? ""}>
+                                  {batch.transaction
+                                    ? `${batch.transaction.slice(0, 12)}…`
+                                    : "未结算"}
+                                </code>
+                                <small>
+                                  {batch.payer
+                                    ? `${batch.payer.slice(0, 10)}…`
+                                    : batch.failureCode ?? "等待钱包付款"}
+                                </small>
+                              </td>
+                              <td>{formatDate(batch.updatedAt)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="admin-empty">
+                      <strong>还没有 x402 批次</strong>
+                      <p>
+                        Agent 获取报价后，批次会按报价、验证、结算和执行状态进入这里。
+                      </p>
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </StatePanel>
             <div className="admin-review-queue">
               <div className="admin-review-queue-head">
                 <div>

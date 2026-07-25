@@ -115,7 +115,33 @@ type AuthMeResponse = {
   user: SessionUser;
 };
 
-export type ConsoleWorkspace = "dashboard" | "keys" | "billing";
+type X402Batch = {
+  id: string;
+  endpoint: string;
+  status: string;
+  verifiedQuantity: number;
+  unitPriceUsdMicros: number;
+  amountUsdcAtomic: number;
+  network: string;
+  asset: string;
+  payer: string | null;
+  transaction: string | null;
+  paymentStatus: string;
+  revenueStatus: string;
+  balanceImpactUsdMicros: 0;
+  failureCode: string | null;
+  quotedAt: string;
+  expiresAt: string;
+  settledAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+};
+
+export type ConsoleWorkspace =
+  | "dashboard"
+  | "keys"
+  | "billing"
+  | "x402";
 
 const amountOptions = [10, 25, 50, 100] as const;
 const currencyOptions = [
@@ -189,11 +215,18 @@ const consoleCopy = {
         description:
           "Fund your account, follow payment status and review recent balance activity.",
       },
+      x402: {
+        label: "x402 batches",
+        eyebrow: "AGENT PAYMENTS / X402",
+        description:
+          "Look up wallet-paid Base USDC batches, settlement receipts and execution status.",
+      },
     },
     navDescriptions: {
       dashboard: "Usage and account health",
       keys: "Credentials and access",
       billing: "Balance and payments",
+      x402: "Wallet batches and receipts",
     },
     resources: "Resources",
     dataMarket: "Data market",
@@ -366,11 +399,17 @@ const consoleCopy = {
         eyebrow: "资金 / 账单",
         description: "充值账户、跟踪付款状态，并查看近期余额变动记录。",
       },
+      x402: {
+        label: "x402 批次",
+        eyebrow: "AGENT 支付 / X402",
+        description: "查询由调用方钱包支付的 Base USDC 批次、结算回执与执行状态。",
+      },
     },
     navDescriptions: {
       dashboard: "使用情况与账户状态",
       keys: "凭据与访问控制",
       billing: "余额与付款记录",
+      x402: "钱包批次与结算回执",
     },
     resources: "常用资源",
     dataMarket: "数据市场",
@@ -853,6 +892,9 @@ export function ConsoleClient({
     useState<(typeof currencyOptions)[number]["value"]>("usdttrc20");
   const [creatingPayment, setCreatingPayment] = useState(false);
   const [invoice, setInvoice] = useState<PaymentInvoice | null>(null);
+  const [x402BatchId, setX402BatchId] = useState("");
+  const [x402Batch, setX402Batch] = useState<X402Batch | null>(null);
+  const [loadingX402Batch, setLoadingX402Batch] = useState(false);
   const paymentAttemptKey = useRef<string | null>(null);
   const latestInvoicePayment = invoice
     ? dashboard?.payments.find((payment) => payment.id === invoice.id)
@@ -1077,6 +1119,41 @@ export function ConsoleClient({
     }
   }
 
+  async function lookupX402Batch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const id = x402BatchId.trim();
+    if (!/^xb_[A-Za-z0-9_-]{20,80}$/.test(id)) {
+      setError(
+        locale === "zh"
+          ? "请输入有效的 x402 批次编号（xb_…）。"
+          : "Enter a valid x402 batch ID (xb_…).",
+      );
+      return;
+    }
+    setLoadingX402Batch(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await apiRequest<{ batch: X402Batch }>(
+        `/api/x402/batches/${encodeURIComponent(id)}`,
+        locale,
+        { cache: "no-store" },
+      );
+      setX402Batch(result.batch);
+    } catch (requestError) {
+      setX402Batch(null);
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : locale === "zh"
+            ? "无法读取 x402 批次。"
+            : "The x402 batch could not be loaded.",
+      );
+    } finally {
+      setLoadingX402Batch(false);
+    }
+  }
+
   async function signOut(event: MouseEvent<HTMLAnchorElement>) {
     event.preventDefault();
     if (signingOut) return;
@@ -1192,6 +1269,13 @@ export function ConsoleClient({
       index: "03",
       label: c.workspaces.billing.label,
       description: c.navDescriptions.billing,
+    },
+    {
+      id: "x402" as const,
+      href: "/console/x402",
+      index: "04",
+      label: c.workspaces.x402.label,
+      description: c.navDescriptions.x402,
     },
   ];
 
@@ -1348,6 +1432,15 @@ export function ConsoleClient({
               <a href="/console/billing">
                 <b>{c.addFunds}</b>
                 <small>{c.addFundsBody}</small>
+                <i>→</i>
+              </a>
+              <a href="/console/x402">
+                <b>{locale === "zh" ? "查询 x402 批次" : "Look up an x402 batch"}</b>
+                <small>
+                  {locale === "zh"
+                    ? "核对钱包结算、Base 交易与整批执行状态。"
+                    : "Verify wallet settlement, the Base transaction and whole-batch execution."}
+                </small>
                 <i>→</i>
               </a>
             </section>
@@ -1757,6 +1850,153 @@ export function ConsoleClient({
                 </div>
               )}
             </section>
+          </>
+        ) : null}
+
+        {workspace === "x402" ? (
+          <>
+            <section
+              className="console-compact-metrics billing-metrics"
+              aria-label={locale === "zh" ? "x402 支付边界" : "x402 payment boundary"}
+            >
+              <article className="is-primary">
+                <span>{locale === "zh" ? "付款身份" : "Payment identity"}</span>
+                <strong>{locale === "zh" ? "调用方钱包" : "Caller wallet"}</strong>
+              </article>
+              <article>
+                <span>{locale === "zh" ? "结算网络" : "Settlement network"}</span>
+                <strong>Base</strong>
+              </article>
+              <article>
+                <span>{locale === "zh" ? "结算资产" : "Settlement asset"}</span>
+                <strong>USDC</strong>
+              </article>
+              <article>
+                <span>{locale === "zh" ? "余额影响" : "Balance impact"}</span>
+                <strong>$0.00</strong>
+              </article>
+            </section>
+
+            <div className="console-billing-grid console-x402-grid">
+              <section className="console-panel topup-panel">
+                <div className="panel-heading">
+                  <div>
+                    <span>BATCH RECEIPT</span>
+                    <h2>{locale === "zh" ? "查询 x402 批次" : "Look up an x402 batch"}</h2>
+                  </div>
+                  <span className="pay-badge">EXACT</span>
+                </div>
+                <p>
+                  {locale === "zh"
+                    ? "粘贴服务端返回的 xb_ 批次编号，核对钱包付款、Base 交易与整批执行状态。批次记录不计入平台余额。"
+                    : "Paste the xb_ batch ID returned by the service to verify wallet payment, the Base transaction and whole-batch execution. It never posts to your platform balance."}
+                </p>
+                <form className="key-form" onSubmit={lookupX402Batch}>
+                  <label htmlFor="x402-batch-id">
+                    {locale === "zh" ? "批次编号" : "Batch ID"}
+                  </label>
+                  <div>
+                    <input
+                      id="x402-batch-id"
+                      value={x402BatchId}
+                      onChange={(event) => setX402BatchId(event.target.value)}
+                      placeholder="xb_..."
+                      maxLength={83}
+                      autoComplete="off"
+                      required
+                    />
+                    <button
+                      className="button button-blue"
+                      type="submit"
+                      disabled={loadingX402Batch}
+                    >
+                      {loadingX402Batch
+                        ? locale === "zh"
+                          ? "查询中…"
+                          : "Loading…"
+                        : locale === "zh"
+                          ? "查询回执"
+                          : "Find receipt"}
+                    </button>
+                  </div>
+                </form>
+              </section>
+
+              <aside className="console-panel billing-help">
+                <div className="panel-heading">
+                  <div>
+                    <span>CHOOSE THE ENTRY</span>
+                    <h2>{locale === "zh" ? "两种调用方式互不切换" : "Two explicit, separate paths"}</h2>
+                  </div>
+                </div>
+                <ol>
+                  <li>
+                    <span>1</span>
+                    {locale === "zh"
+                      ? "标准 /v1 接口：Authorization: Bearer rb_live_…，始终扣预充值余额。"
+                      : "Standard /v1: Authorization: Bearer rb_live_… always charges prepaid balance."}
+                  </li>
+                  <li>
+                    <span>2</span>
+                    {locale === "zh"
+                      ? "x402 批量入口：调用方钱包签署 PAYMENT-SIGNATURE，一批只结算一次。"
+                      : "x402 batch: the caller wallet signs PAYMENT-SIGNATURE and settles once per batch."}
+                  </li>
+                  <li>
+                    <span>3</span>
+                    {locale === "zh"
+                      ? "API Key 不是 x402 付款凭据；RelayBase 不创建或托管调用方私钥。"
+                      : "An API Key is not an x402 payment credential; RelayBase never creates or custodies caller private keys."}
+                  </li>
+                </ol>
+                <a href="/docs#x402">
+                  {locale === "zh" ? "查看 x402 Agent 快速开始 →" : "Open the x402 Agent quickstart →"}
+                </a>
+              </aside>
+            </div>
+
+            {x402Batch ? (
+              <section className="console-panel payment-history console-x402-receipt">
+                <div className="panel-heading">
+                  <div>
+                    <span>SETTLEMENT / EXECUTION</span>
+                    <h2>{x402Batch.id}</h2>
+                  </div>
+                  <span className={`key-active is-${x402Batch.paymentStatus}`}>
+                    {x402Batch.paymentStatus.replaceAll("_", " ").toUpperCase()}
+                  </span>
+                </div>
+                <dl className="invoice-grid">
+                  <div>
+                    <span>{locale === "zh" ? "数据产品" : "Data product"}</span>
+                    <code>{x402Batch.endpoint}</code>
+                    <small>{x402Batch.verifiedQuantity.toLocaleString()} × {formatUsd(x402Batch.unitPriceUsdMicros, 6)}</small>
+                  </div>
+                  <div>
+                    <span>{locale === "zh" ? "钱包结算" : "Wallet settlement"}</span>
+                    <strong>{formatUsd(x402Batch.amountUsdcAtomic, 6)} USDC</strong>
+                    <small>{x402Batch.payer ?? (locale === "zh" ? "尚未验证付款人" : "Payer not verified")}</small>
+                  </div>
+                  <div>
+                    <span>{locale === "zh" ? "执行状态" : "Execution status"}</span>
+                    <strong>{x402Batch.status.replaceAll("_", " ").toUpperCase()}</strong>
+                    <small>{locale === "zh" ? "平台余额影响：$0.00" : "Platform balance impact: $0.00"}</small>
+                  </div>
+                </dl>
+                {x402Batch.transaction ? (
+                  <p className="topup-warning">
+                    {locale === "zh" ? "Base 交易：" : "Base transaction: "}
+                    <code>{x402Batch.transaction}</code>
+                  </p>
+                ) : null}
+                {x402Batch.failureCode ? (
+                  <p className="topup-warning">
+                    {locale === "zh" ? "失败代码：" : "Failure code: "}
+                    <code>{x402Batch.failureCode}</code>
+                  </p>
+                ) : null}
+              </section>
+            ) : null}
           </>
         ) : null}
       </div>

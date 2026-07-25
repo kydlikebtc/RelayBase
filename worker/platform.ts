@@ -6,6 +6,28 @@ import {
   providerDataTypeFor,
   providerSurfaceForPath,
 } from "../shared/provider-taxonomy.mjs";
+import {
+  X402_ASSET,
+  X402_BATCH_ID_HEADER,
+  X402_BATCH_PATH,
+  X402_NETWORK,
+  X402_PAYMENT_REQUIRED_HEADER,
+  X402_PAYMENT_RESPONSE_HEADER,
+  X402_PAYMENT_SIGNATURE_HEADER,
+  X402ProtocolError,
+  assertX402PaymentBinding,
+  buildX402PaymentRequired,
+  buildX402Requirements,
+  decodeX402PaymentSignature,
+  encodeX402Header,
+  isX402TransactionHash,
+  settleX402Payment,
+  verifyX402Payment,
+  x402Runtime,
+  type X402BatchBinding,
+  type X402PaymentPayload,
+  type X402PaymentRequired,
+} from "./x402";
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -151,6 +173,14 @@ export interface PlatformEnv {
   ACCOUNT_CONCURRENCY_LIMIT?: string;
   PAYMENT_CREATE_LIMIT_PER_MINUTE?: string;
   PAYMENT_PROVIDER_LIMIT_PER_MINUTE?: string;
+  X402_ENABLED?: string;
+  X402_PAY_TO_ADDRESS?: string;
+  X402_FACILITATOR_URL?: string;
+  X402_FACILITATOR_BEARER_TOKEN?: string;
+  X402_FACILITATOR_ALLOW_UNAUTHENTICATED?: string;
+  X402_FACILITATOR_TIMEOUT_MS?: string;
+  CDP_API_KEY_ID?: string;
+  CDP_API_KEY_SECRET?: string;
 }
 
 export interface WorkerExecutionContext {
@@ -262,6 +292,10 @@ type MarketplaceCatalogOverlay = {
   read_only: number;
   safety_classification: CatalogSafetyClassification;
   safety_policy_version: number;
+  x402_enabled: number | null;
+  x402_unit_price_usd_micros: number | null;
+  x402_max_batch_size: number | null;
+  x402_revision: number | null;
   updated_at: string;
   catalog_openapi_snapshot_hash: string | null;
   catalog_openapi_operation_count: number | null;
@@ -299,6 +333,10 @@ type MarketplaceOverlayRow = {
   readOnly: boolean;
   safetyClassification: CatalogSafetyClassification;
   safetyPolicyVersion: number;
+  x402Enabled: boolean;
+  x402UnitPriceUsdMicros: number | null;
+  x402MaxBatchSize: number | null;
+  x402Revision: number;
   rateLimitRps: number | null;
   updatedAt: string;
   documentationStatus: MarketplaceDocumentationStatus;
@@ -642,6 +680,15 @@ export async function handlePlatformRequest(
     }
 
     if (
+      /^\/api\/x402\/batches\/xb_[A-Za-z0-9_-]{20,80}$/.test(
+        url.pathname,
+      ) &&
+      request.method === "GET"
+    ) {
+      return await handleX402BatchLookup(request, env, requestId);
+    }
+
+    if (
       url.pathname === "/api/admin/upstream-credentials" &&
       request.method === "GET"
     ) {
@@ -806,6 +853,27 @@ export async function handlePlatformRequest(
       request.method === "POST"
     ) {
       return await handleReconciliation(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/admin/x402" &&
+      request.method === "GET"
+    ) {
+      return await handleAdminX402(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/admin/x402/config" &&
+      request.method === "PATCH"
+    ) {
+      return await handleAdminX402Config(request, env, requestId);
+    }
+
+    if (
+      url.pathname === X402_BATCH_PATH &&
+      request.method === "POST"
+    ) {
+      return await handleX402Batch(request, env, ctx, requestId);
     }
 
     if (url.pathname.startsWith("/v1/")) {
@@ -2177,6 +2245,421 @@ async function handleDashboard(
   );
 }
 
+async function handleX402BatchLookup(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  const id = new URL(request.url).pathname.split("/").at(-1) ?? "";
+  const batch = await x402BatchById(requireDb(env), id);
+  if (!batch) {
+    throw new PlatformError(
+      404,
+      "x402_batch_not_found",
+      "没有找到该 x402 批次。",
+    );
+  }
+  return jsonResponse(
+    { batch: publicX402Batch(batch) },
+    200,
+    requestId,
+    { "cache-control": "private, no-store" },
+  );
+}
+
+async function handleAdminX402(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  requireAdminSecret(request, env, "payments");
+  const url = new URL(request.url);
+  const limit = Number(url.searchParams.get("limit") ?? "100");
+  const status = url.searchParams.get("status")?.trim() ?? "";
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 200 ||
+    (status && !/^[a-z_]{1,40}$/.test(status))
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_x402_filter",
+      "x402 批次筛选参数无效。",
+    );
+  }
+  const db = requireDb(env);
+  if (!(await hasX402Schema(db))) {
+    throw new PlatformError(
+      503,
+      "x402_schema_unavailable",
+      "x402 数据库迁移尚未完成。",
+    );
+  }
+  const rowsQuery = status
+    ? db
+        .prepare(
+          `SELECT * FROM x402_batches
+           WHERE status = ?
+           ORDER BY created_at DESC LIMIT ?`,
+        )
+        .bind(status, limit)
+    : db
+        .prepare(
+          `SELECT * FROM x402_batches
+           ORDER BY created_at DESC LIMIT ?`,
+        )
+        .bind(limit);
+  const [
+    rowsResult,
+    recognizedResult,
+    pendingResult,
+    prepaidResult,
+    topupResult,
+  ] = await db.batch([
+    rowsQuery,
+    db.prepare(
+      `SELECT COUNT(*) AS batch_count,
+              COALESCE(SUM(amount_usdc_atomic), 0) AS revenue,
+              COALESCE(SUM(upstream_cost_usd_micros), 0) AS upstream_cost
+       FROM x402_batches
+       WHERE revenue_recognized_at IS NOT NULL
+         AND transaction_hash IS NOT NULL
+         AND datetime(revenue_recognized_at) >= datetime('now', '-30 days')`,
+    ),
+    db.prepare(
+      `SELECT COUNT(*) AS batch_count,
+              COALESCE(SUM(amount_usdc_atomic), 0) AS amount
+       FROM x402_batches
+       WHERE status IN (
+         'payment_verifying', 'payment_verified', 'settlement_pending',
+         'settlement_failed', 'settled', 'executing'
+       )`,
+    ),
+    db.prepare(
+      `SELECT COUNT(*) AS call_count,
+              COALESCE(SUM(cost_usd_micros), 0) AS revenue,
+              COALESCE(SUM(upstream_cost_usd_micros), 0) AS upstream_cost
+       FROM api_calls
+       WHERE refunded = 0
+         AND datetime(created_at) >= datetime('now', '-30 days')`,
+    ),
+    db.prepare(
+      `SELECT COALESCE(SUM(delta_usd_micros), 0) AS credited
+       FROM balance_ledger
+       WHERE entry_type = 'payment_credit'
+         AND datetime(created_at) >= datetime('now', '-30 days')`,
+    ),
+  ]);
+  const recognized = firstResult<{
+    batch_count: number;
+    revenue: number;
+    upstream_cost: number;
+  }>(recognizedResult);
+  const pending = firstResult<{
+    batch_count: number;
+    amount: number;
+  }>(pendingResult);
+  const prepaid = firstResult<{
+    call_count: number;
+    revenue: number;
+    upstream_cost: number;
+  }>(prepaidResult);
+  const topups = firstResult<{ credited: number }>(topupResult);
+  const x402Revenue = Number(recognized?.revenue ?? 0);
+  const prepaidRevenue = Number(prepaid?.revenue ?? 0);
+  return jsonResponse(
+    {
+      runtime: x402Runtime(env),
+      accounting: {
+        period: "30d",
+        recognizedRevenueUsdMicros: prepaidRevenue + x402Revenue,
+        prepaid: {
+          recognizedUsageRevenueUsdMicros: prepaidRevenue,
+          upstreamCostUsdMicros: Number(
+            prepaid?.upstream_cost ?? 0,
+          ),
+          fulfilledCalls: Number(prepaid?.call_count ?? 0),
+          topupCashInUsdMicros: Number(topups?.credited ?? 0),
+          topupRecognition: "deferred_balance_liability",
+          recognitionTrigger: "api_call_completed_without_refund",
+        },
+        x402: {
+          recognizedRevenueUsdMicros: x402Revenue,
+          upstreamCostUsdMicros: Number(
+            recognized?.upstream_cost ?? 0,
+          ),
+          settledBatches: Number(recognized?.batch_count ?? 0),
+          pendingBatches: Number(pending?.batch_count ?? 0),
+          pendingAmountUsdMicros: Number(pending?.amount ?? 0),
+          balanceImpactUsdMicros: 0,
+          recognitionTrigger:
+            "facilitator_settlement_success_with_base_transaction_hash",
+        },
+      },
+      batches: resultRows<X402BatchRecord>(rowsResult).map(
+        adminX402Batch,
+      ),
+    },
+    200,
+    requestId,
+  );
+}
+
+async function handleAdminX402Config(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  assertSameOrigin(request, env);
+  requireAdminSecret(request, env, "catalog");
+  const body = await readJsonBody<{
+    path?: unknown;
+    enabled?: unknown;
+    unitPriceUsdMicros?: unknown;
+    maxBatchSize?: unknown;
+    expectedRevision?: unknown;
+  }>(request, MAX_DASHBOARD_BODY_BYTES);
+  if (
+    typeof body.path !== "string" ||
+    typeof body.enabled !== "boolean" ||
+    !Number.isSafeInteger(body.unitPriceUsdMicros) ||
+    !Number.isSafeInteger(body.maxBatchSize) ||
+    !Number.isSafeInteger(body.expectedRevision)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_x402_config",
+      "x402 配置必须包含路径、开关、单价、每批上限和当前 revision。",
+    );
+  }
+  const path = normalizeCatalogPath(body.path);
+  const unitPriceUsdMicros = Number(body.unitPriceUsdMicros);
+  const maxBatchSize = Number(body.maxBatchSize);
+  const expectedRevision = Number(body.expectedRevision);
+  if (
+    unitPriceUsdMicros < 1 ||
+    unitPriceUsdMicros > 100_000_000 ||
+    maxBatchSize < 1 ||
+    maxBatchSize > 1_000 ||
+    expectedRevision < 0
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_x402_config",
+      "x402 单价必须为 1–100000000 美元微单位，每批上限必须为 1–1000。",
+    );
+  }
+  const db = requireDb(env);
+  if (!(await hasX402Schema(db))) {
+    throw new PlatformError(
+      503,
+      "x402_schema_unavailable",
+      "x402 数据库迁移尚未完成。",
+    );
+  }
+  const endpoint = await db
+    .prepare(
+      `SELECT path, upstream_price_usd_micros, enabled, read_only,
+              price_verified, safety_classification, safety_policy_version,
+              sync_generation = (
+                SELECT last_success_generation FROM catalog_sync_state
+                WHERE id = 1
+              ) AS present_in_latest
+       FROM endpoint_catalog WHERE path = ?`,
+    )
+    .bind(path)
+    .first<{
+      path: string;
+      upstream_price_usd_micros: number;
+      enabled: number;
+      read_only: number;
+      price_verified: number;
+      safety_classification: CatalogSafetyClassification;
+      safety_policy_version: number;
+      present_in_latest: number;
+    }>();
+  if (!endpoint) {
+    throw new PlatformError(
+      404,
+      "endpoint_not_found",
+      "目录中没有这个端点。",
+    );
+  }
+  if (unitPriceUsdMicros < endpoint.upstream_price_usd_micros) {
+    throw new PlatformError(
+      400,
+      "x402_price_below_upstream_cost",
+      "x402 单目标价格不能低于当前上游成本。",
+    );
+  }
+  if (
+    body.enabled &&
+    (endpoint.enabled !== 1 ||
+      endpoint.read_only !== 1 ||
+      endpoint.price_verified !== 1 ||
+      endpoint.safety_classification !== "safe_data_read" ||
+      endpoint.safety_policy_version !== CATALOG_SAFETY_POLICY_VERSION ||
+      endpoint.present_in_latest !== 1)
+  ) {
+    throw new PlatformError(
+      409,
+      "x402_endpoint_not_eligible",
+      "只有已发布、只读、已核价且属于最新安全目录的端点才能启用 x402。",
+    );
+  }
+  const existing = await db
+    .prepare(
+      `SELECT enabled, unit_price_usd_micros, max_batch_size, revision
+       FROM endpoint_x402_config WHERE path = ?`,
+    )
+    .bind(path)
+    .first<{
+      enabled: number;
+      unit_price_usd_micros: number;
+      max_batch_size: number;
+      revision: number;
+    }>();
+  if ((existing?.revision ?? 0) !== expectedRevision) {
+    throw new PlatformError(
+      409,
+      "x402_config_conflict",
+      "x402 配置已变化，请刷新后重试。",
+    );
+  }
+  const nextRevision = expectedRevision + 1;
+  const audit = await prepareAdminAuditStatement(db, request, {
+    action: "catalog.x402_config_updated",
+    targetType: "catalog_endpoint",
+    targetId: path,
+    details: {
+      before: existing
+        ? {
+            enabled: existing.enabled === 1,
+            unitPriceUsdMicros: existing.unit_price_usd_micros,
+            maxBatchSize: existing.max_batch_size,
+            revision: existing.revision,
+          }
+        : null,
+      after: {
+        enabled: body.enabled,
+        unitPriceUsdMicros,
+        maxBatchSize,
+        revision: nextRevision,
+      },
+    },
+  });
+  const statement = existing
+    ? db
+        .prepare(
+          `UPDATE endpoint_x402_config
+           SET enabled = ?, unit_price_usd_micros = ?,
+               max_batch_size = ?, revision = revision + 1,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE path = ? AND revision = ?`,
+        )
+        .bind(
+          body.enabled ? 1 : 0,
+          unitPriceUsdMicros,
+          maxBatchSize,
+          path,
+          expectedRevision,
+        )
+    : db
+        .prepare(
+          `INSERT INTO endpoint_x402_config
+           (path, enabled, unit_price_usd_micros, max_batch_size,
+            revision, updated_at)
+           VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP)`,
+        )
+        .bind(
+          path,
+          body.enabled ? 1 : 0,
+          unitPriceUsdMicros,
+          maxBatchSize,
+        );
+  const results = await db.batch([statement, audit]);
+  if (
+    Number(results[0]?.meta?.changes ?? 0) !== 1 ||
+    Number(results[1]?.meta?.changes ?? 0) !== 1
+  ) {
+    throw new PlatformError(
+      409,
+      "x402_config_conflict",
+      "x402 配置更新冲突，请刷新后重试。",
+    );
+  }
+  marketplaceOverlayCache.delete(env as object);
+  return jsonResponse(
+    {
+      config: {
+        path,
+        enabled: body.enabled,
+        unitPriceUsdMicros,
+        maxBatchSize,
+        revision: nextRevision,
+      },
+      runtime: x402Runtime(env),
+    },
+    200,
+    requestId,
+  );
+}
+
+function publicX402Batch(batch: X402BatchRecord) {
+  const payer = batch.payer_address;
+  return {
+    id: batch.id,
+    endpoint: batch.endpoint_path,
+    status: batch.status,
+    verifiedQuantity: batch.verified_quantity,
+    unitPriceUsdMicros: batch.unit_price_usd_micros,
+    amountUsdcAtomic: batch.amount_usdc_atomic,
+    network: batch.network,
+    asset: batch.asset,
+    payer:
+      payer && payer.length === 42
+        ? `${payer.slice(0, 8)}…${payer.slice(-6)}`
+        : null,
+    transaction: batch.transaction_hash,
+    paymentStatus: batch.revenue_recognized_at
+      ? "settled"
+      : batch.status === "settlement_failed"
+        ? "review_required"
+        : batch.status === "payment_rejected"
+          ? "rejected"
+          : "pending",
+    revenueStatus: batch.revenue_recognized_at
+      ? "recognized"
+      : "not_recognized",
+    balanceImpactUsdMicros: 0,
+    failureCode: batch.failure_code,
+    quotedAt: batch.quoted_at,
+    expiresAt: batch.expires_at,
+    settledAt: batch.settled_at,
+    revenueRecognizedAt: batch.revenue_recognized_at,
+    executionStartedAt: batch.execution_started_at,
+    completedAt: batch.completed_at,
+    updatedAt: batch.updated_at,
+  };
+}
+
+function adminX402Batch(batch: X402BatchRecord) {
+  return {
+    ...publicX402Batch(batch),
+    payer: batch.payer_address,
+    payTo: batch.pay_to,
+    upstreamCostUsdMicros: batch.upstream_cost_usd_micros,
+    grossMarginUsdMicros:
+      batch.amount_usdc_atomic - batch.upstream_cost_usd_micros,
+    facilitatorMode: batch.facilitator_mode,
+    facilitatorReceipt: safeStoredJson(batch.facilitator_receipt_json),
+    requestHash: batch.request_hash,
+    paymentPayloadHash: batch.payment_payload_hash,
+    createdAt: batch.created_at,
+  };
+}
+
 async function handleCreateApiKey(
   request: Request,
   env: PlatformEnv,
@@ -2535,6 +3018,1152 @@ async function handleCreatePayment(
     );
   }
   return paymentOrderResponse(createdOrder, 201, requestId);
+}
+
+type X402BatchStatus =
+  | "quoted"
+  | "payment_verifying"
+  | "payment_rejected"
+  | "payment_verified"
+  | "settlement_pending"
+  | "settlement_failed"
+  | "settled"
+  | "executing"
+  | "succeeded"
+  | "execution_failed"
+  | "expired";
+
+type X402BatchRecord = {
+  id: string;
+  idempotency_hash: string;
+  endpoint_path: string;
+  request_hash: string;
+  verified_quantity: number;
+  unit_price_usd_micros: number;
+  amount_usdc_atomic: number;
+  upstream_cost_usd_micros: number;
+  status: X402BatchStatus;
+  network: string;
+  asset: string;
+  pay_to: string;
+  payment_requirements_json: string;
+  payment_payload_hash: string | null;
+  payer_address: string | null;
+  transaction_hash: string | null;
+  facilitator_mode: string;
+  facilitator_receipt_json: string | null;
+  execution_response_json: string | null;
+  failure_code: string | null;
+  created_at: string;
+  quoted_at: string;
+  expires_at: string;
+  verified_at: string | null;
+  settled_at: string | null;
+  revenue_recognized_at: string | null;
+  execution_started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+};
+
+type X402CatalogRecord = CatalogRecord & {
+  upstream_cost_usd_micros: number;
+  x402_enabled: number;
+  x402_unit_price_usd_micros: number;
+  x402_max_batch_size: number;
+  x402_revision: number;
+  reconciliation_recent: number;
+};
+
+type NormalizedX402Batch = {
+  endpoint: string;
+  requests: Record<string, unknown>[];
+};
+
+async function handleX402Batch(
+  request: Request,
+  env: PlatformEnv,
+  ctx: WorkerExecutionContext,
+  requestId: string,
+): Promise<Response> {
+  const apiKey = bearerToken(request);
+  if (apiKey?.startsWith("rb_live_")) {
+    throw new PlatformError(
+      400,
+      "api_key_not_used_for_x402",
+      "x402 批量入口使用调用方钱包签名付款，不接受 API Key 作为付款凭据。标准 /v1 接口才使用 API Key 与预充值余额。",
+    );
+  }
+  const runtime = x402Runtime(env);
+  if (!runtime.enabled) {
+    throw new PlatformError(
+      503,
+      "x402_disabled",
+      "x402 Agent 批量入口当前未启用；标准 API Key 与预充值余额调用不受影响。",
+    );
+  }
+  if (!runtime.configured || !runtime.payTo) {
+    throw new PlatformError(
+      503,
+      "x402_not_configured",
+      `x402 结算配置尚未完成：${runtime.missing.join(", ") || "unknown"}。`,
+    );
+  }
+  const readiness = await operationalReadiness(env);
+  if (
+    !readiness.capabilities.schemaReady ||
+    !readiness.capabilities.proxyEnabled ||
+    !readiness.capabilities.catalogReady ||
+    !readiness.capabilities.reconciliationConfigured
+  ) {
+    throw new PlatformError(
+      503,
+      "x402_service_not_ready",
+      "目录、上游路由、迁移或自动对账尚未就绪，x402 不会发出付款报价。",
+    );
+  }
+
+  const rawBody = await readBodyText(request, MAX_PROXY_BODY_BYTES);
+  const batch = normalizeX402Batch(rawBody);
+  const canonicalRequest = JSON.stringify(sortObjectDeep(batch));
+  const requestHash = await sha256Hex(canonicalRequest);
+  const idempotencyKey = requireIdempotencyKey(request);
+  const idempotencyHash = await sha256Hex(`x402:${idempotencyKey}`);
+  const db = requireDb(env);
+  const existing = await x402BatchByIdempotency(db, idempotencyHash);
+  if (existing) {
+    if (existing.request_hash !== requestHash) {
+      throw new PlatformError(
+        409,
+        "x402_idempotency_conflict",
+        "该 Idempotency-Key 已用于不同的 x402 批次，请为新批次生成新的幂等键。",
+      );
+    }
+    if (existing.endpoint_path !== batch.endpoint) {
+      throw new PlatformError(
+        409,
+        "x402_batch_endpoint_conflict",
+        "重试批次与原报价端点不一致。",
+      );
+    }
+    return await continueX402Batch(
+      request,
+      env,
+      ctx,
+      requestId,
+      db,
+      existing,
+      batch,
+    );
+  }
+
+  const catalog = await x402CatalogForQuote(db, batch.endpoint);
+  assertX402CatalogCallable(catalog);
+  if (batch.requests.length > catalog.x402_max_batch_size) {
+    throw new PlatformError(
+      400,
+      "x402_batch_limit_exceeded",
+      `该数据产品每批最多 ${catalog.x402_max_batch_size} 个目标。`,
+    );
+  }
+  validateX402Targets(batch, catalog);
+
+  const verifiedQuantity = batch.requests.length;
+  const amountUsdcAtomic =
+    verifiedQuantity * catalog.x402_unit_price_usd_micros;
+  if (
+    !Number.isSafeInteger(amountUsdcAtomic) ||
+    amountUsdcAtomic < 1 ||
+    amountUsdcAtomic > 100_000_000_000
+  ) {
+    throw new PlatformError(
+      400,
+      "x402_batch_amount_invalid",
+      "该批次总价超出首版同步结算范围。",
+    );
+  }
+  const batchId = `xb_${randomBase64Url(24)}`;
+  const requirements = buildX402Requirements({
+    amountUsdcAtomic,
+    payTo: runtime.payTo,
+    maxTimeoutSeconds: 300,
+  });
+  const binding: X402BatchBinding = {
+    batchId,
+    requestHash,
+    endpoint: batch.endpoint,
+    verifiedQuantity,
+    unitPriceUsdMicros: catalog.x402_unit_price_usd_micros,
+    amountUsdcAtomic,
+  };
+  const paymentRequired = buildX402PaymentRequired({
+    origin: canonicalAppOrigin(request, env),
+    requirements,
+    binding,
+  });
+  const createdAt = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
+  const upstreamCostUsdMicros =
+    verifiedQuantity * catalog.upstream_cost_usd_micros;
+  try {
+    await db
+      .prepare(
+        `INSERT INTO x402_batches
+         (id, idempotency_hash, endpoint_path, request_hash,
+          verified_quantity, unit_price_usd_micros, amount_usdc_atomic,
+          upstream_cost_usd_micros, status, network, asset, pay_to,
+          payment_requirements_json, facilitator_mode, created_at,
+          quoted_at, expires_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        batchId,
+        idempotencyHash,
+        batch.endpoint,
+        requestHash,
+        verifiedQuantity,
+        catalog.x402_unit_price_usd_micros,
+        amountUsdcAtomic,
+        upstreamCostUsdMicros,
+        X402_NETWORK,
+        X402_ASSET,
+        runtime.payTo,
+        JSON.stringify(paymentRequired),
+        runtime.facilitatorProvider,
+        createdAt,
+        createdAt,
+        expiresAt,
+        createdAt,
+      )
+      .run();
+  } catch {
+    const raced = await x402BatchByIdempotency(db, idempotencyHash);
+    if (!raced || raced.request_hash !== requestHash) {
+      throw new PlatformError(
+        409,
+        "x402_quote_conflict",
+        "批次报价正在生成，请使用同一 Idempotency-Key 重试。",
+      );
+    }
+    return await continueX402Batch(
+      request,
+      env,
+      ctx,
+      requestId,
+      db,
+      raced,
+      batch,
+    );
+  }
+  return x402QuoteResponse(paymentRequired, batchId, requestId);
+}
+
+async function continueX402Batch(
+  request: Request,
+  env: PlatformEnv,
+  ctx: WorkerExecutionContext,
+  requestId: string,
+  db: D1Database,
+  stored: X402BatchRecord,
+  batch: NormalizedX402Batch,
+): Promise<Response> {
+  if (
+    stored.status === "succeeded" ||
+    stored.status === "execution_failed"
+  ) {
+    return x402CompletedResponse(stored, requestId);
+  }
+  if (
+    stored.status === "payment_verifying" ||
+    stored.status === "payment_verified" ||
+    stored.status === "settlement_pending" ||
+    stored.status === "executing"
+  ) {
+    throw new PlatformError(
+      409,
+      "x402_batch_in_progress",
+      `批次 ${stored.id} 正在处理（${stored.status}），请稍后查询状态，不要更换付款凭据。`,
+    );
+  }
+  if (stored.status === "settlement_failed") {
+    throw new PlatformError(
+      409,
+      "x402_settlement_review_required",
+      `批次 ${stored.id} 的结算结果不明确，已停止自动重试以避免重复结算。请在运营后台核对。`,
+    );
+  }
+  if (stored.status === "settled") {
+    return await executeSettledX402Batch(
+      env,
+      ctx,
+      requestId,
+      db,
+      stored,
+      batch,
+    );
+  }
+  if (
+    stored.status === "expired" ||
+    Date.parse(stored.expires_at) <= Date.now()
+  ) {
+    await db
+      .prepare(
+        `UPDATE x402_batches
+         SET status = 'expired', failure_code = 'quote_expired',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status IN ('quoted', 'payment_rejected')`,
+      )
+      .bind(stored.id)
+      .run();
+    throw new PlatformError(
+      410,
+      "x402_quote_expired",
+      `批次 ${stored.id} 的固定报价已过期，请使用新的 Idempotency-Key 重新校验并报价。`,
+    );
+  }
+
+  const paymentRequired = parseStoredX402PaymentRequired(
+    stored.payment_requirements_json,
+  );
+  const signature = request.headers.get(X402_PAYMENT_SIGNATURE_HEADER);
+  if (!signature) {
+    return x402QuoteResponse(paymentRequired, stored.id, requestId);
+  }
+  let paymentPayload: X402PaymentPayload;
+  try {
+    paymentPayload = decodeX402PaymentSignature(signature);
+    assertX402PaymentBinding({ paymentPayload, paymentRequired });
+  } catch (error) {
+    if (error instanceof X402ProtocolError) {
+      throw new PlatformError(400, error.code, error.message);
+    }
+    throw error;
+  }
+  const paymentPayloadHash = await sha256Hex(
+    JSON.stringify(sortObjectDeep(paymentPayload)),
+  );
+  let claimed: D1Result;
+  try {
+    claimed = await db
+      .prepare(
+        `UPDATE x402_batches
+         SET status = 'payment_verifying', payment_payload_hash = ?,
+             failure_code = NULL, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND request_hash = ?
+           AND status IN ('quoted', 'payment_rejected')
+           AND datetime(expires_at) > datetime('now')`,
+      )
+      .bind(paymentPayloadHash, stored.id, stored.request_hash)
+      .run();
+  } catch {
+    throw new PlatformError(
+      409,
+      "x402_payment_replay",
+      "该钱包支付凭据已经绑定到其他批次，不能重复使用。",
+    );
+  }
+  if (Number(claimed.meta?.changes ?? 0) !== 1) {
+    throw new PlatformError(
+      409,
+      "x402_batch_state_conflict",
+      "批次状态已变化，请查询批次状态后再继续。",
+    );
+  }
+
+  const requirements = paymentRequired.accepts[0];
+  let verification;
+  try {
+    verification = await verifyX402Payment({
+      env,
+      paymentPayload,
+      paymentRequirements: requirements,
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message.slice(0, 500) : "unknown";
+    await db
+      .prepare(
+        `UPDATE x402_batches
+         SET status = 'payment_rejected', failure_code = ?,
+             facilitator_receipt_json = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status = 'payment_verifying'`,
+      )
+      .bind(
+        error instanceof X402ProtocolError
+          ? error.code
+          : "verification_unavailable",
+        JSON.stringify({ success: false, stage: "verify", message }),
+        stored.id,
+      )
+      .run();
+    throw new PlatformError(
+      402,
+      "x402_verification_failed",
+      `x402 付款验证未通过：${message}`,
+    );
+  }
+  if (!verification.isValid) {
+    await db
+      .prepare(
+        `UPDATE x402_batches
+         SET status = 'payment_rejected', payer_address = ?,
+             failure_code = ?, facilitator_receipt_json = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status = 'payment_verifying'`,
+      )
+      .bind(
+        verification.payer ?? null,
+        verification.invalidReason ?? "payment_invalid",
+        JSON.stringify(verification),
+        stored.id,
+      )
+      .run();
+    const challenged = buildX402PaymentRequired({
+      origin: canonicalAppOrigin(request, env),
+      requirements,
+      binding: paymentRequired.extensions.relaybaseBatch.info,
+      error: verification.invalidReason ?? "Payment verification failed",
+    });
+    return x402QuoteResponse(challenged, stored.id, requestId);
+  }
+  const verifiedAt = new Date().toISOString();
+  const verified = await db
+    .prepare(
+      `UPDATE x402_batches
+       SET status = 'payment_verified', payer_address = ?,
+           verified_at = ?, facilitator_receipt_json = ?,
+           updated_at = ?
+       WHERE id = ? AND status = 'payment_verifying'
+         AND payment_payload_hash = ?`,
+    )
+    .bind(
+      verification.payer ?? null,
+      verifiedAt,
+      JSON.stringify(verification),
+      verifiedAt,
+      stored.id,
+      paymentPayloadHash,
+    )
+    .run();
+  if (Number(verified.meta?.changes ?? 0) !== 1) {
+    throw new PlatformError(
+      409,
+      "x402_batch_state_conflict",
+      "付款验证完成，但批次状态已变化；未发起重复结算。",
+    );
+  }
+  const settlementClaim = await db
+    .prepare(
+      `UPDATE x402_batches
+       SET status = 'settlement_pending', updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND status = 'payment_verified'
+         AND payment_payload_hash = ?`,
+    )
+    .bind(stored.id, paymentPayloadHash)
+    .run();
+  if (Number(settlementClaim.meta?.changes ?? 0) !== 1) {
+    throw new PlatformError(
+      409,
+      "x402_settlement_conflict",
+      "批次结算已由其他请求接管。",
+    );
+  }
+
+  let settlement;
+  try {
+    settlement = await settleX402Payment({
+      env,
+      paymentPayload,
+      paymentRequirements: requirements,
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message.slice(0, 500) : "unknown";
+    await db
+      .prepare(
+        `UPDATE x402_batches
+         SET status = 'settlement_failed', failure_code = ?,
+             facilitator_receipt_json = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status = 'settlement_pending'`,
+      )
+      .bind(
+        error instanceof X402ProtocolError
+          ? error.code
+          : "settlement_unavailable",
+        JSON.stringify({ success: false, stage: "settle", message }),
+        stored.id,
+      )
+      .run();
+    throw new PlatformError(
+      402,
+      "x402_settlement_failed",
+      `x402 结算未确认：${message}。系统不会自动重复结算。`,
+    );
+  }
+  if (
+    !settlement.success ||
+    settlement.network !== X402_NETWORK ||
+    !isX402TransactionHash(settlement.transaction)
+  ) {
+    const failureCode =
+      settlement.errorReason ??
+      (settlement.network !== X402_NETWORK
+        ? "settlement_network_mismatch"
+        : "settlement_receipt_invalid");
+    await db
+      .prepare(
+        `UPDATE x402_batches
+         SET status = 'settlement_failed', payer_address = COALESCE(?, payer_address),
+             failure_code = ?, facilitator_receipt_json = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status = 'settlement_pending'`,
+      )
+      .bind(
+        settlement.payer ?? null,
+        failureCode,
+        JSON.stringify(settlement),
+        stored.id,
+      )
+      .run();
+    throw new PlatformError(
+      402,
+      "x402_settlement_failed",
+      `x402 链上结算没有返回可确认的 Base 交易回执：${failureCode}。`,
+    );
+  }
+
+  const settledAt = new Date().toISOString();
+  let settlementStored: D1Result;
+  try {
+    settlementStored = await db
+      .prepare(
+        `UPDATE x402_batches
+         SET status = 'settled', payer_address = COALESCE(?, payer_address),
+             transaction_hash = ?, facilitator_receipt_json = ?,
+             settled_at = ?, revenue_recognized_at = ?,
+             failure_code = NULL, updated_at = ?
+         WHERE id = ? AND status = 'settlement_pending'
+           AND payment_payload_hash = ?`,
+      )
+      .bind(
+        settlement.payer ?? null,
+        settlement.transaction,
+        JSON.stringify(settlement),
+        settledAt,
+        settledAt,
+        settledAt,
+        stored.id,
+        paymentPayloadHash,
+      )
+      .run();
+  } catch {
+    throw new PlatformError(
+      409,
+      "x402_receipt_conflict",
+      "链上交易回执已存在于其他批次，系统已停止执行数据请求。",
+    );
+  }
+  if (Number(settlementStored.meta?.changes ?? 0) !== 1) {
+    throw new PlatformError(
+      409,
+      "x402_receipt_persistence_failed",
+      "链上结算完成，但本地回执未能原子确认；请在运营后台核对后再执行。",
+    );
+  }
+  const settled = await x402BatchById(db, stored.id);
+  if (!settled) {
+    throw new PlatformError(
+      500,
+      "x402_batch_missing",
+      "结算批次记录暂时不可用。",
+    );
+  }
+  return await executeSettledX402Batch(
+    env,
+    ctx,
+    requestId,
+    db,
+    settled,
+    batch,
+  );
+}
+
+async function executeSettledX402Batch(
+  env: PlatformEnv,
+  ctx: WorkerExecutionContext,
+  requestId: string,
+  db: D1Database,
+  stored: X402BatchRecord,
+  batch: NormalizedX402Batch,
+): Promise<Response> {
+  const claimedAt = new Date().toISOString();
+  const claimed = await db
+    .prepare(
+      `UPDATE x402_batches
+       SET status = 'executing', execution_started_at = ?,
+           updated_at = ?
+       WHERE id = ? AND status = 'settled'
+         AND transaction_hash IS NOT NULL
+         AND revenue_recognized_at IS NOT NULL`,
+    )
+    .bind(claimedAt, claimedAt, stored.id)
+    .run();
+  if (Number(claimed.meta?.changes ?? 0) !== 1) {
+    const current = await x402BatchById(db, stored.id);
+    if (
+      current?.status === "succeeded" ||
+      current?.status === "execution_failed"
+    ) {
+      return x402CompletedResponse(current, requestId);
+    }
+    throw new PlatformError(
+      409,
+      "x402_execution_conflict",
+      `批次 ${stored.id} 已由其他请求开始执行。`,
+    );
+  }
+
+  let execution: {
+    success: boolean;
+    results: Array<Record<string, unknown>>;
+    error?: string;
+  };
+  try {
+    execution = await executeX402Targets(env, ctx, db, stored, batch);
+  } catch (error) {
+    execution = {
+      success: false,
+      results: [],
+      error:
+        error instanceof Error
+          ? error.message.slice(0, 1_000)
+          : "Batch execution failed.",
+    };
+  }
+  const completedAt = new Date().toISOString();
+  const responsePayload = {
+    success: execution.success,
+    batch: {
+      id: stored.id,
+      endpoint: stored.endpoint_path,
+      status: execution.success ? "succeeded" : "execution_failed",
+      verifiedQuantity: stored.verified_quantity,
+      unitPriceUsdMicros: stored.unit_price_usd_micros,
+      amountUsdcAtomic: stored.amount_usdc_atomic,
+      network: stored.network,
+      asset: stored.asset,
+      payer: stored.payer_address,
+      transaction: stored.transaction_hash,
+      settledAt: stored.settled_at,
+      revenueStatus: "recognized",
+      revenueRecognizedAt: stored.revenue_recognized_at,
+    },
+    execution: {
+      mode: "synchronous",
+      chargedAs: "one_batch_one_payment",
+      completedAt,
+      error: execution.error ?? null,
+    },
+    results: execution.results,
+  };
+  const serialized = JSON.stringify(responsePayload);
+  const status: X402BatchStatus = execution.success
+    ? "succeeded"
+    : "execution_failed";
+  await db
+    .prepare(
+      `UPDATE x402_batches
+       SET status = ?, execution_response_json = ?,
+           failure_code = ?, completed_at = ?, updated_at = ?
+       WHERE id = ? AND status = 'executing'`,
+    )
+    .bind(
+      status,
+      serialized,
+      execution.success ? null : "batch_execution_failed",
+      completedAt,
+      completedAt,
+      stored.id,
+    )
+    .run();
+  const receipt = safeStoredJson(stored.facilitator_receipt_json);
+  return jsonResponse(
+    responsePayload,
+    execution.success ? 200 : 502,
+    requestId,
+    {
+      [X402_PAYMENT_RESPONSE_HEADER]: encodeX402Header(receipt),
+      [X402_BATCH_ID_HEADER]: stored.id,
+      "access-control-expose-headers": [
+        X402_PAYMENT_RESPONSE_HEADER.toUpperCase(),
+        X402_BATCH_ID_HEADER,
+      ].join(", "),
+    },
+  );
+}
+
+async function executeX402Targets(
+  env: PlatformEnv,
+  ctx: WorkerExecutionContext,
+  db: D1Database,
+  stored: X402BatchRecord,
+  batch: NormalizedX402Batch,
+): Promise<{
+  success: boolean;
+  results: Array<Record<string, unknown>>;
+  error?: string;
+}> {
+  const catalog = await x402CatalogForQuote(db, stored.endpoint_path);
+  if (
+    catalog.enabled !== 1 ||
+    catalog.read_only !== 1 ||
+    catalog.safety_classification !== "safe_data_read" ||
+    catalog.safety_policy_version !== CATALOG_SAFETY_POLICY_VERSION ||
+    catalog.sync_generation == null ||
+    catalog.coverage_verified !== 1
+  ) {
+    throw new Error(
+      "The data route became unavailable after settlement; no alternate route was used.",
+    );
+  }
+  const sourceConfig = await loadUpstreamSourceConfig(db, env, true);
+  const credential = await resolveUpstreamProviderCredential(
+    env,
+    db,
+    sourceConfig,
+  );
+  if (
+    !credential ||
+    !upstreamProviderCredentialAllowsPath(
+      credential.scopes,
+      stored.endpoint_path,
+      sourceConfig.apiPathPrefix,
+    )
+  ) {
+    throw new Error(
+      "The active upstream credential cannot execute this data route.",
+    );
+  }
+  if (credential.id) {
+    ctx.waitUntil(
+      db
+        .prepare(
+          `UPDATE upstream_credentials
+           SET last_used_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND revoked_at IS NULL`,
+        )
+        .bind(credential.id)
+        .run(),
+    );
+  }
+  const concurrency = Math.min(
+    8,
+    clampInteger(env.UPSTREAM_RATE_LIMIT_RPS, 8, 1, 100),
+  );
+  const results: Array<Record<string, unknown>> = new Array(
+    batch.requests.length,
+  );
+  let cursor = 0;
+  const workers = Array.from(
+    { length: Math.min(concurrency, batch.requests.length) },
+    async () => {
+      while (cursor < batch.requests.length) {
+        const index = cursor;
+        cursor += 1;
+        results[index] = await executeX402Target({
+          env,
+          sourceConfig,
+          credential,
+          catalog,
+          target: batch.requests[index],
+          index,
+        });
+      }
+    },
+  );
+  await Promise.all(workers);
+  const failed = results.filter((result) => result.success !== true).length;
+  return {
+    success: failed === 0,
+    results,
+    ...(failed > 0
+      ? {
+          error: `${failed} of ${results.length} targets failed after the single batch payment settled.`,
+        }
+      : {}),
+  };
+}
+
+async function executeX402Target(input: {
+  env: PlatformEnv;
+  sourceConfig: UpstreamSourceConfig;
+  credential: ResolvedUpstreamProviderCredential;
+  catalog: X402CatalogRecord;
+  target: Record<string, unknown>;
+  index: number;
+}): Promise<Record<string, unknown>> {
+  const upstreamUrl = new URL(
+    upstreamConfigUrl(
+      input.sourceConfig,
+      `${input.sourceConfig.apiPathPrefix}${input.catalog.path}`,
+    ),
+  );
+  let body: string | undefined;
+  if (input.catalog.http_method === "GET") {
+    for (const [key, value] of Object.entries(input.target)) {
+      if (Array.isArray(value)) {
+        for (const item of value) upstreamUrl.searchParams.append(key, String(item));
+      } else if (value !== null) {
+        upstreamUrl.searchParams.set(key, String(value));
+      }
+    }
+  } else {
+    body = JSON.stringify(input.target);
+  }
+  const headers = new Headers({
+    authorization: `Bearer ${input.credential.secret}`,
+    accept: "application/json",
+    "user-agent": "RelayBase-x402/1.0",
+  });
+  if (body) headers.set("content-type", "application/json");
+  const startedAt = Date.now();
+  try {
+    const response = await fetch(upstreamUrl, {
+      method: input.catalog.http_method,
+      headers,
+      body,
+      redirect: "error",
+      signal: AbortSignal.timeout(
+        clampInteger(input.env.UPSTREAM_TIMEOUT_MS, 45_000, 30_000, 60_000),
+      ),
+    });
+    if (!response.ok) {
+      await response.body?.cancel("x402 upstream error");
+      return {
+        index: input.index,
+        success: false,
+        statusCode: response.status,
+        latencyMs: Date.now() - startedAt,
+        error: "upstream_request_failed",
+      };
+    }
+    const payload = await readResponseJson(
+      response,
+      Math.min(
+        clampInteger(
+          input.env.UPSTREAM_MAX_RESPONSE_BYTES,
+          8 * 1024 * 1024,
+          64 * 1024,
+          16 * 1024 * 1024,
+        ),
+        512 * 1024,
+      ),
+      "x402_upstream_invalid_response",
+    );
+    const data =
+      isPlainRecord(payload) &&
+      Object.hasOwn(payload, "data") &&
+      (Object.hasOwn(payload, "code") ||
+        Object.hasOwn(payload, "request_id") ||
+        Object.hasOwn(payload, "requestId"))
+        ? payload.data
+        : payload;
+    return {
+      index: input.index,
+      success: true,
+      statusCode: 200,
+      latencyMs: Date.now() - startedAt,
+      data,
+    };
+  } catch (error) {
+    return {
+      index: input.index,
+      success: false,
+      statusCode: 502,
+      latencyMs: Date.now() - startedAt,
+      error:
+        error instanceof PlatformError
+          ? error.code
+          : "upstream_unavailable",
+    };
+  }
+}
+
+function normalizeX402Batch(rawBody: string): NormalizedX402Batch {
+  let value: unknown;
+  try {
+    value = JSON.parse(rawBody);
+  } catch {
+    throw new PlatformError(
+      400,
+      "invalid_x402_batch",
+      "x402 批次请求必须是有效 JSON。",
+    );
+  }
+  if (
+    !isPlainRecord(value) ||
+    typeof value.endpoint !== "string" ||
+    !Array.isArray(value.requests) ||
+    value.requests.length < 1 ||
+    value.requests.length > 1_000 ||
+    containsUnsafeJsonNumber(value)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_x402_batch",
+      "x402 批次必须包含 endpoint 与 1–1000 个 requests。",
+    );
+  }
+  const endpoint = normalizeCatalogPath(value.endpoint);
+  if (endpoint === X402_BATCH_PATH) {
+    throw new PlatformError(
+      400,
+      "invalid_x402_endpoint",
+      "x402 批次端点不能递归调用自身。",
+    );
+  }
+  const requests = value.requests.map((target, index) => {
+    if (
+      !isPlainRecord(target) ||
+      Object.keys(target).length > 100
+    ) {
+      throw new PlatformError(
+        400,
+        "invalid_x402_target",
+        `批次目标 ${index + 1} 必须是最多 100 个字段的 JSON 对象。`,
+      );
+    }
+    return target;
+  });
+  return { endpoint, requests };
+}
+
+function validateX402Targets(
+  batch: NormalizedX402Batch,
+  catalog: X402CatalogRecord,
+): void {
+  for (const [index, target] of batch.requests.entries()) {
+    if (catalog.http_method === "GET") {
+      const url = new URL(`https://relaybase.invalid${batch.endpoint}`);
+      for (const [key, value] of Object.entries(target)) {
+        const values = Array.isArray(value) ? value : [value];
+        if (
+          values.length > 100 ||
+          values.some(
+            (item) =>
+              item !== null &&
+              typeof item !== "string" &&
+              typeof item !== "number" &&
+              typeof item !== "boolean",
+          )
+        ) {
+          throw new PlatformError(
+            400,
+            "invalid_x402_target",
+            `GET 批次目标 ${index + 1} 只能包含标量或标量数组查询参数。`,
+          );
+        }
+        for (const item of values) {
+          if (item !== null) url.searchParams.append(key, String(item));
+        }
+      }
+      validateCatalogProxyInputs(url, null);
+    } else {
+      validateCatalogProxyInputs(
+        new URL(`https://relaybase.invalid${batch.endpoint}`),
+        target,
+      );
+    }
+  }
+}
+
+async function x402CatalogForQuote(
+  db: D1Database,
+  path: string,
+): Promise<X402CatalogRecord> {
+  let row: X402CatalogRecord | null;
+  try {
+    row = await db
+      .prepare(
+        `SELECT c.path, c.platform, c.http_method, c.data_type, c.tags_json,
+                c.surface, c.operation_id, c.upstream_price_usd_micros,
+                c.upstream_price_usd_micros AS upstream_cost_usd_micros,
+                c.customer_price_usd_micros, c.price_verified,
+                c.enabled, c.read_only, c.safety_classification,
+                c.safety_policy_version, c.sync_generation,
+                x.enabled AS x402_enabled,
+                x.unit_price_usd_micros AS x402_unit_price_usd_micros,
+                x.max_batch_size AS x402_max_batch_size,
+                x.revision AS x402_revision,
+                EXISTS(
+                  SELECT 1 FROM catalog_sync_state
+                  WHERE id = 1 AND last_success_generation = c.sync_generation
+                    AND ${CATALOG_COVERAGE_WHERE}
+                ) AS coverage_verified,
+                EXISTS(
+                  SELECT 1 FROM operation_heartbeats
+                  WHERE name = 'reconciliation'
+                    AND datetime(last_success_at) > datetime('now', '-5 minutes')
+                ) AS reconciliation_recent
+         FROM endpoint_catalog c
+         JOIN endpoint_x402_config x ON x.path = c.path
+         WHERE c.path = ?`,
+      )
+      .bind(path)
+      .first<X402CatalogRecord>();
+  } catch {
+    throw new PlatformError(
+      503,
+      "x402_schema_unavailable",
+      "x402 数据库迁移尚未完成。",
+    );
+  }
+  if (!row) {
+    throw new PlatformError(
+      404,
+      "x402_endpoint_not_found",
+      "该数据产品没有启用 x402 Agent 批量入口。",
+    );
+  }
+  strictStoredCatalogTaxonomy(row);
+  return row;
+}
+
+function assertX402CatalogCallable(catalog: X402CatalogRecord): void {
+  if (
+    catalog.x402_enabled !== 1 ||
+    catalog.enabled !== 1 ||
+    catalog.read_only !== 1 ||
+    catalog.price_verified !== 1 ||
+    catalog.coverage_verified !== 1 ||
+    catalog.reconciliation_recent !== 1 ||
+    catalog.safety_classification !== "safe_data_read" ||
+    catalog.safety_policy_version !== CATALOG_SAFETY_POLICY_VERSION ||
+    isHardProhibitedCatalogOperation(
+      catalog.path,
+      catalog.http_method as "GET" | "POST",
+    )
+  ) {
+    throw new PlatformError(
+      409,
+      "x402_endpoint_unavailable",
+      "该数据产品当前不满足目录、价格、安全、上游或对账条件，系统不会发出付款报价。",
+    );
+  }
+}
+
+async function x402BatchByIdempotency(
+  db: D1Database,
+  idempotencyHash: string,
+): Promise<X402BatchRecord | null> {
+  return await db
+    .prepare(`SELECT * FROM x402_batches WHERE idempotency_hash = ?`)
+    .bind(idempotencyHash)
+    .first<X402BatchRecord>();
+}
+
+async function x402BatchById(
+  db: D1Database,
+  id: string,
+): Promise<X402BatchRecord | null> {
+  return await db
+    .prepare(`SELECT * FROM x402_batches WHERE id = ?`)
+    .bind(id)
+    .first<X402BatchRecord>();
+}
+
+function parseStoredX402PaymentRequired(
+  value: string,
+): X402PaymentRequired {
+  try {
+    const parsed = JSON.parse(value) as X402PaymentRequired;
+    if (
+      parsed.x402Version !== 2 ||
+      !Array.isArray(parsed.accepts) ||
+      parsed.accepts.length !== 1 ||
+      parsed.accepts[0]?.scheme !== "exact" ||
+      parsed.accepts[0]?.network !== X402_NETWORK ||
+      parsed.accepts[0]?.asset !== X402_ASSET ||
+      !parsed.extensions?.relaybaseBatch?.info?.batchId
+    ) {
+      throw new Error("invalid stored requirements");
+    }
+    return parsed;
+  } catch {
+    throw new PlatformError(
+      503,
+      "x402_quote_invalid",
+      "已保存的 x402 报价记录无效，已停止付款。",
+    );
+  }
+}
+
+function x402QuoteResponse(
+  paymentRequired: X402PaymentRequired,
+  batchId: string,
+  requestId: string,
+): Response {
+  return jsonResponse(
+    {
+      error: {
+        code: "x402_payment_required",
+        message:
+          "整批已完成校验与计数。请由调用方钱包签署这一笔固定总价的 Base USDC exact 付款，并以相同请求体和 Idempotency-Key 重试。",
+        requestId,
+      },
+      batch: {
+        id: batchId,
+        endpoint: paymentRequired.extensions.relaybaseBatch.info.endpoint,
+        status: "quoted",
+        verifiedQuantity:
+          paymentRequired.extensions.relaybaseBatch.info.verifiedQuantity,
+        unitPriceUsdMicros:
+          paymentRequired.extensions.relaybaseBatch.info.unitPriceUsdMicros,
+        amountUsdcAtomic:
+          paymentRequired.extensions.relaybaseBatch.info.amountUsdcAtomic,
+        paymentIdentity: "caller_wallet",
+        apiKeyUsedForPayment: false,
+      },
+      paymentRequired,
+    },
+    402,
+    requestId,
+    {
+      [X402_PAYMENT_REQUIRED_HEADER]: encodeX402Header(paymentRequired),
+      [X402_BATCH_ID_HEADER]: batchId,
+      "access-control-expose-headers": [
+        X402_PAYMENT_REQUIRED_HEADER.toUpperCase(),
+        X402_BATCH_ID_HEADER,
+      ].join(", "),
+    },
+  );
+}
+
+function x402CompletedResponse(
+  stored: X402BatchRecord,
+  requestId: string,
+): Response {
+  const response = safeStoredJson(stored.execution_response_json);
+  if (!response) {
+    throw new PlatformError(
+      503,
+      "x402_execution_receipt_missing",
+      "批次已完成但执行回执暂时不可用。",
+    );
+  }
+  const receipt = safeStoredJson(stored.facilitator_receipt_json);
+  return jsonResponse(
+    response,
+    stored.status === "succeeded" ? 200 : 502,
+    requestId,
+    {
+      [X402_PAYMENT_RESPONSE_HEADER]: encodeX402Header(receipt),
+      [X402_BATCH_ID_HEADER]: stored.id,
+      "access-control-expose-headers": [
+        X402_PAYMENT_RESPONSE_HEADER.toUpperCase(),
+        X402_BATCH_ID_HEADER,
+      ].join(", "),
+    },
+  );
 }
 
 async function handleNowPaymentsWebhook(
@@ -4091,6 +5720,7 @@ const EMPTY_MARKETPLACE_CATALOG: MarketplaceReference["catalog"] = {
 type MarketplaceOverlay = {
   rows: Map<string, MarketplaceOverlayRow>;
   catalogReady: boolean;
+  x402Available: boolean;
   catalog: MarketplaceReference["catalog"];
 };
 const marketplaceOverlayCache = new WeakMap<
@@ -4228,6 +5858,7 @@ async function loadMarketplaceCatalogOverlay(
     return {
       rows: new Map(),
       catalogReady: false,
+      x402Available: false,
       catalog: EMPTY_MARKETPLACE_CATALOG,
     };
   }
@@ -4236,15 +5867,19 @@ async function loadMarketplaceCatalogOverlay(
     return {
       rows: new Map(),
       catalogReady: false,
+      x402Available: false,
       catalog: EMPTY_MARKETPLACE_CATALOG,
     };
   }
   try {
+    const x402SchemaReady =
+      readiness.capabilities.x402SchemaReady === true;
     const config = await loadUpstreamSourceConfig(env.DB, env, false);
     if (!config) {
       return {
         rows: new Map(),
         catalogReady: false,
+        x402Available: false,
         catalog: EMPTY_MARKETPLACE_CATALOG,
       };
     }
@@ -4258,7 +5893,20 @@ async function loadMarketplaceCatalogOverlay(
               endpoint.customer_price_usd_micros,
               endpoint.price_verified, endpoint.enabled,
               endpoint.read_only, endpoint.safety_classification,
-              endpoint.safety_policy_version, endpoint.updated_at,
+              endpoint.safety_policy_version,
+              ${
+                x402SchemaReady
+                  ? `x402.enabled AS x402_enabled,
+                     x402.unit_price_usd_micros
+                       AS x402_unit_price_usd_micros,
+                     x402.max_batch_size AS x402_max_batch_size,
+                     x402.revision AS x402_revision`
+                  : `NULL AS x402_enabled,
+                     NULL AS x402_unit_price_usd_micros,
+                     NULL AS x402_max_batch_size,
+                     NULL AS x402_revision`
+              },
+              endpoint.updated_at,
               state.openapi_snapshot_hash
                 AS catalog_openapi_snapshot_hash,
               state.openapi_operation_count
@@ -4266,6 +5914,12 @@ async function loadMarketplaceCatalogOverlay(
               state.price_only_count AS catalog_price_only_count,
               state.last_success_generation AS catalog_generation
        FROM endpoint_catalog AS endpoint
+       ${
+         x402SchemaReady
+           ? `LEFT JOIN endpoint_x402_config AS x402
+                ON x402.path = endpoint.path`
+           : ""
+       }
        JOIN catalog_sync_state AS state
          ON state.id = 1
         AND endpoint.sync_generation = state.last_success_generation
@@ -4354,6 +6008,16 @@ async function loadMarketplaceCatalogOverlay(
         readOnly: Number(row.read_only) === 1,
         safetyClassification: row.safety_classification,
         safetyPolicyVersion: Number(row.safety_policy_version),
+        x402Enabled: Number(row.x402_enabled ?? 0) === 1,
+        x402UnitPriceUsdMicros:
+          row.x402_unit_price_usd_micros == null
+            ? null
+            : Number(row.x402_unit_price_usd_micros),
+        x402MaxBatchSize:
+          row.x402_max_batch_size == null
+            ? null
+            : Number(row.x402_max_batch_size),
+        x402Revision: Number(row.x402_revision ?? 0),
         rateLimitRps: null,
         updatedAt: row.updated_at,
         documentationStatus: "complete",
@@ -4377,6 +6041,10 @@ async function loadMarketplaceCatalogOverlay(
         readOnly: false,
         safetyClassification: "ambiguous",
         safetyPolicyVersion: CATALOG_SAFETY_POLICY_VERSION,
+        x402Enabled: false,
+        x402UnitPriceUsdMicros: null,
+        x402MaxBatchSize: null,
+        x402Revision: 0,
         rateLimitRps:
           row.rate_limit_rps == null ? null : Number(row.rate_limit_rps),
         updatedAt: row.updated_at,
@@ -4412,6 +6080,7 @@ async function loadMarketplaceCatalogOverlay(
         readiness.capabilities.proxyEnabled &&
         readiness.capabilities.reconciliationConfigured &&
         readiness.capabilities.reconciliationRecent,
+      x402Available: readiness.capabilities.x402Available === true,
       catalog: {
         revision: stateRow?.last_success_generation ?? null,
         updatedAt: latestUpdate ?? stateRow?.synced_at ?? null,
@@ -4426,6 +6095,7 @@ async function loadMarketplaceCatalogOverlay(
     return {
       rows: new Map(),
       catalogReady: false,
+      x402Available: false,
       catalog: EMPTY_MARKETPLACE_CATALOG,
     };
   }
@@ -4461,6 +6131,18 @@ function mergedMarketplaceEndpoints(
       verified: boolean;
     };
     rateLimitRps: number | null;
+    x402: {
+      enabled: boolean;
+      available: boolean;
+      route: typeof X402_BATCH_PATH;
+      scheme: "exact";
+      network: typeof X402_NETWORK;
+      asset: typeof X402_ASSET;
+      unitPriceUsdMicros: number | null;
+      maxBatchSize: number | null;
+      paymentIdentity: "caller_wallet";
+      apiKeyUsedForPayment: false;
+    };
     updatedAt: string | null;
   }
 > {
@@ -4549,6 +6231,23 @@ function mergedMarketplaceEndpoints(
         verified: row.priceVerified,
       },
       rateLimitRps: row.rateLimitRps,
+      x402: {
+        enabled: row.x402Enabled,
+        available:
+          available &&
+          row.x402Enabled &&
+          row.x402UnitPriceUsdMicros != null &&
+          row.x402MaxBatchSize != null &&
+          overlay.x402Available,
+        route: X402_BATCH_PATH,
+        scheme: "exact",
+        network: X402_NETWORK,
+        asset: X402_ASSET,
+        unitPriceUsdMicros: row.x402UnitPriceUsdMicros,
+        maxBatchSize: row.x402MaxBatchSize,
+        paymentIdentity: "caller_wallet",
+        apiKeyUsedForPayment: false,
+      },
       updatedAt: row.updatedAt ?? null,
     };
   });
@@ -4678,6 +6377,7 @@ function marketplacePublicEndpoint(
     summary: endpoint.summary,
     pricing: endpoint.pricing,
     rateLimitRps: endpoint.rateLimitRps,
+    x402: endpoint.x402,
     documentationStatus: endpoint.documentationStatus,
   };
 }
@@ -5430,7 +7130,8 @@ async function handlePublicCatalog(
               operation_id, summary, customer_price_usd_micros, updated_at
        FROM endpoint_catalog
        WHERE ${where}
-       ORDER BY platform ASC, path ASC
+       ORDER BY endpoint_catalog.platform ASC,
+                endpoint_catalog.path ASC
        LIMIT ? OFFSET ?`,
     )
     .bind(...bindings, filters.limit, filters.offset);
@@ -5536,6 +7237,7 @@ async function handleCatalogList(
 ): Promise<Response> {
   requireAdminSecret(request, env, "catalog");
   const db = requireDb(env);
+  const x402SchemaReady = await hasX402Schema(db);
   const url = new URL(request.url);
   const filters = normalizeCatalogListFilters(url, {
     admin: true,
@@ -5573,21 +7275,51 @@ async function handleCatalogList(
   const where = clauses.join(" AND ");
   const rows = await db
     .prepare(
-      `SELECT path, platform, http_method, summary, description,
-              data_type, tags_json, surface, operation_id,
-              parameter_schema_json, upstream_price_usd_micros,
-              customer_price_usd_micros, price_verified, enabled, read_only,
-              safety_classification, safety_reasons_json,
-              safety_policy_version, revision,
-              source_updated_at, sync_generation, reviewed_at, updated_at,
-              sync_generation = (
+      `SELECT endpoint_catalog.path, endpoint_catalog.platform,
+              endpoint_catalog.http_method, endpoint_catalog.summary,
+              endpoint_catalog.description, endpoint_catalog.data_type,
+              endpoint_catalog.tags_json, endpoint_catalog.surface,
+              endpoint_catalog.operation_id,
+              endpoint_catalog.parameter_schema_json,
+              endpoint_catalog.upstream_price_usd_micros,
+              endpoint_catalog.customer_price_usd_micros,
+              endpoint_catalog.price_verified, endpoint_catalog.enabled,
+              endpoint_catalog.read_only,
+              endpoint_catalog.safety_classification,
+              endpoint_catalog.safety_reasons_json,
+              endpoint_catalog.safety_policy_version,
+              endpoint_catalog.revision,
+              endpoint_catalog.source_updated_at,
+              endpoint_catalog.sync_generation,
+              endpoint_catalog.reviewed_at,
+              endpoint_catalog.updated_at,
+              ${
+                x402SchemaReady
+                  ? `x402.enabled AS x402_enabled,
+                     x402.unit_price_usd_micros
+                       AS x402_unit_price_usd_micros,
+                     x402.max_batch_size AS x402_max_batch_size,
+                     x402.revision AS x402_revision`
+                  : `NULL AS x402_enabled,
+                     NULL AS x402_unit_price_usd_micros,
+                     NULL AS x402_max_batch_size,
+                     NULL AS x402_revision`
+              },
+              endpoint_catalog.sync_generation = (
                 SELECT last_success_generation
                 FROM catalog_sync_state
                 WHERE id = 1
               ) AS present_in_latest_sync
        FROM endpoint_catalog
+       ${
+         x402SchemaReady
+           ? `LEFT JOIN endpoint_x402_config AS x402
+                ON x402.path = endpoint_catalog.path`
+           : ""
+       }
        WHERE ${where}
-       ORDER BY platform ASC, path ASC
+       ORDER BY endpoint_catalog.platform ASC,
+                endpoint_catalog.path ASC
        LIMIT ? OFFSET ?`,
     )
     .bind(...bindings, filters.limit, filters.offset)
@@ -5614,6 +7346,10 @@ async function handleCatalogList(
       source_updated_at: string | null;
       sync_generation: string | null;
       present_in_latest_sync: number | null;
+      x402_enabled: number | null;
+      x402_unit_price_usd_micros: number | null;
+      x402_max_batch_size: number | null;
+      x402_revision: number | null;
       reviewed_at: string | null;
       updated_at: string;
     }>();
@@ -5739,6 +7475,18 @@ async function handleCatalogList(
       presentInLatestSync: row.present_in_latest_sync === 1,
       marketplaceAvailability,
       availabilityReasons,
+      x402: {
+        enabled: row.x402_enabled === 1,
+        unitPriceUsdMicros:
+          row.x402_unit_price_usd_micros == null
+            ? null
+            : Number(row.x402_unit_price_usd_micros),
+        maxBatchSize:
+          row.x402_max_batch_size == null
+            ? null
+            : Number(row.x402_max_batch_size),
+        revision: Number(row.x402_revision ?? 0),
+      },
       reviewedAt: row.reviewed_at,
       updatedAt: row.updated_at,
     };
@@ -7666,6 +9414,8 @@ async function handleAdminOverview(
     balanceResult,
     paymentsResult,
     recentCallsResult,
+    x402Result,
+    topupResult,
   ] = await db.batch([
     db.prepare(
       `SELECT COUNT(*) AS total_users,
@@ -7712,6 +9462,32 @@ async function handleAdminOverview(
        ORDER BY c.created_at DESC
        LIMIT 30`,
     ),
+    db.prepare(
+      `SELECT
+         COALESCE(SUM(
+           CASE WHEN revenue_recognized_at IS NOT NULL
+                THEN amount_usdc_atomic ELSE 0 END
+         ), 0) AS recognized_revenue_30d,
+         COALESCE(SUM(
+           CASE WHEN revenue_recognized_at IS NOT NULL
+                THEN upstream_cost_usd_micros ELSE 0 END
+         ), 0) AS upstream_cost_30d,
+         COALESCE(SUM(
+           CASE WHEN status IN (
+             'payment_verifying', 'payment_verified',
+             'settlement_pending', 'settlement_failed',
+             'settled', 'executing'
+           ) THEN 1 ELSE 0 END
+         ), 0) AS pending_batches
+       FROM x402_batches
+       WHERE datetime(created_at) >= datetime('now', '-30 days')`,
+    ),
+    db.prepare(
+      `SELECT COALESCE(SUM(delta_usd_micros), 0) AS topup_cash_in_30d
+       FROM balance_ledger
+       WHERE entry_type = 'payment_credit'
+         AND datetime(created_at) >= datetime('now', '-30 days')`,
+    ),
   ]);
 
   const users = firstResult<{
@@ -7732,12 +9508,28 @@ async function handleAdminOverview(
   );
   const calls30d = Number(calls?.calls_30d ?? 0);
   const successful30d = Number(calls?.successful_30d ?? 0);
-  const grossRevenueUsdMicros = Number(
+  const prepaidRevenueUsdMicros = Number(
     calls?.gross_revenue_30d ?? 0,
   );
-  const upstreamCostUsdMicros = Number(
+  const prepaidUpstreamCostUsdMicros = Number(
     calls?.upstream_cost_30d ?? 0,
   );
+  const x402 = firstResult<{
+    recognized_revenue_30d: number;
+    upstream_cost_30d: number;
+    pending_batches: number;
+  }>(x402Result);
+  const topups = firstResult<{ topup_cash_in_30d: number }>(topupResult);
+  const x402RevenueUsdMicros = Number(
+    x402?.recognized_revenue_30d ?? 0,
+  );
+  const x402UpstreamCostUsdMicros = Number(
+    x402?.upstream_cost_30d ?? 0,
+  );
+  const grossRevenueUsdMicros =
+    prepaidRevenueUsdMicros + x402RevenueUsdMicros;
+  const upstreamCostUsdMicros =
+    prepaidUpstreamCostUsdMicros + x402UpstreamCostUsdMicros;
 
   return jsonResponse(
     {
@@ -7753,6 +9545,14 @@ async function handleAdminOverview(
         upstreamCostUsdMicros,
         grossMarginUsdMicros:
           grossRevenueUsdMicros - upstreamCostUsdMicros,
+        prepaidRevenueUsdMicros,
+        prepaidUpstreamCostUsdMicros,
+        topupCashInUsdMicros: Number(
+          topups?.topup_cash_in_30d ?? 0,
+        ),
+        x402RevenueUsdMicros,
+        x402UpstreamCostUsdMicros,
+        x402PendingBatches: Number(x402?.pending_batches ?? 0),
         outstandingBalanceUsdMicros: Math.max(
           0,
           Number(balances?.outstanding_balance ?? 0),
@@ -12562,6 +14362,7 @@ function base64UrlToBytes(value: string): Uint8Array {
 }
 
 function platformReadiness(env: PlatformEnv) {
+  const x402 = x402Runtime(env);
   const databaseConfigured = Boolean(env.DB);
   const legalReviewConfirmed = env.LEGAL_REVIEW_CONFIRMED === "true";
   const resellerAuthorized = env.RESELLER_AUTHORIZED === "true";
@@ -12667,6 +14468,9 @@ function platformReadiness(env: PlatformEnv) {
       googleAuthenticationConfigured,
       walletAuthenticationConfigured,
       trustedSitesIdentityConfigured,
+      x402Enabled: x402.enabled,
+      x402Configured: x402.configured,
+      x402Mode: x402.mode,
     },
     missing,
   };
@@ -12720,12 +14524,33 @@ function hasValidRuntimeConfiguration(env: PlatformEnv): boolean {
   }
 }
 
+async function hasX402Schema(db: D1Database): Promise<boolean> {
+  try {
+    await db
+      .prepare(
+        `SELECT
+           (SELECT unit_price_usd_micros
+            FROM endpoint_x402_config LIMIT 1)
+             AS endpoint_x402_config_schema,
+           (SELECT upstream_cost_usd_micros || status ||
+                   COALESCE(transaction_hash, '')
+            FROM x402_batches LIMIT 1)
+             AS x402_batches_schema`,
+      )
+      .first();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function operationalReadiness(env: PlatformEnv) {
   const base = platformReadiness(env);
   let catalogReady = false;
   let schemaReady = false;
   let taxonomyReady = false;
   let reconciliationRecent = false;
+  let x402SchemaReady = false;
   let upstreamConfigured = base.capabilities.upstreamConfigured;
   if (env.DB) {
     try {
@@ -12873,6 +14698,7 @@ async function operationalReadiness(env: PlatformEnv) {
           catalog_source_config_hash: string | null;
         }>();
       schemaReady = row != null;
+      x402SchemaReady = await hasX402Schema(env.DB);
       try {
         await assertStoredCatalogTaxonomyIntegrity(env.DB);
         taxonomyReady = true;
@@ -12947,6 +14773,15 @@ async function operationalReadiness(env: PlatformEnv) {
     schemaReady &&
     catalogReady &&
     reconciliationRecent;
+  const x402RuntimeState = x402Runtime(env);
+  const x402Available =
+    x402RuntimeState.enabled &&
+    x402RuntimeState.configured &&
+    proxyEnabled &&
+    schemaReady &&
+    x402SchemaReady &&
+    catalogReady &&
+    reconciliationRecent;
   const missing = base.missing.filter(
     (item) => item !== "upstream_credentials",
   );
@@ -12973,6 +14808,9 @@ async function operationalReadiness(env: PlatformEnv) {
       catalogReady,
       reconciliationRecent,
       paymentsEnabled,
+      x402Available,
+      x402SchemaReady,
+      x402Missing: x402RuntimeState.missing,
     },
     missing,
   };

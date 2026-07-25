@@ -18,7 +18,10 @@ export async function getRequestOrigin(): Promise<string> {
     ?.split(",")[0]
     ?.trim();
   const protocol =
-    forwardedProto === "http" || safeHost.startsWith("localhost")
+    forwardedProto === "http" ||
+    safeHost.startsWith("localhost") ||
+    safeHost === "127.0.0.1" ||
+    safeHost.startsWith("127.0.0.1:")
       ? "http"
       : "https";
 

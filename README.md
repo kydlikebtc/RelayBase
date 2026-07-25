@@ -118,6 +118,34 @@ Google 登录使用 PKCE、state 与 nonce；钱包登录使用一次性限时�
 管理与调度密钥必须互不相同，且至少包含 32 个高熵字符。浏览器只在当前管理会话
 内存中保留主密钥；服务端审计仅记录不可逆指纹。
 
+### x402 Agent 批量结算
+
+x402 是与预充值并存的独立入口，不是 API Key 的可切换付款模式：
+
+- 标准 `/v1/...` 请求携带 `Authorization: Bearer rb_live_...`，始终从登录账户的
+  预充值余额扣费
+- `POST /v1/x402/batch` 使用调用方钱包生成的 `PAYMENT-SIGNATURE`，不需要也不接受
+  API Key 作为付款凭据；RelayBase 不生成或托管调用方私钥
+- 首版固定使用 x402 v2 `exact`、Base 主网原生 USDC、同步批量、先支付后执行；
+  一个批次一次结算
+
+生产启用需要：
+
+- `X402_ENABLED=true`
+- `X402_PAY_TO_ADDRESS`：RelayBase 的 Base USDC 收款地址
+- `X402_FACILITATOR_URL`：默认 CDP x402 facilitator
+- `CDP_API_KEY_ID` / `CDP_API_KEY_SECRET`：仅用于 RelayBase 服务端向 CDP
+  facilitator 鉴权；Secret 必须是 64-byte Ed25519 base64，不是调用方钱包私钥
+
+使用私有 facilitator 时可改为
+`X402_FACILITATOR_BEARER_TOKEN`。`X402_FACILITATOR_ALLOW_UNAUTHENTICATED=true`
+仅允许在隔离的本地测试环境使用。
+
+x402 与预充值账本严格隔离：充值属于现金流入与递延余额负债；标准 API 成功完成且
+未退款时确认预充值用量收入。x402 只有 facilitator 结算成功、且 Base 交易哈希已
+持久化时确认收入，永远不会充值或扣减用户余额。结算完成后批量执行仍可能失败；
+首版不支持退款争议、部分成功计费、多链多币或自动降级。
+
 ## 管理后台
 
 打开：
@@ -134,7 +162,9 @@ ${PUBLIC_APP_URL}/admin
 - 目录同步、覆盖证明、安全分类、成本与客户价
 - price-only 文档待同步服务的隔离查看和客户价预设
 - 单端点或批量定价、上架、调价和下架
+- 单端点 x402 开关、单目标价格、每批上限与实际在线状态
 - 支付订单、人工复核、退款冲销和孤儿订单恢复
+- 预充值用量账本与 x402 Base USDC 结算账本的独立呈现和统一收入汇总
 - readiness 缺口与操作审计
 
 凭据使用 AES-256-GCM、随机 96-bit IV 和绑定记录编号的 AAD 加密；数据库只保存

@@ -42,6 +42,19 @@ type MarketplacePricing = {
   verified: boolean;
 };
 
+type MarketplaceX402 = {
+  enabled: boolean;
+  available: boolean;
+  route: "/v1/x402/batch";
+  scheme: "exact";
+  network: "eip155:8453";
+  asset: string;
+  unitPriceUsdMicros: number | null;
+  maxBatchSize: number | null;
+  paymentIdentity: "caller_wallet";
+  apiKeyUsedForPayment: false;
+};
+
 type MarketplaceStats = {
   total: number;
   available: number;
@@ -78,6 +91,7 @@ type MarketplaceEndpoint = {
   summary: string | null;
   pricing: MarketplacePricing;
   rateLimitRps: number | null;
+  x402: MarketplaceX402;
   documentationStatus: "complete" | "pending";
 };
 
@@ -635,6 +649,7 @@ function isMarketplaceEndpoint(
 ): value is MarketplaceEndpoint {
   if (!isPlainRecord(value)) return false;
   const pricing = value.pricing;
+  const x402 = value.x402;
   return (
     isSafeText(value.id, 160) &&
     /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/.test(value.id) &&
@@ -654,6 +669,20 @@ function isMarketplaceEndpoint(
     pricing.unit === "request" &&
     typeof pricing.verified === "boolean" &&
     (!pricing.verified || pricing.amountUsdMicros !== null) &&
+    isPlainRecord(x402) &&
+    typeof x402.enabled === "boolean" &&
+    typeof x402.available === "boolean" &&
+    (!x402.available || x402.enabled) &&
+    x402.route === "/v1/x402/batch" &&
+    x402.scheme === "exact" &&
+    x402.network === "eip155:8453" &&
+    isSafeText(x402.asset, 80) &&
+    (x402.unitPriceUsdMicros === null ||
+      isSafeIntegerInRange(x402.unitPriceUsdMicros, 1, 100_000_000)) &&
+    (x402.maxBatchSize === null ||
+      isSafeIntegerInRange(x402.maxBatchSize, 1, 1_000)) &&
+    x402.paymentIdentity === "caller_wallet" &&
+    x402.apiKeyUsedForPayment === false &&
     (value.rateLimitRps === null ||
       isSafeIntegerInRange(value.rateLimitRps, 1, 1_000_000)) &&
     (value.documentationStatus === "complete" ||
@@ -1147,6 +1176,73 @@ function DetailPanel({
             </div>
           </div>
 
+          {endpoint.x402.enabled ? (
+            <section
+              className="marketplace-response-section"
+              aria-labelledby="marketplace-x402-title"
+            >
+              <h3 id="marketplace-x402-title">
+                {locale === "zh"
+                  ? "x402 Agent 批量入口"
+                  : "x402 Agent batch entry"}
+              </h3>
+              <div className="marketplace-response-card">
+                <dl>
+                  <div>
+                    <dt>{locale === "zh" ? "运行状态" : "Runtime status"}</dt>
+                    <dd>
+                      {endpoint.x402.available
+                        ? locale === "zh"
+                          ? "在线可用"
+                          : "Online"
+                        : locale === "zh"
+                          ? "已配置但当前不可用"
+                          : "Configured but unavailable"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{locale === "zh" ? "每目标单价" : "Per-target price"}</dt>
+                    <dd>
+                      {formatPrice(endpoint.x402.unitPriceUsdMicros, locale)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{locale === "zh" ? "每批上限" : "Maximum batch"}</dt>
+                    <dd>
+                      {endpoint.x402.maxBatchSize?.toLocaleString() ?? "—"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{locale === "zh" ? "支付方式" : "Payment"}</dt>
+                    <dd>exact · Base USDC</dd>
+                  </div>
+                </dl>
+                <p>
+                  {locale === "zh"
+                    ? `调用 ${endpoint.x402.route}，由 Agent 自持钱包签署 PAYMENT-SIGNATURE；一批一次结算。API Key 不是付款凭据，也不会扣平台余额。`
+                    : `Call ${endpoint.x402.route} and let the Agent-controlled wallet sign PAYMENT-SIGNATURE; one settlement covers the batch. An API Key is not the payment credential and the platform balance is not charged.`}
+                </p>
+                <pre tabIndex={0}>
+                  <code>{`POST ${endpoint.x402.route}
+Idempotency-Key: agent-batch-unique-id
+Content-Type: application/json
+
+{
+  "endpoint": "${endpoint.path}",
+  "requests": [{ "...": "target 1" }, { "...": "target 2" }]
+}
+
+# Retry the same body with PAYMENT-SIGNATURE after HTTP 402.`}</code>
+                </pre>
+                <Link href="/docs#x402">
+                  {locale === "zh"
+                    ? "查看批量契约与 402 握手 →"
+                    : "Read the batch contract and 402 handshake →"}
+                </Link>
+              </div>
+            </section>
+          ) : null}
+
           <section aria-labelledby="marketplace-description-title">
             <h3 id="marketplace-description-title">{c.description}</h3>
             <p className="marketplace-description">
@@ -1634,6 +1730,21 @@ export default function CatalogClient({ locale }: { locale: Locale }) {
             {endpoint.documentationStatus === "pending" ? (
               <span className="marketplace-availability is-pending">
                 {c.specPending}
+              </span>
+            ) : null}
+            {endpoint.x402.enabled ? (
+              <span
+                className={`marketplace-availability ${
+                  endpoint.x402.available ? "is-available" : "is-pending"
+                }`}
+              >
+                x402 {endpoint.x402.available
+                  ? locale === "zh"
+                    ? "在线"
+                    : "online"
+                  : locale === "zh"
+                    ? "未就绪"
+                    : "not ready"}
               </span>
             ) : null}
           </div>

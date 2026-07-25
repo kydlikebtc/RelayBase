@@ -436,7 +436,7 @@
 
 .console-quick-actions {
   display: grid;
-  grid-template-columns: minmax(150px, 0.75fr) repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(145px, 0.7fr) repeat(4, minmax(0, 1fr));
   margin-bottom: 18px;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -1464,4 +1464,20 @@
     grid-column: 2;
     width: fit-content;
   }
+}
+
+.console-x402-grid .topup-panel > p {
+  margin: 0 0 20px;
+  color: var(--ink-muted);
+  line-height: 1.65;
+}
+
+.console-x402-receipt .invoice-grid {
+  margin-top: 16px;
+  border: 1px solid #dde3cc;
+  border-radius: 8px;
+}
+
+.console-x402-receipt code {
+  overflow-wrap: anywhere;
 }

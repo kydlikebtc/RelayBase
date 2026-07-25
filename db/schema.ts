@@ -423,6 +423,107 @@ export const endpointCatalog = sqliteTable(
   ],
 );
 
+export const endpointX402Config = sqliteTable(
+  "endpoint_x402_config",
+  {
+    path: text("path")
+      .primaryKey()
+      .references(() => endpointCatalog.path, { onDelete: "cascade" }),
+    enabled: integer("enabled", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    unitPriceUsdMicros: integer("unit_price_usd_micros").notNull(),
+    maxBatchSize: integer("max_batch_size").notNull().default(25),
+    revision: integer("revision").notNull().default(0),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("endpoint_x402_config_enabled_idx").on(table.enabled),
+    check(
+      "endpoint_x402_config_unit_price_range",
+      sql`${table.unitPriceUsdMicros} BETWEEN 1 AND 100000000`,
+    ),
+    check(
+      "endpoint_x402_config_batch_size_range",
+      sql`${table.maxBatchSize} BETWEEN 1 AND 1000`,
+    ),
+  ],
+);
+
+export const x402Batches = sqliteTable(
+  "x402_batches",
+  {
+    id: text("id").primaryKey(),
+    idempotencyHash: text("idempotency_hash").notNull(),
+    endpointPath: text("endpoint_path")
+      .notNull()
+      .references(() => endpointCatalog.path, { onDelete: "restrict" }),
+    requestHash: text("request_hash").notNull(),
+    verifiedQuantity: integer("verified_quantity").notNull(),
+    unitPriceUsdMicros: integer("unit_price_usd_micros").notNull(),
+    amountUsdcAtomic: integer("amount_usdc_atomic").notNull(),
+    upstreamCostUsdMicros: integer("upstream_cost_usd_micros")
+      .notNull()
+      .default(0),
+    status: text("status").notNull().default("quoted"),
+    network: text("network").notNull().default("eip155:8453"),
+    asset: text("asset").notNull(),
+    payTo: text("pay_to").notNull(),
+    paymentRequirementsJson: text("payment_requirements_json").notNull(),
+    paymentPayloadHash: text("payment_payload_hash"),
+    payerAddress: text("payer_address"),
+    transactionHash: text("transaction_hash"),
+    facilitatorMode: text("facilitator_mode").notNull(),
+    facilitatorReceiptJson: text("facilitator_receipt_json"),
+    executionResponseJson: text("execution_response_json"),
+    failureCode: text("failure_code"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    quotedAt: text("quoted_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    expiresAt: text("expires_at").notNull(),
+    verifiedAt: text("verified_at"),
+    settledAt: text("settled_at"),
+    revenueRecognizedAt: text("revenue_recognized_at"),
+    executionStartedAt: text("execution_started_at"),
+    completedAt: text("completed_at"),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("x402_batches_idempotency_unique").on(
+      table.idempotencyHash,
+    ),
+    uniqueIndex("x402_batches_payment_payload_unique").on(
+      table.paymentPayloadHash,
+    ),
+    uniqueIndex("x402_batches_transaction_unique").on(
+      table.transactionHash,
+    ),
+    index("x402_batches_status_created_idx").on(
+      table.status,
+      table.createdAt,
+    ),
+    index("x402_batches_endpoint_created_idx").on(
+      table.endpointPath,
+      table.createdAt,
+    ),
+    index("x402_batches_revenue_idx").on(
+      table.revenueRecognizedAt,
+      table.settledAt,
+    ),
+    check(
+      "x402_batches_quantity_range",
+      sql`${table.verifiedQuantity} BETWEEN 1 AND 1000`,
+    ),
+    check(
+      "x402_batches_unit_price_range",
+      sql`${table.unitPriceUsdMicros} BETWEEN 1 AND 100000000`,
+    ),
+    check(
+      "x402_batches_amount_range",
+      sql`${table.amountUsdcAtomic} BETWEEN 1 AND 100000000000`,
+    ),
+  ],
+);
+
 export const catalogUnresolvedEndpoints = sqliteTable(
   "catalog_unresolved_endpoints",
   {

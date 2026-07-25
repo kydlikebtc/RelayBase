@@ -6010,6 +6010,35 @@
   }
 }
 
+.admin-compact-number-input {
+  width: 76px;
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #fff;
+  font: 600 11px/1.2 var(--font-mono);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-x402-ledger {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 24px;
+}
+
+.admin-x402-ledger .admin-table code {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-x402-ledger .admin-stat-grid-compact article {
+  min-height: 112px;
+}
+
 @media (max-width: 680px) {
   .admin-shell {
     padding: 10px 10px 88px;
