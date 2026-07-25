@@ -515,7 +515,7 @@ export async function handlePlatformRequest(
 
   try {
     if (
-      url.pathname === "/console" &&
+      (url.pathname === "/console" || url.pathname.startsWith("/console/")) &&
       (request.method === "GET" || request.method === "HEAD")
     ) {
       const redirectResponse = await handleConsolePageGate(request, env);
@@ -901,8 +901,14 @@ function consoleLoginRedirect(
   request: Request,
   errorCode: string | null = null,
 ): Response {
+  const requestUrl = new URL(request.url);
+  const returnToSearch = new URLSearchParams(requestUrl.searchParams);
+  returnToSearch.delete("_rsc");
+  const returnTo = `${requestUrl.pathname}${
+    returnToSearch.size > 0 ? `?${returnToSearch.toString()}` : ""
+  }`;
   const location = new URL("/login", request.url);
-  location.searchParams.set("return_to", "/console");
+  location.searchParams.set("return_to", returnTo);
   if (errorCode) location.searchParams.set("error", errorCode);
 
   return new Response(null, {

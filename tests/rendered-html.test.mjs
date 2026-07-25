@@ -431,7 +431,12 @@ test("renders the Chinese public experience when the locale cookie is set", asyn
 });
 
 test("redirects signed-out console visits before rendering private UI", async () => {
-  for (const path of ["/console", "/console?_rsc=internal-navigation"]) {
+  for (const [path, returnTo] of [
+    ["/console", "/console"],
+    ["/console?_rsc=internal-navigation", "/console"],
+    ["/console/keys", "/console/keys"],
+    ["/console/billing", "/console/billing"],
+  ]) {
     const response = await fetchWorker(path, {
       headers: { accept: "text/html" },
       redirect: "manual",
@@ -439,7 +444,7 @@ test("redirects signed-out console visits before rendering private UI", async ()
     assert.equal(response.status, 307, path);
     assert.equal(
       response.headers.get("location"),
-      "http://localhost/login?return_to=%2Fconsole",
+      `http://localhost/login?return_to=${encodeURIComponent(returnTo)}`,
     );
     assert.equal(response.headers.get("cache-control"), "private, no-store");
     assert.equal(await response.text(), "");
@@ -484,6 +489,21 @@ test("renders the console only after server-side authentication", async () => {
     ]) {
       const response = await fetchWorker("/console", { headers }, env);
       assert.equal(response.status, 200);
+      assert.match(
+        response.headers.get("content-type") ?? "",
+        /^text\/html\b/i,
+      );
+      assert.match(await response.text(), new RegExp(expected));
+    }
+
+    for (const [path, expected] of [
+      ["/console/keys", "API Keys"],
+      ["/console/billing", "Top-up &amp; billing"],
+    ]) {
+      const response = await fetchWorker(path, {
+        headers: signedInHeaders({ accept: "text/html" }),
+      }, env);
+      assert.equal(response.status, 200, path);
       assert.match(
         response.headers.get("content-type") ?? "",
         /^text\/html\b/i,

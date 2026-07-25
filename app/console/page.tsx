@@ -1,10 +1,6 @@
 import type { Metadata } from "next";
-import {
-  chatGPTSignOutPath,
-  getChatGPTUser,
-} from "../chatgpt-auth";
 import { getLocale } from "../locale";
-import { ConsoleClient } from "./ConsoleClient";
+import { ConsoleWorkspacePage } from "./ConsoleWorkspacePage";
 
 export const dynamic = "force-dynamic";
 
@@ -24,17 +20,5 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 
 export default async function ConsolePage() {
-  const user = await getChatGPTUser();
-  const locale = await getLocale();
-
-  return (
-    <main className="console-page" id="main-content">
-      <ConsoleClient
-        key={locale}
-        chatGPTUser={user}
-        chatGPTSignOutPath={chatGPTSignOutPath("/")}
-        locale={locale}
-      />
-    </main>
-  );
+  return <ConsoleWorkspacePage workspace="dashboard" />;
 }

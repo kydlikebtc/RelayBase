@@ -115,6 +115,8 @@ type AuthMeResponse = {
   user: SessionUser;
 };
 
+export type ConsoleWorkspace = "dashboard" | "keys" | "billing";
+
 const amountOptions = [10, 25, 50, 100] as const;
 const currencyOptions = [
   { value: "usdttrc20", label: "USDT · TRC20" },
@@ -166,11 +168,87 @@ const consoleCopy = {
     chooseLogin: "Choose a sign-in method",
     retry: "Retry",
     closeNotice: "Close notification",
+    workspaceNavigation: "Console navigation",
+    developerWorkspace: "Developer workspace",
+    workspaces: {
+      dashboard: {
+        label: "Dashboard",
+        eyebrow: "WORKSPACE / DASHBOARD",
+        description:
+          "Monitor account health, API usage and the actions that keep your integration moving.",
+      },
+      keys: {
+        label: "API Keys",
+        eyebrow: "ACCESS / API KEYS",
+        description:
+          "Create, review and revoke the credentials used by your server-side integrations.",
+      },
+      billing: {
+        label: "Top-up & billing",
+        eyebrow: "FUNDS / BILLING",
+        description:
+          "Fund your account, follow payment status and review recent balance activity.",
+      },
+    },
+    navDescriptions: {
+      dashboard: "Usage and account health",
+      keys: "Credentials and access",
+      billing: "Balance and payments",
+    },
+    resources: "Resources",
+    dataMarket: "Data market",
+    documentation: "Documentation",
     accountOverview: "Account overview",
     availableBalance: "Available balance",
     calls30d: "30-day calls",
     spend30d: "30-day spend",
     successRate: "Success rate",
+    quickActions: "Quick actions",
+    browseData: "Browse data products",
+    browseDataBody: "Find a live endpoint by platform and category.",
+    createFirstKey: "Create an API Key",
+    createFirstKeyBody: "Issue a server-side credential for your application.",
+    addFunds: "Add funds",
+    addFundsBody: "Top up the balance used for metered API calls.",
+    gettingStarted: "Integration checklist",
+    checklistKey: "Create an active API Key",
+    checklistBalance: "Fund the account balance",
+    checklistRequest: "Send the first API request",
+    complete: "Complete",
+    nextStep: "Next step",
+    accountStatus: "Account status",
+    apiAccess: "API access",
+    ready: "Ready",
+    actionRequired: "Action required",
+    catalogAccess: "Data catalog",
+    billingChannel: "Billing channel",
+    enabled: "Enabled",
+    unavailable: "Unavailable",
+    activeKeys: "Active Keys",
+    keysUsed: "Keys used",
+    keysUnused: "Never used",
+    credentialInventory: "Credential inventory",
+    credentialHelp:
+      "Keys authorize billable requests. Keep them in a server-side secret manager and rotate any credential that may have been exposed.",
+    securityPractices: "Credential safety",
+    securityItems: [
+      "Use a separate Key for each environment.",
+      "Never place a Key in client-side code or public repositories.",
+      "Revoke a Key immediately when access is no longer required.",
+    ],
+    keyStatus: "Key status",
+    keyName: "Name",
+    keyPrefix: "Key prefix",
+    lastUsed: "Last used",
+    actions: "Actions",
+    active: "Active",
+    recentCredits: "Recent credits",
+    openOrders: "Open orders",
+    paymentActivity: "Payment activity",
+    billingHelpTitle: "How account funding works",
+    billingHelp:
+      "Create a top-up order, send the exact asset on the selected network, then wait for on-chain confirmation. Credited funds become available automatically.",
+    noOpenOrders: "No open orders",
     newKeyLabel: "New Key name",
     keyPlaceholder: "For example: Production",
     creating: "Creating…",
@@ -270,11 +348,84 @@ const consoleCopy = {
     chooseLogin: "选择登录方式",
     retry: "重试",
     closeNotice: "关闭提示",
+    workspaceNavigation: "控制台导航",
+    developerWorkspace: "开发者工作区",
+    workspaces: {
+      dashboard: {
+        label: "概览",
+        eyebrow: "工作区 / 概览",
+        description: "集中查看账户状态、API 使用情况，以及推进接入所需的关键操作。",
+      },
+      keys: {
+        label: "API Key",
+        eyebrow: "访问控制 / API KEY",
+        description: "创建、检查和撤销服务端集成使用的访问凭据。",
+      },
+      billing: {
+        label: "充值与账单",
+        eyebrow: "资金 / 账单",
+        description: "充值账户、跟踪付款状态，并查看近期余额变动记录。",
+      },
+    },
+    navDescriptions: {
+      dashboard: "使用情况与账户状态",
+      keys: "凭据与访问控制",
+      billing: "余额与付款记录",
+    },
+    resources: "常用资源",
+    dataMarket: "数据市场",
+    documentation: "开发文档",
     accountOverview: "账户概览",
     availableBalance: "可用余额",
     calls30d: "30 天调用",
     spend30d: "30 天支出",
     successRate: "成功率",
+    quickActions: "快捷操作",
+    browseData: "浏览数据产品",
+    browseDataBody: "按平台和分类查找当前可用的数据接口。",
+    createFirstKey: "创建 API Key",
+    createFirstKeyBody: "为你的服务端应用签发独立访问凭据。",
+    addFunds: "充值余额",
+    addFundsBody: "为按量计费的 API 调用补充可用余额。",
+    gettingStarted: "接入检查清单",
+    checklistKey: "创建一个有效的 API Key",
+    checklistBalance: "为账户充值",
+    checklistRequest: "发出第一次 API 请求",
+    complete: "已完成",
+    nextStep: "下一步",
+    accountStatus: "账户状态",
+    apiAccess: "API 访问",
+    ready: "就绪",
+    actionRequired: "需要操作",
+    catalogAccess: "数据目录",
+    billingChannel: "充值通道",
+    enabled: "已启用",
+    unavailable: "暂不可用",
+    activeKeys: "有效 Key",
+    keysUsed: "已使用 Key",
+    keysUnused: "从未使用",
+    credentialInventory: "凭据清单",
+    credentialHelp:
+      "API Key 用于授权计费请求。请保存在服务端密钥管理工具中；若存在泄露风险，应立即撤销并更换。",
+    securityPractices: "凭据安全",
+    securityItems: [
+      "为生产、测试等不同环境分别创建 Key。",
+      "不要把 Key 写入客户端代码或公开代码仓库。",
+      "不再需要的 Key 应立即撤销。",
+    ],
+    keyStatus: "Key 状态",
+    keyName: "名称",
+    keyPrefix: "Key 前缀",
+    lastUsed: "最近使用",
+    actions: "操作",
+    active: "有效",
+    recentCredits: "近期入账",
+    openOrders: "进行中订单",
+    paymentActivity: "付款记录",
+    billingHelpTitle: "账户充值说明",
+    billingHelp:
+      "创建充值单后，请按指定网络转入准确币种和数量。链上确认完成后，资金会自动计入可用余额。",
+    noOpenOrders: "暂无进行中订单",
     newKeyLabel: "新密钥名称",
     keyPlaceholder: "例如：Production",
     creating: "创建中…",
@@ -668,10 +819,12 @@ export function ConsoleClient({
   chatGPTUser,
   chatGPTSignOutPath,
   locale,
+  workspace,
 }: {
   chatGPTUser: ChatGPTUser | null;
   chatGPTSignOutPath: string;
   locale: Locale;
+  workspace: ConsoleWorkspace;
 }) {
   const c = consoleCopy[locale];
   const [sessionUser, setSessionUser] = useState<SessionUser | null>(() =>
@@ -716,7 +869,9 @@ export function ConsoleClient({
   const visibleInvoiceId = visibleInvoice?.id ?? null;
   const visibleInvoiceStatus = visibleInvoice?.status ?? null;
   const user = sessionUser;
-  const loginPath = "/login?return_to=%2Fconsole";
+  const workspacePath =
+    workspace === "dashboard" ? "/console" : `/console/${workspace}`;
+  const loginPath = `/login?return_to=${encodeURIComponent(workspacePath)}`;
 
   const refreshDashboard = useCallback(async () => {
     if (!user) {
@@ -748,7 +903,7 @@ export function ConsoleClient({
     } finally {
       setLoading(false);
     }
-  }, [c.dashboardLoadFailed, locale, user]);
+  }, [c.dashboardLoadFailed, locale, loginPath, user]);
 
   useEffect(() => {
     if (chatGPTUser) return;
@@ -790,7 +945,7 @@ export function ConsoleClient({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [c, chatGPTUser]);
+  }, [c, chatGPTUser, loginPath]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -975,18 +1130,100 @@ export function ConsoleClient({
   const activeKeys = dashboard?.keys.filter((key) => !key.revokedAt) ?? [];
   const recentCalls = dashboard?.calls.slice(0, 8) ?? [];
   const recentPayments = dashboard?.payments.slice(0, 6) ?? [];
+  const usedKeys = activeKeys.filter((key) => key.lastUsedAt).length;
+  const unusedKeys = activeKeys.length - usedKeys;
+  const recentCreditsUsdMicros = recentPayments.reduce(
+    (total, payment) =>
+      total + payment.creditedUsdMicros - payment.reversedUsdMicros,
+    0,
+  );
+  const terminalPaymentStatuses = new Set([
+    "finished",
+    "completed",
+    "paid",
+    "failed",
+    "expired",
+    "refunded",
+    "manual_resolved",
+    "provider_error",
+  ]);
+  const openPayments = recentPayments.filter(
+    (payment) => !terminalPaymentStatuses.has(payment.status.toLowerCase()),
+  );
   const paymentsEnabled = dashboard?.capabilities.paymentsEnabled ?? false;
   const commercialClearanceConfirmed =
     dashboard?.capabilities.commercialClearanceConfirmed ?? false;
+  const workspaceMeta = c.workspaces[workspace];
+  const setupSteps = [
+    {
+      label: c.checklistKey,
+      complete: activeKeys.length > 0,
+      href: "/console/keys",
+    },
+    {
+      label: c.checklistBalance,
+      complete: (dashboard?.balanceUsdMicros ?? 0) > 0,
+      href: "/console/billing",
+    },
+    {
+      label: c.checklistRequest,
+      complete: (dashboard?.stats.calls30d ?? 0) > 0,
+      href: "/docs",
+    },
+  ];
+  const consoleNavigation = [
+    {
+      id: "dashboard" as const,
+      href: "/console",
+      index: "01",
+      label: c.workspaces.dashboard.label,
+      description: c.navDescriptions.dashboard,
+    },
+    {
+      id: "keys" as const,
+      href: "/console/keys",
+      index: "02",
+      label: c.workspaces.keys.label,
+      description: c.navDescriptions.keys,
+    },
+    {
+      id: "billing" as const,
+      href: "/console/billing",
+      index: "03",
+      label: c.workspaces.billing.label,
+      description: c.navDescriptions.billing,
+    },
+  ];
 
   return (
     <div className="console-shell">
-      <div className="console-topline">
-        <div>
-          <span className="console-breadcrumb">WORKSPACE / OVERVIEW</span>
-          <h1>{c.console}</h1>
+      <aside className="console-sidebar">
+        <div className="console-sidebar-heading">
+          <span>RELAYBASE</span>
+          <b>{c.developerWorkspace}</b>
         </div>
-        <div className="console-user">
+        <nav className="console-nav" aria-label={c.workspaceNavigation}>
+          {consoleNavigation.map((item) => (
+            <a
+              className={workspace === item.id ? "is-active" : undefined}
+              aria-current={workspace === item.id ? "page" : undefined}
+              href={item.href}
+              key={item.id}
+            >
+              <span>{item.index}</span>
+              <div>
+                <b>{item.label}</b>
+                <small>{item.description}</small>
+              </div>
+            </a>
+          ))}
+        </nav>
+        <div className="console-resource-links">
+          <span>{c.resources}</span>
+          <a href="/catalog">{c.dataMarket}<i>↗</i></a>
+          <a href="/docs">{c.documentation}<i>↗</i></a>
+        </div>
+        <div className="console-side-account">
           <span className="console-avatar" aria-hidden="true">
             {displayName.slice(0, 1).toUpperCase()}
           </span>
@@ -1003,481 +1240,526 @@ export function ConsoleClient({
               {signingOut ? c.signingOut : c.signOut}
             </a>
           ) : (
-            <a href={loginPath}>
-              {authChecking ? c.checking : c.signIn}
-            </a>
+            <a href={loginPath}>{authChecking ? c.checking : c.signIn}</a>
           )}
         </div>
-      </div>
+      </aside>
 
-      {authChecking ? (
-        <section className="console-auth-banner" role="status">
-          <div className="auth-banner-mark" aria-hidden="true">
-            ···
-          </div>
+      <div className="console-workspace">
+        <header className="console-workspace-header">
           <div>
-            <span>CHECKING SESSION</span>
-            <h2>{c.checkingSessionTitle}</h2>
-            <p>{c.checkingSessionBody}</p>
-          </div>
-        </section>
-      ) : null}
-
-      <div className="console-announcer" aria-live="polite" aria-atomic="true">
-        {error ? (
-          <div className="console-alert console-alert-error">
-            <span>!</span>
-            <p>{error}</p>
-            <button type="button" onClick={() => void refreshDashboard()}>
-              {c.retry}
-            </button>
-          </div>
-        ) : null}
-        {notice ? (
-          <div className="console-alert console-alert-success">
-            <span>✓</span>
-            <p>{notice}</p>
-            <button
-              type="button"
-              aria-label={c.closeNotice}
-              onClick={() => setNotice(null)}
-            >
-              ×
-            </button>
-          </div>
-        ) : null}
-      </div>
-
-      <section className="stat-grid" aria-label={c.accountOverview}>
-        <article className="stat-card stat-card-balance">
-          <div>
-            <span>{c.availableBalance}</span>
-            <i className="stat-live">LIVE</i>
-          </div>
-          <strong className={loading ? "loading-value" : ""}>
-            {user ? formatUsd(dashboard?.balanceUsdMicros) : "—"}
-          </strong>
-          <p>USD BALANCE</p>
-        </article>
-        <article className="stat-card">
-          <div>
-            <span>{c.calls30d}</span>
-            <b aria-hidden="true">↗</b>
-          </div>
-          <strong className={loading ? "loading-value" : ""}>
-            {user ? (dashboard?.stats.calls30d?.toLocaleString() ?? "—") : "—"}
-          </strong>
-          <p>API REQUESTS</p>
-        </article>
-        <article className="stat-card">
-          <div>
-            <span>{c.spend30d}</span>
-            <b aria-hidden="true">↘</b>
-          </div>
-          <strong className={loading ? "loading-value" : ""}>
-            {user ? formatUsd(dashboard?.stats.spend30dUsdMicros) : "—"}
-          </strong>
-          <p>USAGE SPEND</p>
-        </article>
-        <article className="stat-card">
-          <div>
-            <span>{c.successRate}</span>
-            <b aria-hidden="true">◎</b>
-          </div>
-          <strong className={loading ? "loading-value" : ""}>
-            {user ? formatRate(dashboard?.stats.successRate) : "—"}
-          </strong>
-          <p>LAST 30 DAYS</p>
-        </article>
-      </section>
-
-      <div className="console-main-grid">
-        <section className="console-panel keys-panel">
-          <div className="panel-heading">
-            <div>
-              <span>ACCESS / 01</span>
-              <h2>API Keys</h2>
-            </div>
-            <span className="panel-count">
-              {user ? `${activeKeys.length} ACTIVE` : "— ACTIVE"}
-            </span>
-          </div>
-
-          <form className="key-form" onSubmit={createKey}>
-            <label htmlFor="key-label">{c.newKeyLabel}</label>
-            <div>
-              <input
-                id="key-label"
-                value={keyLabel}
-                onChange={(event) => setKeyLabel(event.target.value)}
-                placeholder={c.keyPlaceholder}
-                maxLength={64}
-                disabled={!user || creatingKey}
-                required
-              />
-              <button
-                className="button button-blue"
-                type="submit"
-                disabled={!user || creatingKey || !keyLabel.trim()}
-              >
-                {creatingKey ? c.creating : c.createKey}
-              </button>
-            </div>
-          </form>
-
-          {createdKey ? (
-            <div className="created-key-card">
-              <div>
-                <span>{c.showOnce}</span>
-                <button
-                  type="button"
-                  aria-label={c.closeNewKey}
-                  onClick={() => setCreatedKey(null)}
-                >
-                  ×
-                </button>
-              </div>
-              <p>{c.saveSecret}</p>
-              <div className="secret-value">
-                <code>{createdKey.secret}</code>
-                <button
-                  type="button"
-                  onClick={() =>
-                    void copyText(createdKey.secret, c.keyCopied)
-                  }
-                >
-                  {c.copy}
-                </button>
-              </div>
-            </div>
-          ) : null}
-
-          <div className="key-list">
-            {loading ? (
-              <div className="panel-loading">{c.loadingKeys}</div>
-            ) : activeKeys.length > 0 ? (
-              activeKeys.map((key) => (
-                <article className="key-row" key={key.id}>
-                  <span className="key-icon" aria-hidden="true">
-                    K
-                  </span>
-                  <div className="key-main">
-                    <div>
-                      <b>{key.label}</b>
-                      <span className="key-active">ACTIVE</span>
-                    </div>
-                    <code>{key.prefix}••••••••••••</code>
-                  </div>
-                  <div className="key-meta">
-                    <span>
-                      {c.created} {formatDate(key.createdAt, locale)}
-                    </span>
-                    <span>
-                      {c.used} {formatDate(key.lastUsedAt, locale, true)}
-                    </span>
-                  </div>
-                  <button
-                    className="key-revoke"
-                    type="button"
-                    disabled={revokingId === key.id}
-                    onClick={() => void revokeKey(key)}
-                  >
-                    {revokingId === key.id ? c.revoking : c.revoke}
-                  </button>
-                </article>
-              ))
-            ) : (
-              <div className="panel-empty">
-                <span>KEY_00</span>
-                <p>{user ? c.noKeys : c.loginForKeys}</p>
-              </div>
-            )}
-          </div>
-        </section>
-
-        <aside className="console-panel topup-panel">
-          <div className="panel-heading">
-            <div>
-              <span>FUNDS / 02</span>
-              <h2>{c.topupTitle}</h2>
-            </div>
-            <span className="pay-badge">STABLECOIN</span>
-          </div>
-          <form onSubmit={createPayment}>
-            <fieldset
-              disabled={
-                !user || loading || creatingPayment || !paymentsEnabled
-              }
-            >
-              <legend>{c.topupAmount}</legend>
-              <div className="amount-options">
-                {amountOptions.map((amount) => (
-                  <label key={amount}>
-                    <input
-                      type="radio"
-                      name="amount"
-                      value={amount}
-                      checked={amountUsd === amount}
-                      onChange={() => {
-                        paymentAttemptKey.current = null;
-                        setAmountUsd(amount);
-                      }}
-                    />
-                    <span>${amount}</span>
-                  </label>
-                ))}
-              </div>
-              <label className="currency-select">
-                <span>{c.assetNetwork}</span>
-                <select
-                  value={payCurrency}
-                  onChange={(event) =>
-                    {
-                      paymentAttemptKey.current = null;
-                      setPayCurrency(
-                        event.target.value as typeof payCurrency,
-                      );
-                    }
-                  }
-                >
-                  {currencyOptions.map((currency) => (
-                    <option value={currency.value} key={currency.value}>
-                      {currency.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </fieldset>
-            <button
-              className="button button-lime topup-submit"
-              type="submit"
-              disabled={
-                !user || loading || creatingPayment || !paymentsEnabled
-              }
-            >
-              {creatingPayment ? c.creatingInvoice : c.topup(amountUsd)}
-              <span aria-hidden="true">↗</span>
-            </button>
-          </form>
-          <p className="topup-warning">
-            {user && !loading && !paymentsEnabled
-              ? !commercialClearanceConfirmed
-                ? c.clearanceClosed
-                : c.topupUnavailable
-              : c.topupSafety}
-          </p>
-        </aside>
-      </div>
-
-      {visibleInvoice ? (
-        <section className="invoice-panel">
-          <div className="invoice-title">
-            <div>
-              <span>PAYMENT INVOICE</span>
-              <h2>{c.invoiceTitle}</h2>
-            </div>
-            <button
-              type="button"
-              aria-label={c.closeInvoice}
-              onClick={() => setInvoice(null)}
-            >
-              ×
-            </button>
-          </div>
-          <div className="invoice-grid">
-            <div>
-              <span>{c.amountDue}</span>
-              <strong>{visibleInvoice.payAmount ?? "—"}</strong>
-              <small>{currencyLabel(visibleInvoice.payCurrency)}</small>
-            </div>
-            <div className="invoice-address">
-              <span>{c.receivingAddress}</span>
-              <code>{visibleInvoice.payAddress ?? c.addressPending}</code>
-              {visibleInvoice.payAddress ? (
-                <button
-                  type="button"
-                  onClick={() =>
-                    void copyText(
-                      visibleInvoice.payAddress!,
-                      c.addressCopied,
-                    )
-                  }
-                >
-                  {c.copyAddress}
-                </button>
-              ) : null}
-            </div>
-            <div>
-              <span>{c.currentStatus}</span>
-              <strong className="invoice-status">
-                {paymentStatus(visibleInvoice.status, locale)}
-              </strong>
-              <small>{c.balanceAutoUpdate}</small>
-            </div>
-          </div>
-          {visibleInvoice.invoiceUrl ? (
-            <a
-              className="button button-dark"
-              href={visibleInvoice.invoiceUrl}
-              target="_blank"
-              rel="noreferrer"
-            >
-              {c.openInvoice}
-            </a>
-          ) : null}
-        </section>
-      ) : null}
-
-      <section className="console-panel requests-panel">
-        <div className="panel-heading">
-          <div>
-            <span>REQUESTS / 03</span>
-            <h2>{c.recentRequests}</h2>
-          </div>
-          <a href="/docs">{c.apiDocs}</a>
-        </div>
-        <div className="requests-table-wrap">
-          <table className="requests-table">
-            <thead>
-              <tr>
-                <th>{c.time}</th>
-                <th>{c.request}</th>
-                <th>{c.platform}</th>
-                <th>{c.status}</th>
-                <th>{c.latency}</th>
-                <th>{c.cost}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recentCalls.map((call) => (
-                <tr key={call.id}>
-                  <td>{formatDate(call.createdAt, locale, true)}</td>
-                  <td>
-                    <span className="request-path">
-                      <i>{call.method}</i>
-                      <code>{call.path}</code>
-                    </span>
-                  </td>
-                  <td>
-                    {platformDisplayName(
-                      call.platform,
-                      call.platform,
-                      locale,
-                    )}
-                  </td>
-                  <td>
-                    <span
-                      className={`request-status ${
-                        call.statusCode >= 200 && call.statusCode < 300
-                          ? "request-ok"
-                          : "request-failed"
-                      }`}
-                    >
-                      {call.statusCode}
-                    </span>
-                  </td>
-                  <td>{call.latencyMs} ms</td>
-                  <td>
-                    {formatUsd(call.refunded ? 0 : call.costUsdMicros, 4)}
-                    {call.refunded ? (
-                      <small className="request-refunded">{c.refunded}</small>
-                    ) : null}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {!loading && recentCalls.length === 0 ? (
-            <div className="table-empty">
-              <span>NO REQUESTS YET</span>
-              <p>
-                {user
-                  ? c.noRequestsUser
-                  : c.noRequestsGuest}
-              </p>
-              <a href={user ? "/docs" : loginPath}>
-                {user ? c.quickstart : c.consoleLogin}
-              </a>
-            </div>
-          ) : null}
-        </div>
-      </section>
-
-      <section className="console-panel payment-history">
-        <div className="panel-heading">
-          <div>
-            <span>LEDGER / 04</span>
-            <h2>{c.recentTopups}</h2>
+            <span className="console-breadcrumb">{workspaceMeta.eyebrow}</span>
+            <h1>{workspaceMeta.label}</h1>
+            <p>{workspaceMeta.description}</p>
           </div>
           <button
+            className="console-refresh"
             type="button"
             onClick={() => void refreshDashboard()}
             disabled={!user || loading}
           >
             {loading ? c.refreshing : c.refreshStatus}
           </button>
+        </header>
+
+        {authChecking ? (
+          <section className="console-auth-banner" role="status">
+            <span aria-hidden="true">···</span>
+            <div>
+              <b>{c.checkingSessionTitle}</b>
+              <p>{c.checkingSessionBody}</p>
+            </div>
+          </section>
+        ) : null}
+
+        <div className="console-announcer" aria-live="polite" aria-atomic="true">
+          {error ? (
+            <div className="console-alert console-alert-error">
+              <span>!</span>
+              <p>{error}</p>
+              <button type="button" onClick={() => void refreshDashboard()}>
+                {c.retry}
+              </button>
+            </div>
+          ) : null}
+          {notice ? (
+            <div className="console-alert console-alert-success">
+              <span>✓</span>
+              <p>{notice}</p>
+              <button
+                type="button"
+                aria-label={c.closeNotice}
+                onClick={() => setNotice(null)}
+              >
+                ×
+              </button>
+            </div>
+          ) : null}
         </div>
-        {recentPayments.length > 0 ? (
-          <div className="payment-list">
-            {recentPayments.map((payment) => (
-              <article key={payment.id}>
-                <span
-                  className={`payment-dot payment-${paymentStatusClass(payment.status)}`}
-                  aria-hidden="true"
-                />
-                <div>
-                  <b>{formatUsd(payment.amountUsdMicros)}</b>
-                  <span>
-                    {c.credited} {formatUsd(payment.creditedUsdMicros)}
-                    {payment.reversedUsdMicros > 0
-                      ? ` · ${c.reversed} ${formatUsd(payment.reversedUsdMicros)}`
-                      : ""}
-                    {" · "}
-                    {currencyLabel(payment.payCurrency)}
-                    {paymentReviewReason(payment.reviewReason, locale)
-                      ? ` · ${paymentReviewReason(payment.reviewReason, locale)}`
-                      : ""}
-                  </span>
-                </div>
-                <code>{payment.id}</code>
-                <span>{formatDate(payment.createdAt, locale, true)}</span>
-                <strong>{paymentStatus(payment.status, locale)}</strong>
-                {payment.payAddress &&
-                ![
-                  "finished",
-                  "failed",
-                  "expired",
-                  "refunded",
-                  "manual_review",
-                  "manual_resolved",
-                  "provider_error",
-                ].includes(payment.status.toLowerCase()) ? (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setInvoice({
-                        id: payment.id,
-                        status: payment.status,
-                        payAddress: payment.payAddress,
-                        payAmount: payment.payAmount,
-                        payCurrency: payment.payCurrency,
-                        invoiceUrl: payment.invoiceUrl,
-                      })
-                    }
-                  >
-                    {c.continuePayment}
-                  </button>
-                ) : null}
+
+        {workspace === "dashboard" ? (
+          <>
+            <section className="console-metric-grid" aria-label={c.accountOverview}>
+              <article className="console-metric console-metric-primary">
+                <span>{c.availableBalance}</span>
+                <strong className={loading ? "loading-value" : ""}>
+                  {formatUsd(dashboard?.balanceUsdMicros)}
+                </strong>
+                <small>USD</small>
               </article>
-            ))}
-          </div>
-        ) : (
-          <div className="panel-empty panel-empty-inline">
-            <span>PAY_00</span>
-            <p>{user ? c.noTopups : c.loginForTopups}</p>
-          </div>
-        )}
-      </section>
+              <article className="console-metric">
+                <span>{c.calls30d}</span>
+                <strong className={loading ? "loading-value" : ""}>
+                  {dashboard?.stats.calls30d?.toLocaleString() ?? "—"}
+                </strong>
+                <small>API REQUESTS</small>
+              </article>
+              <article className="console-metric">
+                <span>{c.spend30d}</span>
+                <strong className={loading ? "loading-value" : ""}>
+                  {formatUsd(dashboard?.stats.spend30dUsdMicros)}
+                </strong>
+                <small>USAGE SPEND</small>
+              </article>
+              <article className="console-metric">
+                <span>{c.successRate}</span>
+                <strong className={loading ? "loading-value" : ""}>
+                  {formatRate(dashboard?.stats.successRate)}
+                </strong>
+                <small>LAST 30 DAYS</small>
+              </article>
+            </section>
+
+            <section className="console-quick-actions" aria-label={c.quickActions}>
+              <div>
+                <span>QUICK ACTIONS</span>
+                <h2>{c.quickActions}</h2>
+              </div>
+              <a href="/catalog">
+                <b>{c.browseData}</b>
+                <small>{c.browseDataBody}</small>
+                <i>→</i>
+              </a>
+              <a href="/console/keys">
+                <b>{c.createFirstKey}</b>
+                <small>{c.createFirstKeyBody}</small>
+                <i>→</i>
+              </a>
+              <a href="/console/billing">
+                <b>{c.addFunds}</b>
+                <small>{c.addFundsBody}</small>
+                <i>→</i>
+              </a>
+            </section>
+
+            <div className="console-dashboard-grid">
+              <section className="console-panel requests-panel">
+                <div className="panel-heading">
+                  <div>
+                    <span>API ACTIVITY</span>
+                    <h2>{c.recentRequests}</h2>
+                  </div>
+                  <a href="/docs">{c.apiDocs}</a>
+                </div>
+                <div className="requests-table-wrap">
+                  <table className="requests-table">
+                    <thead>
+                      <tr>
+                        <th>{c.time}</th>
+                        <th>{c.request}</th>
+                        <th>{c.platform}</th>
+                        <th>{c.status}</th>
+                        <th>{c.latency}</th>
+                        <th>{c.cost}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {recentCalls.map((call) => (
+                        <tr key={call.id}>
+                          <td>{formatDate(call.createdAt, locale, true)}</td>
+                          <td>
+                            <span className="request-path">
+                              <i>{call.method}</i>
+                              <code>{call.path}</code>
+                            </span>
+                          </td>
+                          <td>{platformDisplayName(call.platform, call.platform, locale)}</td>
+                          <td>
+                            <span className={`request-status ${
+                              call.statusCode >= 200 && call.statusCode < 300
+                                ? "request-ok"
+                                : "request-failed"
+                            }`}>
+                              {call.statusCode}
+                            </span>
+                          </td>
+                          <td>{call.latencyMs} ms</td>
+                          <td>{formatUsd(call.refunded ? 0 : call.costUsdMicros, 4)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {!loading && recentCalls.length === 0 ? (
+                    <div className="table-empty">
+                      <span>NO REQUESTS YET</span>
+                      <p>{c.noRequestsUser}</p>
+                      <a href="/docs">{c.quickstart}</a>
+                    </div>
+                  ) : null}
+                </div>
+              </section>
+
+              <div className="console-dashboard-side">
+                <section className="console-panel console-checklist">
+                  <div className="panel-heading">
+                    <div>
+                      <span>SETUP</span>
+                      <h2>{c.gettingStarted}</h2>
+                    </div>
+                  </div>
+                  <ol>
+                    {setupSteps.map((step, index) => (
+                      <li className={step.complete ? "is-complete" : undefined} key={step.label}>
+                        <span>{step.complete ? "✓" : index + 1}</span>
+                        <div>
+                          <b>{step.label}</b>
+                          <a href={step.href}>
+                            {step.complete ? c.complete : c.nextStep} →
+                          </a>
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                </section>
+
+                <section className="console-panel console-status-panel">
+                  <div className="panel-heading">
+                    <div>
+                      <span>ACCOUNT</span>
+                      <h2>{c.accountStatus}</h2>
+                    </div>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>{c.apiAccess}</dt>
+                      <dd className={activeKeys.length > 0 ? "status-ready" : "status-warning"}>
+                        {activeKeys.length > 0 ? c.ready : c.actionRequired}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{c.catalogAccess}</dt>
+                      <dd className={dashboard?.capabilities.catalogReady ? "status-ready" : "status-warning"}>
+                        {dashboard?.capabilities.catalogReady ? c.ready : c.unavailable}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{c.billingChannel}</dt>
+                      <dd className={paymentsEnabled ? "status-ready" : "status-warning"}>
+                        {paymentsEnabled ? c.enabled : c.unavailable}
+                      </dd>
+                    </div>
+                  </dl>
+                </section>
+              </div>
+            </div>
+          </>
+        ) : null}
+
+        {workspace === "keys" ? (
+          <>
+            <section className="console-compact-metrics" aria-label={c.keyStatus}>
+              <article><span>{c.activeKeys}</span><strong>{activeKeys.length}</strong></article>
+              <article><span>{c.keysUsed}</span><strong>{usedKeys}</strong></article>
+              <article><span>{c.keysUnused}</span><strong>{unusedKeys}</strong></article>
+            </section>
+
+            <div className="console-keys-grid">
+              <section className="console-panel keys-panel">
+                <div className="panel-heading">
+                  <div>
+                    <span>ACCESS CREDENTIALS</span>
+                    <h2>{c.credentialInventory}</h2>
+                  </div>
+                  <span className="panel-count">{activeKeys.length} {c.active.toUpperCase()}</span>
+                </div>
+                <form className="key-form" onSubmit={createKey}>
+                  <label htmlFor="key-label">{c.newKeyLabel}</label>
+                  <div>
+                    <input
+                      id="key-label"
+                      value={keyLabel}
+                      onChange={(event) => setKeyLabel(event.target.value)}
+                      placeholder={c.keyPlaceholder}
+                      maxLength={64}
+                      disabled={!user || creatingKey}
+                      required
+                    />
+                    <button
+                      className="button button-blue"
+                      type="submit"
+                      disabled={!user || creatingKey || !keyLabel.trim()}
+                    >
+                      {creatingKey ? c.creating : c.createKey}
+                    </button>
+                  </div>
+                </form>
+
+                {createdKey ? (
+                  <div className="created-key-card">
+                    <div>
+                      <span>{c.showOnce}</span>
+                      <button type="button" aria-label={c.closeNewKey} onClick={() => setCreatedKey(null)}>×</button>
+                    </div>
+                    <p>{c.saveSecret}</p>
+                    <div className="secret-value">
+                      <code>{createdKey.secret}</code>
+                      <button type="button" onClick={() => void copyText(createdKey.secret, c.keyCopied)}>
+                        {c.copy}
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="key-table-wrap">
+                  {loading ? (
+                    <div className="panel-loading">{c.loadingKeys}</div>
+                  ) : activeKeys.length > 0 ? (
+                    <table className="key-table">
+                      <thead>
+                        <tr>
+                          <th>{c.keyName}</th>
+                          <th>{c.keyPrefix}</th>
+                          <th>{c.created}</th>
+                          <th>{c.lastUsed}</th>
+                          <th>{c.keyStatus}</th>
+                          <th>{c.actions}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {activeKeys.map((key) => (
+                          <tr key={key.id}>
+                            <td><b>{key.label}</b></td>
+                            <td><code>{key.prefix}••••••••</code></td>
+                            <td>{formatDate(key.createdAt, locale)}</td>
+                            <td>{formatDate(key.lastUsedAt, locale, true)}</td>
+                            <td><span className="key-active">{c.active}</span></td>
+                            <td>
+                              <button
+                                className="key-revoke"
+                                type="button"
+                                disabled={revokingId === key.id}
+                                onClick={() => void revokeKey(key)}
+                              >
+                                {revokingId === key.id ? c.revoking : c.revoke}
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <div className="panel-empty">
+                      <span>KEY_00</span>
+                      <p>{c.noKeys}</p>
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              <aside className="console-panel security-panel">
+                <div className="panel-heading">
+                  <div>
+                    <span>BEST PRACTICES</span>
+                    <h2>{c.securityPractices}</h2>
+                  </div>
+                </div>
+                <p>{c.credentialHelp}</p>
+                <ul>
+                  {c.securityItems.map((item, index) => (
+                    <li key={item}><span>{index + 1}</span>{item}</li>
+                  ))}
+                </ul>
+                <a href="/docs">{c.documentation} →</a>
+              </aside>
+            </div>
+          </>
+        ) : null}
+
+        {workspace === "billing" ? (
+          <>
+            <section className="console-compact-metrics billing-metrics" aria-label={c.accountOverview}>
+              <article className="is-primary">
+                <span>{c.availableBalance}</span>
+                <strong>{formatUsd(dashboard?.balanceUsdMicros)}</strong>
+              </article>
+              <article><span>{c.spend30d}</span><strong>{formatUsd(dashboard?.stats.spend30dUsdMicros)}</strong></article>
+              <article><span>{c.recentCredits}</span><strong>{formatUsd(recentCreditsUsdMicros)}</strong></article>
+              <article><span>{c.openOrders}</span><strong>{openPayments.length}</strong></article>
+            </section>
+
+            <div className="console-billing-grid">
+              <section className="console-panel topup-panel">
+                <div className="panel-heading">
+                  <div>
+                    <span>ADD FUNDS</span>
+                    <h2>{c.topupTitle}</h2>
+                  </div>
+                  <span className="pay-badge">STABLECOIN</span>
+                </div>
+                <form onSubmit={createPayment}>
+                  <fieldset disabled={!user || loading || creatingPayment || !paymentsEnabled}>
+                    <legend>{c.topupAmount}</legend>
+                    <div className="amount-options">
+                      {amountOptions.map((amount) => (
+                        <label key={amount}>
+                          <input
+                            type="radio"
+                            name="amount"
+                            value={amount}
+                            checked={amountUsd === amount}
+                            onChange={() => {
+                              paymentAttemptKey.current = null;
+                              setAmountUsd(amount);
+                            }}
+                          />
+                          <span>${amount}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <label className="currency-select">
+                      <span>{c.assetNetwork}</span>
+                      <select
+                        value={payCurrency}
+                        onChange={(event) => {
+                          paymentAttemptKey.current = null;
+                          setPayCurrency(event.target.value as typeof payCurrency);
+                        }}
+                      >
+                        {currencyOptions.map((currency) => (
+                          <option value={currency.value} key={currency.value}>{currency.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </fieldset>
+                  <button
+                    className="button button-lime topup-submit"
+                    type="submit"
+                    disabled={!user || loading || creatingPayment || !paymentsEnabled}
+                  >
+                    {creatingPayment ? c.creatingInvoice : c.topup(amountUsd)}
+                    <span aria-hidden="true">↗</span>
+                  </button>
+                </form>
+                <p className="topup-warning">
+                  {user && !loading && !paymentsEnabled
+                    ? !commercialClearanceConfirmed
+                      ? c.clearanceClosed
+                      : c.topupUnavailable
+                    : c.topupSafety}
+                </p>
+              </section>
+
+              <aside className="console-panel billing-help">
+                <div className="panel-heading">
+                  <div><span>PAYMENT FLOW</span><h2>{c.billingHelpTitle}</h2></div>
+                </div>
+                <p>{c.billingHelp}</p>
+                <ol>
+                  <li><span>1</span>{c.topupAmount}</li>
+                  <li><span>2</span>{c.assetNetwork}</li>
+                  <li><span>3</span>{c.balanceAutoUpdate}</li>
+                </ol>
+              </aside>
+            </div>
+
+            {visibleInvoice ? (
+              <section className="invoice-panel">
+                <div className="invoice-title">
+                  <div><span>PAYMENT INVOICE</span><h2>{c.invoiceTitle}</h2></div>
+                  <button type="button" aria-label={c.closeInvoice} onClick={() => setInvoice(null)}>×</button>
+                </div>
+                <div className="invoice-grid">
+                  <div>
+                    <span>{c.amountDue}</span>
+                    <strong>{visibleInvoice.payAmount ?? "—"}</strong>
+                    <small>{currencyLabel(visibleInvoice.payCurrency)}</small>
+                  </div>
+                  <div className="invoice-address">
+                    <span>{c.receivingAddress}</span>
+                    <code>{visibleInvoice.payAddress ?? c.addressPending}</code>
+                    {visibleInvoice.payAddress ? (
+                      <button type="button" onClick={() => void copyText(visibleInvoice.payAddress!, c.addressCopied)}>
+                        {c.copyAddress}
+                      </button>
+                    ) : null}
+                  </div>
+                  <div>
+                    <span>{c.currentStatus}</span>
+                    <strong className="invoice-status">{paymentStatus(visibleInvoice.status, locale)}</strong>
+                    <small>{c.balanceAutoUpdate}</small>
+                  </div>
+                </div>
+                {visibleInvoice.invoiceUrl ? (
+                  <a className="button button-dark" href={visibleInvoice.invoiceUrl} target="_blank" rel="noreferrer">
+                    {c.openInvoice}
+                  </a>
+                ) : null}
+              </section>
+            ) : null}
+
+            <section className="console-panel payment-history">
+              <div className="panel-heading">
+                <div><span>ACCOUNT LEDGER</span><h2>{c.paymentActivity}</h2></div>
+                <button type="button" onClick={() => void refreshDashboard()} disabled={!user || loading}>
+                  {loading ? c.refreshing : c.refreshStatus}
+                </button>
+              </div>
+              {recentPayments.length > 0 ? (
+                <div className="payment-list">
+                  {recentPayments.map((payment) => (
+                    <article key={payment.id}>
+                      <span className={`payment-dot payment-${paymentStatusClass(payment.status)}`} aria-hidden="true" />
+                      <div>
+                        <b>{formatUsd(payment.amountUsdMicros)}</b>
+                        <span>
+                          {c.credited} {formatUsd(payment.creditedUsdMicros)}
+                          {payment.reversedUsdMicros > 0 ? ` · ${c.reversed} ${formatUsd(payment.reversedUsdMicros)}` : ""}
+                          {" · "}{currencyLabel(payment.payCurrency)}
+                          {paymentReviewReason(payment.reviewReason, locale)
+                            ? ` · ${paymentReviewReason(payment.reviewReason, locale)}`
+                            : ""}
+                        </span>
+                      </div>
+                      <code>{payment.id}</code>
+                      <span>{formatDate(payment.createdAt, locale, true)}</span>
+                      <strong>{paymentStatus(payment.status, locale)}</strong>
+                      {payment.payAddress && !terminalPaymentStatuses.has(payment.status.toLowerCase()) ? (
+                        <button
+                          type="button"
+                          onClick={() => setInvoice({
+                            id: payment.id,
+                            status: payment.status,
+                            payAddress: payment.payAddress,
+                            payAmount: payment.payAmount,
+                            payCurrency: payment.payCurrency,
+                            invoiceUrl: payment.invoiceUrl,
+                          })}
+                        >
+                          {c.continuePayment}
+                        </button>
+                      ) : null}
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="panel-empty panel-empty-inline">
+                  <span>PAY_00</span><p>{c.noTopups}</p>
+                </div>
+              )}
+            </section>
+          </>
+        ) : null}
+      </div>
     </div>
   );
 }
