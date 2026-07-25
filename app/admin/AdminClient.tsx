@@ -428,6 +428,32 @@ type X402Runtime = {
   payTo: string | null;
 };
 
+type X402RuntimeConfiguration = {
+  source: "managed" | "environment";
+  managedEnabled: boolean;
+  enabled: boolean;
+  payTo: string | null;
+  facilitatorUrl: string;
+  facilitatorProvider: "cdp" | "custom";
+  revision: number;
+  updatedAt: string | null;
+  encryptionConfigured: boolean;
+  issue: string | null;
+  managedCredentials: {
+    cdpApiKeyIdConfigured: boolean;
+    cdpApiKeyIdFingerprint: string | null;
+    cdpApiKeySecretConfigured: boolean;
+    cdpApiKeySecretFingerprint: string | null;
+    bearerTokenConfigured: boolean;
+    bearerTokenFingerprint: string | null;
+  };
+  environmentCredentials: {
+    cdpApiKeyIdConfigured: boolean;
+    cdpApiKeySecretConfigured: boolean;
+    bearerTokenConfigured: boolean;
+  };
+};
+
 type AdminX402Batch = {
   id: string;
   endpoint: string;
@@ -447,6 +473,7 @@ type AdminX402Batch = {
 
 type AdminX402Response = {
   runtime: X402Runtime;
+  configuration: X402RuntimeConfiguration;
   accounting: {
     period: "30d";
     recognizedRevenueUsdMicros: number;
@@ -481,6 +508,22 @@ type X402ConfigMutationResponse = {
     revision: number;
   };
   runtime: X402Runtime;
+};
+
+type X402RuntimeConfigMutationResponse = {
+  runtime: X402Runtime;
+  configuration: X402RuntimeConfiguration;
+};
+
+type X402RuntimeConfigDraft = {
+  managedEnabled: boolean;
+  enabled: boolean;
+  payTo: string;
+  facilitatorProvider: "cdp" | "custom";
+  facilitatorUrl: string;
+  cdpApiKeyId: string;
+  cdpApiKeySecret: string;
+  bearerToken: string;
 };
 
 type PaymentRecoveryResponse = {
@@ -1472,6 +1515,42 @@ function isX402Runtime(value: unknown): value is X402Runtime {
   );
 }
 
+function isX402RuntimeConfiguration(
+  value: unknown,
+): value is X402RuntimeConfiguration {
+  if (
+    !isObject(value) ||
+    (value.source !== "managed" && value.source !== "environment") ||
+    typeof value.managedEnabled !== "boolean" ||
+    typeof value.enabled !== "boolean" ||
+    !isNullableString(value.payTo, 80) ||
+    !isNonEmptyString(value.facilitatorUrl, 2_000) ||
+    (value.facilitatorProvider !== "cdp" &&
+      value.facilitatorProvider !== "custom") ||
+    !isSafeNonNegativeInteger(value.revision) ||
+    !isNullableString(value.updatedAt, 80) ||
+    typeof value.encryptionConfigured !== "boolean" ||
+    !isNullableString(value.issue, 100) ||
+    !isObject(value.managedCredentials) ||
+    !isObject(value.environmentCredentials)
+  ) {
+    return false;
+  }
+  const managed = value.managedCredentials;
+  const environment = value.environmentCredentials;
+  return (
+    typeof managed.cdpApiKeyIdConfigured === "boolean" &&
+    isNullableString(managed.cdpApiKeyIdFingerprint, 32) &&
+    typeof managed.cdpApiKeySecretConfigured === "boolean" &&
+    isNullableString(managed.cdpApiKeySecretFingerprint, 32) &&
+    typeof managed.bearerTokenConfigured === "boolean" &&
+    isNullableString(managed.bearerTokenFingerprint, 32) &&
+    typeof environment.cdpApiKeyIdConfigured === "boolean" &&
+    typeof environment.cdpApiKeySecretConfigured === "boolean" &&
+    typeof environment.bearerTokenConfigured === "boolean"
+  );
+}
+
 function isAdminX402Batch(value: unknown): value is AdminX402Batch {
   return (
     isObject(value) &&
@@ -1496,7 +1575,11 @@ function isAdminX402Batch(value: unknown): value is AdminX402Batch {
 function isAdminX402Response(
   value: unknown,
 ): value is AdminX402Response {
-  if (!isObject(value) || !isX402Runtime(value.runtime)) {
+  if (
+    !isObject(value) ||
+    !isX402Runtime(value.runtime) ||
+    !isX402RuntimeConfiguration(value.configuration)
+  ) {
     return false;
   }
   const accounting = value.accounting;
@@ -1529,6 +1612,16 @@ function isAdminX402Response(
       "facilitator_settlement_success_with_base_transaction_hash" &&
     value.batches.length <= 200 &&
     value.batches.every(isAdminX402Batch)
+  );
+}
+
+function isX402RuntimeConfigMutationResponse(
+  value: unknown,
+): value is X402RuntimeConfigMutationResponse {
+  return (
+    isObject(value) &&
+    isX402Runtime(value.runtime) &&
+    isX402RuntimeConfiguration(value.configuration)
   );
 }
 
@@ -2664,6 +2757,19 @@ export function AdminClient() {
   const [x402Admin, setX402Admin] = useState<
     RemoteState<AdminX402Response>
   >({ status: "idle" });
+  const [x402RuntimeDraft, setX402RuntimeDraft] =
+    useState<X402RuntimeConfigDraft>({
+      managedEnabled: false,
+      enabled: false,
+      payTo: "",
+      facilitatorProvider: "cdp",
+      facilitatorUrl:
+        "https://api.cdp.coinbase.com/platform/v2/x402",
+      cdpApiKeyId: "",
+      cdpApiKeySecret: "",
+      bearerToken: "",
+    });
+  const [savingX402Runtime, setSavingX402Runtime] = useState(false);
   const [paymentReviews, setPaymentReviews] = useState<
     RemoteState<PaymentReviewsResponse>
   >({ status: "idle" });
@@ -3073,6 +3179,17 @@ export function AdminClient() {
         isAdminX402Response,
       );
       setX402Admin({ status: "ready", data });
+      setX402RuntimeDraft({
+        managedEnabled: data.configuration.managedEnabled,
+        enabled: data.configuration.enabled,
+        payTo: data.configuration.payTo ?? "",
+        facilitatorProvider:
+          data.configuration.facilitatorProvider,
+        facilitatorUrl: data.configuration.facilitatorUrl,
+        cdpApiKeyId: "",
+        cdpApiKeySecret: "",
+        bearerToken: "",
+      });
     } catch (error) {
       setX402Admin({
         status: "error",
@@ -4004,6 +4121,95 @@ export function AdminClient() {
       );
     } finally {
       setSavingX402Path("");
+    }
+  }
+
+  async function saveX402RuntimeConfig() {
+    if (x402Admin.status !== "ready") return;
+    const config = x402Admin.data.configuration;
+    const payTo = x402RuntimeDraft.payTo.trim();
+    if (
+      x402RuntimeDraft.managedEnabled &&
+      !/^0x[0-9a-fA-F]{40}$/.test(payTo)
+    ) {
+      setNotice("请输入有效的 Base 收款 EVM 0x 地址。");
+      return;
+    }
+    try {
+      const facilitator = new URL(
+        x402RuntimeDraft.facilitatorUrl.trim(),
+      );
+      if (
+        facilitator.protocol !== "https:" ||
+        facilitator.username ||
+        facilitator.password ||
+        facilitator.search ||
+        facilitator.hash
+      ) {
+        throw new Error();
+      }
+    } catch {
+      setNotice("facilitator 地址必须是安全的 HTTPS 地址。");
+      return;
+    }
+    if (
+      x402RuntimeDraft.managedEnabled &&
+      x402RuntimeDraft.facilitatorProvider === "cdp" &&
+      ((!config.managedCredentials.cdpApiKeyIdConfigured &&
+        !x402RuntimeDraft.cdpApiKeyId) ||
+        (!config.managedCredentials.cdpApiKeySecretConfigured &&
+          !x402RuntimeDraft.cdpApiKeySecret))
+    ) {
+      setNotice("启用后台托管 CDP 前，请填写 API Key ID 与 Ed25519 Secret。");
+      return;
+    }
+    if (
+      x402RuntimeDraft.managedEnabled &&
+      x402RuntimeDraft.facilitatorProvider === "custom" &&
+      !config.managedCredentials.bearerTokenConfigured &&
+      !x402RuntimeDraft.bearerToken
+    ) {
+      setNotice("启用自定义 facilitator 前，请填写 Bearer Token。");
+      return;
+    }
+    setSavingX402Runtime(true);
+    setNotice("");
+    try {
+      const result = await adminRequest(
+        "/api/admin/x402/runtime-config",
+        adminSecret,
+        isX402RuntimeConfigMutationResponse,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            managedEnabled: x402RuntimeDraft.managedEnabled,
+            enabled: x402RuntimeDraft.enabled,
+            payTo,
+            facilitatorUrl: x402RuntimeDraft.facilitatorUrl.trim(),
+            cdpApiKeyId:
+              x402RuntimeDraft.cdpApiKeyId || undefined,
+            cdpApiKeySecret:
+              x402RuntimeDraft.cdpApiKeySecret || undefined,
+            bearerToken:
+              x402RuntimeDraft.bearerToken || undefined,
+            expectedRevision: config.revision,
+          }),
+        },
+      );
+      setNotice(
+        result.runtime.mode === "live"
+          ? "x402 收款地址与 facilitator 凭据已加密保存，运行时当前在线。"
+          : "x402 运行配置已加密保存；当前仍未就绪，请按状态提示补齐条件。",
+      );
+      await Promise.all([loadX402Admin(), loadCatalog(), loadOverview()]);
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "x402 运行配置保存失败。",
+      );
+    } finally {
+      setSavingX402Runtime(false);
     }
   }
 
@@ -6196,6 +6402,277 @@ export function AdminClient() {
                             : "正在读取结算运行时"}
                         </span>
                       </div>
+                      {x402Admin.status === "ready" ? (
+                        <section className="admin-x402-runtime-config">
+                          <div className="admin-x402-runtime-config-head">
+                            <div>
+                              <p className="section-kicker">
+                                SETTLEMENT RUNTIME / SECRET STORAGE
+                              </p>
+                              <h4>收款与 facilitator 配置</h4>
+                              <p>
+                                收款地址公开参与报价；facilitator
+                                凭据使用服务端主密钥加密后存入 D1，页面与接口永不回显原文。
+                              </p>
+                            </div>
+                            <div className="admin-x402-runtime-badges">
+                              <span>
+                                {x402Admin.data.configuration.source ===
+                                "managed"
+                                  ? "后台托管"
+                                  : "环境变量"}
+                              </span>
+                              <span>
+                                revision{" "}
+                                {x402Admin.data.configuration.revision}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="admin-x402-runtime-switches">
+                            <label>
+                              <input
+                                type="checkbox"
+                                checked={
+                                  x402RuntimeDraft.managedEnabled
+                                }
+                                onChange={(event) =>
+                                  setX402RuntimeDraft((current) => ({
+                                    ...current,
+                                    managedEnabled: event.target.checked,
+                                    enabled: event.target.checked
+                                      ? current.enabled
+                                      : false,
+                                  }))
+                                }
+                              />
+                              <span>
+                                <strong>由运营后台托管</strong>
+                                <small>
+                                  关闭后回退到部署环境变量，不会删除已加密凭据。
+                                </small>
+                              </span>
+                            </label>
+                            <label>
+                              <input
+                                type="checkbox"
+                                checked={x402RuntimeDraft.enabled}
+                                disabled={
+                                  !x402RuntimeDraft.managedEnabled
+                                }
+                                onChange={(event) =>
+                                  setX402RuntimeDraft((current) => ({
+                                    ...current,
+                                    enabled: event.target.checked,
+                                  }))
+                                }
+                              />
+                              <span>
+                                <strong>允许创建新 x402 批次</strong>
+                                <small>
+                                  仅在地址、凭据、目录和路由全部就绪后真正在线。
+                                </small>
+                              </span>
+                            </label>
+                          </div>
+                          <div className="admin-x402-runtime-fields">
+                            <label className="is-wide">
+                              <span>Base USDC 收款地址</span>
+                              <input
+                                type="text"
+                                spellCheck={false}
+                                autoComplete="off"
+                                maxLength={42}
+                                disabled={
+                                  !x402RuntimeDraft.managedEnabled
+                                }
+                                value={x402RuntimeDraft.payTo}
+                                onChange={(event) =>
+                                  setX402RuntimeDraft((current) => ({
+                                    ...current,
+                                    payTo: event.target.value,
+                                  }))
+                                }
+                                placeholder="0x…"
+                              />
+                            </label>
+                            <label>
+                              <span>facilitator 类型</span>
+                              <select
+                                disabled={
+                                  !x402RuntimeDraft.managedEnabled
+                                }
+                                value={
+                                  x402RuntimeDraft.facilitatorProvider
+                                }
+                                onChange={(event) => {
+                                  const provider =
+                                    event.target.value === "custom"
+                                      ? "custom"
+                                      : "cdp";
+                                  setX402RuntimeDraft((current) => ({
+                                    ...current,
+                                    facilitatorProvider: provider,
+                                    facilitatorUrl:
+                                      provider === "cdp"
+                                        ? "https://api.cdp.coinbase.com/platform/v2/x402"
+                                        : current.facilitatorProvider ===
+                                            "custom"
+                                          ? current.facilitatorUrl
+                                          : "",
+                                  }));
+                                }}
+                              >
+                                <option value="cdp">Coinbase CDP</option>
+                                <option value="custom">
+                                  自定义 facilitator
+                                </option>
+                              </select>
+                            </label>
+                            <label>
+                              <span>facilitator HTTPS 地址</span>
+                              <input
+                                type="url"
+                                spellCheck={false}
+                                maxLength={2_000}
+                                disabled={
+                                  !x402RuntimeDraft.managedEnabled ||
+                                  x402RuntimeDraft.facilitatorProvider ===
+                                    "cdp"
+                                }
+                                value={x402RuntimeDraft.facilitatorUrl}
+                                onChange={(event) =>
+                                  setX402RuntimeDraft((current) => ({
+                                    ...current,
+                                    facilitatorUrl: event.target.value,
+                                  }))
+                                }
+                                placeholder="https://…/x402"
+                              />
+                            </label>
+                            {x402RuntimeDraft.facilitatorProvider ===
+                            "cdp" ? (
+                              <>
+                                <label>
+                                  <span>CDP API Key ID</span>
+                                  <input
+                                    type="password"
+                                    autoComplete="new-password"
+                                    maxLength={512}
+                                    disabled={
+                                      !x402RuntimeDraft.managedEnabled
+                                    }
+                                    value={
+                                      x402RuntimeDraft.cdpApiKeyId
+                                    }
+                                    onChange={(event) =>
+                                      setX402RuntimeDraft((current) => ({
+                                        ...current,
+                                        cdpApiKeyId:
+                                          event.target.value,
+                                      }))
+                                    }
+                                    placeholder={
+                                      x402Admin.data.configuration
+                                        .managedCredentials
+                                        .cdpApiKeyIdConfigured
+                                        ? "已配置；留空保留"
+                                        : "请输入 CDP API Key ID"
+                                    }
+                                  />
+                                  <small>
+                                    {x402Admin.data.configuration
+                                      .managedCredentials
+                                      .cdpApiKeyIdFingerprint
+                                      ? `指纹 ${x402Admin.data.configuration.managedCredentials.cdpApiKeyIdFingerprint}`
+                                      : "不会回显原文"}
+                                  </small>
+                                </label>
+                                <label>
+                                  <span>CDP Ed25519 Secret</span>
+                                  <input
+                                    type="password"
+                                    autoComplete="new-password"
+                                    maxLength={256}
+                                    disabled={
+                                      !x402RuntimeDraft.managedEnabled
+                                    }
+                                    value={
+                                      x402RuntimeDraft.cdpApiKeySecret
+                                    }
+                                    onChange={(event) =>
+                                      setX402RuntimeDraft((current) => ({
+                                        ...current,
+                                        cdpApiKeySecret:
+                                          event.target.value,
+                                      }))
+                                    }
+                                    placeholder={
+                                      x402Admin.data.configuration
+                                        .managedCredentials
+                                        .cdpApiKeySecretConfigured
+                                        ? "已配置；留空保留"
+                                        : "64-byte Ed25519 Base64"
+                                    }
+                                  />
+                                  <small>
+                                    仅用于 RelayBase 向 CDP
+                                    鉴权，不是调用方钱包私钥。
+                                  </small>
+                                </label>
+                              </>
+                            ) : (
+                              <label className="is-wide">
+                                <span>facilitator Bearer Token</span>
+                                <input
+                                  type="password"
+                                  autoComplete="new-password"
+                                  maxLength={4_096}
+                                  disabled={
+                                    !x402RuntimeDraft.managedEnabled
+                                  }
+                                  value={x402RuntimeDraft.bearerToken}
+                                  onChange={(event) =>
+                                    setX402RuntimeDraft((current) => ({
+                                      ...current,
+                                      bearerToken: event.target.value,
+                                    }))
+                                  }
+                                  placeholder={
+                                    x402Admin.data.configuration
+                                      .managedCredentials
+                                      .bearerTokenConfigured
+                                      ? "已配置；留空保留"
+                                      : "请输入服务端 Bearer Token"
+                                  }
+                                />
+                              </label>
+                            )}
+                          </div>
+                          <div className="admin-x402-runtime-actions">
+                            <p>
+                              {x402Admin.data.configuration
+                                .encryptionConfigured
+                                ? "✓ 服务端凭据加密主密钥已配置"
+                                : "! 缺少服务端凭据加密主密钥，无法启用后台托管"}
+                              {x402Admin.data.configuration.issue
+                                ? ` · 当前异常：${x402Admin.data.configuration.issue}`
+                                : ""}
+                            </p>
+                            <button
+                              className="button button-dark"
+                              type="button"
+                              disabled={savingX402Runtime}
+                              onClick={() =>
+                                void saveX402RuntimeConfig()
+                              }
+                            >
+                              {savingX402Runtime
+                                ? "加密保存中…"
+                                : "保存运行配置"}
+                            </button>
+                          </div>
+                        </section>
+                      ) : null}
                       <div className="admin-toolbar admin-catalog-batch-selector">
                         <label>
                           <span>搜索路由</span>

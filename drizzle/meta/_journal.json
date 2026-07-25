@@ -120,6 +120,13 @@
       "when": 1784951589701,
       "tag": "0016_windy_lord_tyger",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1784969119647,
+      "tag": "0017_omniscient_zarda",
+      "breakpoints": true
     }
   ]
 }

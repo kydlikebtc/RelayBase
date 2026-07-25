@@ -8,8 +8,8 @@ export const X402_PAYMENT_SIGNATURE_HEADER = "payment-signature";
 export const X402_PAYMENT_RESPONSE_HEADER = "payment-response";
 export const X402_BATCH_ID_HEADER = "x-relaybase-x402-batch-id";
 
-const CDP_FACILITATOR_HOST = "api.cdp.coinbase.com";
-const DEFAULT_CDP_FACILITATOR =
+export const CDP_FACILITATOR_HOST = "api.cdp.coinbase.com";
+export const DEFAULT_CDP_FACILITATOR =
   "https://api.cdp.coinbase.com/platform/v2/x402";
 const MAX_FACILITATOR_RESPONSE_BYTES = 64 * 1024;
 
@@ -116,7 +116,7 @@ export function x402Runtime(env: X402Env): X402Runtime {
 
   let facilitatorUrl = DEFAULT_CDP_FACILITATOR;
   try {
-    facilitatorUrl = normalizeFacilitatorUrl(env.X402_FACILITATOR_URL);
+    facilitatorUrl = normalizeX402FacilitatorUrl(env.X402_FACILITATOR_URL);
   } catch {
     missing.push("facilitator_url");
   }
@@ -512,7 +512,7 @@ async function createCdpJwt(env: X402Env, endpoint: URL): Promise<string> {
   return `${signingInput}.${base64UrlBytes(new Uint8Array(signature))}`;
 }
 
-function normalizeFacilitatorUrl(value: unknown): string {
+export function normalizeX402FacilitatorUrl(value: unknown): string {
   const compact =
     typeof value === "string" && value.trim()
       ? value.trim()

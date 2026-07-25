@@ -450,6 +450,34 @@ export const endpointX402Config = sqliteTable(
   ],
 );
 
+export const x402RuntimeConfig = sqliteTable(
+  "x402_runtime_config",
+  {
+    id: integer("id").primaryKey(),
+    managedEnabled: integer("managed_enabled", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    enabled: integer("enabled", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    payTo: text("pay_to"),
+    facilitatorUrl: text("facilitator_url")
+      .notNull()
+      .default("https://api.cdp.coinbase.com/platform/v2/x402"),
+    encryptedCdpApiKeyId: text("encrypted_cdp_api_key_id"),
+    cdpApiKeyIdHash: text("cdp_api_key_id_hash"),
+    encryptedCdpApiKeySecret: text("encrypted_cdp_api_key_secret"),
+    cdpApiKeySecretHash: text("cdp_api_key_secret_hash"),
+    encryptedBearerToken: text("encrypted_bearer_token"),
+    bearerTokenHash: text("bearer_token_hash"),
+    revision: integer("revision").notNull().default(0),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    check("x402_runtime_config_singleton", sql`${table.id} = 1`),
+  ],
+);
+
 export const x402Batches = sqliteTable(
   "x402_batches",
   {

@@ -137,6 +137,13 @@ x402 是与预充值并存的独立入口，不是 API Key 的可切换付款模
 - `CDP_API_KEY_ID` / `CDP_API_KEY_SECRET`：仅用于 RelayBase 服务端向 CDP
   facilitator 鉴权；Secret 必须是 64-byte Ed25519 base64，不是调用方钱包私钥
 
+也可以在运营后台的“路由与定价 → x402 批量”中启用后台托管配置。后台托管会用
+`UPSTREAM_CREDENTIALS_ENCRYPTION_KEY` 对 CDP 凭据或自定义 facilitator Bearer
+Token 做 AES-GCM 加密后保存到 D1；接口只返回配置状态与指纹，不回显凭据原文。
+后台切换收款地址、facilitator 或凭据前会确认不存在可付款、验证中或结算中的批次，
+避免同一报价在配置切换后由不同收款方或 facilitator 处理。关闭后台托管后回退到
+上述部署环境变量。
+
 使用私有 facilitator 时可改为
 `X402_FACILITATOR_BEARER_TOKEN`。`X402_FACILITATOR_ALLOW_UNAUTHENTICATED=true`
 仅允许在隔离的本地测试环境使用。

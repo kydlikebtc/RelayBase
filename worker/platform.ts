@@ -21,6 +21,7 @@ import {
   decodeX402PaymentSignature,
   encodeX402Header,
   isX402TransactionHash,
+  normalizeX402FacilitatorUrl,
   settleX402Payment,
   verifyX402Payment,
   x402Runtime,
@@ -512,6 +513,29 @@ type ResolvedUpstreamProviderCredential = {
   configHash: string;
 };
 
+type X402RuntimeConfigRecord = {
+  managed_enabled: number;
+  enabled: number;
+  pay_to: string | null;
+  facilitator_url: string;
+  encrypted_cdp_api_key_id: string | null;
+  cdp_api_key_id_hash: string | null;
+  encrypted_cdp_api_key_secret: string | null;
+  cdp_api_key_secret_hash: string | null;
+  encrypted_bearer_token: string | null;
+  bearer_token_hash: string | null;
+  revision: number;
+  updated_at: string;
+};
+
+type ResolvedX402Configuration = {
+  env: PlatformEnv;
+  runtime: ReturnType<typeof x402Runtime>;
+  source: "managed" | "environment";
+  issue: string | null;
+  stored: X402RuntimeConfigRecord | null;
+};
+
 type UpstreamProviderCredentialVerification = {
   scopes: string[];
   expiresAt: string | null;
@@ -874,6 +898,17 @@ export async function handlePlatformRequest(
       request.method === "PATCH"
     ) {
       return await handleAdminX402Config(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/admin/x402/runtime-config" &&
+      request.method === "PUT"
+    ) {
+      return await handleAdminX402RuntimeConfig(
+        request,
+        env,
+        requestId,
+      );
     }
 
     if (
@@ -2569,6 +2604,7 @@ async function handleAdminX402(
       "x402 数据库迁移尚未完成。",
     );
   }
+  const x402Configuration = await resolveX402Configuration(env, db);
   const rowsQuery = status
     ? db
         .prepare(
@@ -2643,7 +2679,11 @@ async function handleAdminX402(
   const prepaidRevenue = Number(prepaid?.revenue ?? 0);
   return jsonResponse(
     {
-      runtime: x402Runtime(env),
+      runtime: x402Configuration.runtime,
+      configuration: publicX402RuntimeConfiguration(
+        x402Configuration,
+        env,
+      ),
       accounting: {
         period: "30d",
         recognizedRevenueUsdMicros: prepaidRevenue + x402Revenue,
@@ -2872,7 +2912,297 @@ async function handleAdminX402Config(
         maxBatchSize,
         revision: nextRevision,
       },
-      runtime: x402Runtime(env),
+      runtime: (
+        await resolveX402Configuration(env, db)
+      ).runtime,
+    },
+    200,
+    requestId,
+  );
+}
+
+async function handleAdminX402RuntimeConfig(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  assertSameOrigin(request, env);
+  requireAdminSecret(request, env, "platform");
+  const body = await readJsonBody<{
+    managedEnabled?: unknown;
+    enabled?: unknown;
+    payTo?: unknown;
+    facilitatorUrl?: unknown;
+    cdpApiKeyId?: unknown;
+    cdpApiKeySecret?: unknown;
+    bearerToken?: unknown;
+    expectedRevision?: unknown;
+  }>(request, MAX_DASHBOARD_BODY_BYTES);
+  if (
+    typeof body.managedEnabled !== "boolean" ||
+    typeof body.enabled !== "boolean" ||
+    typeof body.payTo !== "string" ||
+    typeof body.facilitatorUrl !== "string" ||
+    !Number.isSafeInteger(body.expectedRevision)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_x402_runtime_config",
+      "x402 运行配置必须包含托管开关、运行开关、收款地址、facilitator 地址和当前 revision。",
+    );
+  }
+  const expectedRevision = Number(body.expectedRevision);
+  if (expectedRevision < 0 || expectedRevision > 2_147_483_647) {
+    throw new PlatformError(
+      400,
+      "invalid_x402_runtime_revision",
+      "x402 运行配置 revision 无效。",
+    );
+  }
+  const payTo = body.payTo.trim();
+  if (
+    body.managedEnabled &&
+    !/^0x[0-9a-fA-F]{40}$/.test(payTo)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_x402_pay_to",
+      "收款地址必须是有效的 EVM 0x 地址。",
+    );
+  }
+  let facilitatorUrl: string;
+  try {
+    facilitatorUrl = normalizeX402FacilitatorUrl(
+      body.facilitatorUrl,
+    );
+  } catch {
+    throw new PlatformError(
+      400,
+      "invalid_x402_facilitator_url",
+      "facilitator 地址必须是无查询参数、无凭据的 HTTPS 地址。",
+    );
+  }
+  const facilitatorProvider = x402Runtime({
+    X402_FACILITATOR_URL: facilitatorUrl,
+  }).facilitatorProvider;
+  const cdpApiKeyId =
+    body.cdpApiKeyId === undefined || body.cdpApiKeyId === ""
+      ? null
+      : normalizeManagedX402Secret("cdp_api_key_id", body.cdpApiKeyId);
+  const cdpApiKeySecret =
+    body.cdpApiKeySecret === undefined || body.cdpApiKeySecret === ""
+      ? null
+      : normalizeManagedX402Secret(
+          "cdp_api_key_secret",
+          body.cdpApiKeySecret,
+        );
+  const bearerToken =
+    body.bearerToken === undefined || body.bearerToken === ""
+      ? null
+      : normalizeManagedX402Secret("bearer_token", body.bearerToken);
+  if (
+    (facilitatorProvider === "cdp" && bearerToken) ||
+    (facilitatorProvider === "custom" &&
+      (cdpApiKeyId || cdpApiKeySecret))
+  ) {
+    throw new PlatformError(
+      400,
+      "x402_credential_provider_mismatch",
+      "提交的 facilitator 凭据类型与 facilitator 地址不匹配。",
+    );
+  }
+  const db = requireDb(env);
+  if (!(await hasX402Schema(db))) {
+    throw new PlatformError(
+      503,
+      "x402_schema_unavailable",
+      "x402 数据库迁移尚未完成。",
+    );
+  }
+  const existing = await x402RuntimeConfigRecord(db);
+  if (!existing || existing.revision !== expectedRevision) {
+    throw new PlatformError(
+      409,
+      "x402_runtime_config_conflict",
+      "x402 运行配置已变化，请刷新后重试。",
+    );
+  }
+  const openBatch = await db
+    .prepare(
+      `SELECT COUNT(*) AS batch_count
+       FROM x402_batches
+       WHERE (
+         status IN (
+           'payment_verifying', 'payment_verified',
+           'settlement_pending'
+         )
+         OR (
+           status IN ('quoted', 'payment_rejected')
+           AND datetime(expires_at) > datetime('now')
+         )
+       )`,
+    )
+    .first<{ batch_count: number }>();
+  if (Number(openBatch?.batch_count ?? 0) > 0) {
+    throw new PlatformError(
+      409,
+      "x402_runtime_config_has_open_batches",
+      "仍有可付款、验证中或结算中的 x402 批次。为避免切换收款方或 facilitator，必须先等待这些批次完成付款阶段或报价过期。",
+    );
+  }
+
+  let encryptedCdpApiKeyId =
+    facilitatorProvider === "cdp"
+      ? existing.encrypted_cdp_api_key_id
+      : null;
+  let cdpApiKeyIdHash =
+    facilitatorProvider === "cdp"
+      ? existing.cdp_api_key_id_hash
+      : null;
+  let encryptedCdpApiKeySecret =
+    facilitatorProvider === "cdp"
+      ? existing.encrypted_cdp_api_key_secret
+      : null;
+  let cdpApiKeySecretHash =
+    facilitatorProvider === "cdp"
+      ? existing.cdp_api_key_secret_hash
+      : null;
+  let encryptedBearerToken =
+    facilitatorProvider === "custom"
+      ? existing.encrypted_bearer_token
+      : null;
+  let bearerTokenHash =
+    facilitatorProvider === "custom"
+      ? existing.bearer_token_hash
+      : null;
+  if (
+    (body.managedEnabled ||
+      Boolean(cdpApiKeyId || cdpApiKeySecret || bearerToken)) &&
+    !hasValidUpstreamProviderCredentialsEncryptionKey(
+      env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY,
+    )
+  ) {
+    throw new PlatformError(
+      503,
+      "x402_credential_encryption_unavailable",
+      "后台托管 x402 凭据所需的加密主密钥尚未正确配置。",
+    );
+  }
+  const encryptionKey = env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY;
+  if (cdpApiKeyId && encryptionKey) {
+    encryptedCdpApiKeyId = await encryptManagedX402Secret(
+      cdpApiKeyId,
+      encryptionKey,
+      "cdp_api_key_id",
+    );
+    cdpApiKeyIdHash = await sha256Hex(cdpApiKeyId);
+  }
+  if (cdpApiKeySecret && encryptionKey) {
+    encryptedCdpApiKeySecret = await encryptManagedX402Secret(
+      cdpApiKeySecret,
+      encryptionKey,
+      "cdp_api_key_secret",
+    );
+    cdpApiKeySecretHash = await sha256Hex(cdpApiKeySecret);
+  }
+  if (bearerToken && encryptionKey) {
+    encryptedBearerToken = await encryptManagedX402Secret(
+      bearerToken,
+      encryptionKey,
+      "bearer_token",
+    );
+    bearerTokenHash = await sha256Hex(bearerToken);
+  }
+  const providerCredentialsComplete =
+    facilitatorProvider === "cdp"
+      ? Boolean(encryptedCdpApiKeyId && encryptedCdpApiKeySecret)
+      : Boolean(encryptedBearerToken);
+  if (
+    body.managedEnabled &&
+    (!payTo || !providerCredentialsComplete)
+  ) {
+    throw new PlatformError(
+      400,
+      "x402_runtime_credentials_incomplete",
+      facilitatorProvider === "cdp"
+        ? "启用后台托管配置前，必须提供收款地址、CDP API Key ID 与 Ed25519 Secret。"
+        : "启用后台托管配置前，必须提供收款地址与自定义 facilitator Bearer Token。",
+    );
+  }
+  const nextRevision = expectedRevision + 1;
+  const audit = await prepareAdminAuditStatement(db, request, {
+    action: "x402.runtime_config_updated",
+    targetType: "x402_runtime_config",
+    targetId: "1",
+    details: {
+      before: {
+        source: existing.managed_enabled === 1
+          ? "managed"
+          : "environment",
+        enabled: existing.enabled === 1,
+        payTo: maskSecretValue(existing.pay_to),
+        facilitatorUrl: existing.facilitator_url,
+        revision: existing.revision,
+      },
+      after: {
+        source: body.managedEnabled ? "managed" : "environment",
+        enabled: body.enabled,
+        payTo: maskSecretValue(payTo || null),
+        facilitatorUrl,
+        facilitatorProvider,
+        cdpApiKeyIdFingerprint: cdpApiKeyIdHash?.slice(0, 16) ?? null,
+        cdpApiKeySecretFingerprint:
+          cdpApiKeySecretHash?.slice(0, 16) ?? null,
+        bearerTokenFingerprint: bearerTokenHash?.slice(0, 16) ?? null,
+        revision: nextRevision,
+      },
+    },
+  });
+  const results = await db.batch([
+    db
+      .prepare(
+        `UPDATE x402_runtime_config
+         SET managed_enabled = ?, enabled = ?, pay_to = ?,
+             facilitator_url = ?, encrypted_cdp_api_key_id = ?,
+             cdp_api_key_id_hash = ?,
+             encrypted_cdp_api_key_secret = ?,
+             cdp_api_key_secret_hash = ?,
+             encrypted_bearer_token = ?, bearer_token_hash = ?,
+             revision = revision + 1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = 1 AND revision = ?`,
+      )
+      .bind(
+        body.managedEnabled ? 1 : 0,
+        body.enabled ? 1 : 0,
+        payTo || null,
+        facilitatorUrl,
+        encryptedCdpApiKeyId,
+        cdpApiKeyIdHash,
+        encryptedCdpApiKeySecret,
+        cdpApiKeySecretHash,
+        encryptedBearerToken,
+        bearerTokenHash,
+        expectedRevision,
+      ),
+    audit,
+  ]);
+  if (
+    Number(results[0]?.meta?.changes ?? 0) !== 1 ||
+    Number(results[1]?.meta?.changes ?? 0) !== 1
+  ) {
+    throw new PlatformError(
+      409,
+      "x402_runtime_config_conflict",
+      "x402 运行配置更新冲突，请刷新后重试。",
+    );
+  }
+  marketplaceOverlayCache.delete(env as object);
+  const resolved = await resolveX402Configuration(env, db);
+  return jsonResponse(
+    {
+      runtime: resolved.runtime,
+      configuration: publicX402RuntimeConfiguration(resolved, env),
     },
     200,
     requestId,
@@ -3372,7 +3702,16 @@ async function handleX402Batch(
       "x402 批量入口使用调用方钱包签名付款，不接受 API Key 作为付款凭据。标准 /v1 接口才使用 API Key 与预充值余额。",
     );
   }
-  const runtime = x402Runtime(env);
+  const db = requireDb(env);
+  if (!(await hasX402Schema(db))) {
+    throw new PlatformError(
+      503,
+      "x402_schema_unavailable",
+      "x402 数据库迁移尚未完成。",
+    );
+  }
+  const x402Configuration = await resolveX402Configuration(env, db);
+  const runtime = x402Configuration.runtime;
   if (!runtime.enabled) {
     throw new PlatformError(
       503,
@@ -3407,7 +3746,6 @@ async function handleX402Batch(
   const requestHash = await sha256Hex(canonicalRequest);
   const idempotencyKey = requireIdempotencyKey(request);
   const idempotencyHash = await sha256Hex(`x402:${idempotencyKey}`);
-  const db = requireDb(env);
   const existing = await x402BatchByIdempotency(db, idempotencyHash);
   if (existing) {
     if (existing.request_hash !== requestHash) {
@@ -3427,6 +3765,7 @@ async function handleX402Batch(
     return await continueX402Batch(
       request,
       env,
+      x402Configuration.env,
       ctx,
       requestId,
       db,
@@ -3526,6 +3865,7 @@ async function handleX402Batch(
     return await continueX402Batch(
       request,
       env,
+      x402Configuration.env,
       ctx,
       requestId,
       db,
@@ -3539,6 +3879,7 @@ async function handleX402Batch(
 async function continueX402Batch(
   request: Request,
   env: PlatformEnv,
+  x402Env: PlatformEnv,
   ctx: WorkerExecutionContext,
   requestId: string,
   db: D1Database,
@@ -3652,7 +3993,7 @@ async function continueX402Batch(
   let verification;
   try {
     verification = await verifyX402Payment({
-      env,
+      env: x402Env,
       paymentPayload,
       paymentRequirements: requirements,
     });
@@ -3750,7 +4091,7 @@ async function continueX402Batch(
   let settlement;
   try {
     settlement = await settleX402Payment({
-      env,
+      env: x402Env,
       paymentPayload,
       paymentRequirements: requirements,
     });
@@ -14209,6 +14550,308 @@ function hasValidUpstreamProviderCredentialsEncryptionKey(
   }
 }
 
+async function x402RuntimeConfigRecord(
+  db: D1Database,
+): Promise<X402RuntimeConfigRecord | null> {
+  return await db
+    .prepare(
+      `SELECT managed_enabled, enabled, pay_to, facilitator_url,
+              encrypted_cdp_api_key_id, cdp_api_key_id_hash,
+              encrypted_cdp_api_key_secret, cdp_api_key_secret_hash,
+              encrypted_bearer_token, bearer_token_hash,
+              revision, updated_at
+       FROM x402_runtime_config
+       WHERE id = 1`,
+    )
+    .first<X402RuntimeConfigRecord>();
+}
+
+function managedX402SecretAdditionalData(
+  field: "cdp_api_key_id" | "cdp_api_key_secret" | "bearer_token",
+): ArrayBuffer {
+  return bytesToArrayBuffer(
+    new TextEncoder().encode(
+      `relaybase:x402-runtime-config:${field}:v1`,
+    ),
+  );
+}
+
+function normalizeManagedX402Secret(
+  field: "cdp_api_key_id" | "cdp_api_key_secret" | "bearer_token",
+  value: unknown,
+): string {
+  if (typeof value !== "string" || value !== value.trim()) {
+    throw new PlatformError(
+      400,
+      "invalid_x402_credential",
+      "x402 facilitator 凭据格式无效。",
+    );
+  }
+  if (field === "cdp_api_key_id") {
+    if (
+      value.length < 1 ||
+      value.length > 512 ||
+      /[\u0000-\u001f\u007f]/.test(value)
+    ) {
+      throw new PlatformError(
+        400,
+        "invalid_x402_cdp_api_key_id",
+        "CDP API Key ID 格式无效。",
+      );
+    }
+    return value;
+  }
+  if (field === "cdp_api_key_secret") {
+    const compact = value.replace(/\s+/g, "");
+    let decoded: Uint8Array;
+    try {
+      const binary = atob(compact);
+      decoded = Uint8Array.from(binary, (character) =>
+        character.charCodeAt(0),
+      );
+    } catch {
+      throw new PlatformError(
+        400,
+        "invalid_x402_cdp_api_key_secret",
+        "CDP Secret 必须是有效 Base64。",
+      );
+    }
+    if (
+      decoded.byteLength !== 64 ||
+      !/^[A-Za-z0-9+/]+={0,2}$/.test(compact)
+    ) {
+      throw new PlatformError(
+        400,
+        "invalid_x402_cdp_api_key_secret",
+        "CDP Secret 必须是 64-byte Ed25519 密钥的 Base64 编码。",
+      );
+    }
+    return compact;
+  }
+  if (
+    value.length < 16 ||
+    value.length > 4_096 ||
+    /[\u0000-\u001f\u007f]/.test(value)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_x402_bearer_token",
+      "facilitator Bearer Token 必须为 16–4096 个无控制字符的字符。",
+    );
+  }
+  return value;
+}
+
+async function encryptManagedX402Secret(
+  secret: string,
+  encodedKey: string,
+  field: "cdp_api_key_id" | "cdp_api_key_secret" | "bearer_token",
+): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv,
+      additionalData: managedX402SecretAdditionalData(field),
+      tagLength: 128,
+    },
+    await importUpstreamProviderCredentialsEncryptionKey(encodedKey),
+    new TextEncoder().encode(secret),
+  );
+  return `v1.${bytesToBase64Url(iv)}.${bytesToBase64Url(
+    new Uint8Array(ciphertext),
+  )}`;
+}
+
+async function decryptManagedX402Secret(
+  encryptedSecret: string,
+  encodedKey: string,
+  field: "cdp_api_key_id" | "cdp_api_key_secret" | "bearer_token",
+): Promise<string> {
+  const parts = encryptedSecret.split(".");
+  if (
+    parts.length !== 3 ||
+    parts[0] !== "v1" ||
+    !/^[A-Za-z0-9_-]{16}$/.test(parts[1] ?? "") ||
+    !/^[A-Za-z0-9_-]{20,8000}$/.test(parts[2] ?? "")
+  ) {
+    throw new PlatformError(
+      503,
+      "x402_credential_decryption_failed",
+      "x402 facilitator 凭据密文格式无效，已停止新付款报价。",
+    );
+  }
+  try {
+    const plaintext = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: bytesToArrayBuffer(base64UrlToBytes(parts[1] ?? "")),
+        additionalData: managedX402SecretAdditionalData(field),
+        tagLength: 128,
+      },
+      await importUpstreamProviderCredentialsEncryptionKey(encodedKey),
+      bytesToArrayBuffer(base64UrlToBytes(parts[2] ?? "")),
+    );
+    return normalizeManagedX402Secret(
+      field,
+      new TextDecoder("utf-8", { fatal: true }).decode(plaintext),
+    );
+  } catch {
+    throw new PlatformError(
+      503,
+      "x402_credential_decryption_failed",
+      "x402 facilitator 凭据无法解密，已停止新付款报价。",
+    );
+  }
+}
+
+async function resolveX402Configuration(
+  env: PlatformEnv,
+  db: D1Database,
+): Promise<ResolvedX402Configuration> {
+  const stored = await x402RuntimeConfigRecord(db);
+  if (!stored || stored.managed_enabled !== 1) {
+    return {
+      env,
+      runtime: x402Runtime(env),
+      source: "environment",
+      issue: null,
+      stored,
+    };
+  }
+  const managedEnv: PlatformEnv = {
+    ...env,
+    X402_ENABLED: stored.enabled === 1 ? "true" : "false",
+    X402_PAY_TO_ADDRESS: stored.pay_to ?? undefined,
+    X402_FACILITATOR_URL: stored.facilitator_url,
+    X402_FACILITATOR_BEARER_TOKEN: undefined,
+    X402_FACILITATOR_ALLOW_UNAUTHENTICATED: "false",
+    CDP_API_KEY_ID: undefined,
+    CDP_API_KEY_SECRET: undefined,
+  };
+  let issue: string | null = null;
+  const encryptionKey = env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY;
+  if (!hasValidUpstreamProviderCredentialsEncryptionKey(encryptionKey)) {
+    issue = "credential_encryption_key";
+  } else {
+    const provider = x402Runtime(managedEnv).facilitatorProvider;
+    try {
+      if (provider === "cdp") {
+        if (stored.encrypted_cdp_api_key_id) {
+          managedEnv.CDP_API_KEY_ID = await decryptManagedX402Secret(
+            stored.encrypted_cdp_api_key_id,
+            encryptionKey,
+            "cdp_api_key_id",
+          );
+        }
+        if (stored.encrypted_cdp_api_key_secret) {
+          managedEnv.CDP_API_KEY_SECRET = await decryptManagedX402Secret(
+            stored.encrypted_cdp_api_key_secret,
+            encryptionKey,
+            "cdp_api_key_secret",
+          );
+        }
+      } else if (stored.encrypted_bearer_token) {
+        managedEnv.X402_FACILITATOR_BEARER_TOKEN =
+          await decryptManagedX402Secret(
+            stored.encrypted_bearer_token,
+            encryptionKey,
+            "bearer_token",
+          );
+      }
+    } catch {
+      issue = "credential_decryption";
+    }
+  }
+  const rawRuntime = x402Runtime(managedEnv);
+  const missing =
+    issue && !rawRuntime.missing.includes(issue)
+      ? [...rawRuntime.missing, issue]
+      : rawRuntime.missing;
+  return {
+    env: managedEnv,
+    runtime: {
+      ...rawRuntime,
+      configured: missing.length === 0,
+      mode: !rawRuntime.enabled
+        ? "disabled"
+        : missing.length === 0
+          ? "live"
+          : "unconfigured",
+      missing,
+    },
+    source: "managed",
+    issue,
+    stored,
+  };
+}
+
+function maskSecretValue(value: string | null): string | null {
+  if (!value) return null;
+  return value.length <= 14
+    ? `${value.slice(0, 4)}…${value.slice(-2)}`
+    : `${value.slice(0, 8)}…${value.slice(-6)}`;
+}
+
+function publicX402RuntimeConfiguration(
+  resolved: ResolvedX402Configuration,
+  env: PlatformEnv,
+) {
+  const stored = resolved.stored;
+  return {
+    source: resolved.source,
+    managedEnabled: stored?.managed_enabled === 1,
+    enabled:
+      resolved.source === "managed"
+        ? stored?.enabled === 1
+        : resolved.runtime.enabled,
+    payTo:
+      resolved.source === "managed"
+        ? stored?.pay_to ?? null
+        : resolved.runtime.payTo,
+    facilitatorUrl:
+      resolved.source === "managed"
+        ? stored?.facilitator_url ?? resolved.runtime.facilitatorUrl
+        : resolved.runtime.facilitatorUrl,
+    facilitatorProvider: resolved.runtime.facilitatorProvider,
+    revision: stored?.revision ?? 0,
+    updatedAt: stored?.updated_at ?? null,
+    encryptionConfigured:
+      hasValidUpstreamProviderCredentialsEncryptionKey(
+        env.UPSTREAM_CREDENTIALS_ENCRYPTION_KEY,
+      ),
+    issue: resolved.issue,
+    managedCredentials: {
+      cdpApiKeyIdConfigured: Boolean(
+        stored?.encrypted_cdp_api_key_id,
+      ),
+      cdpApiKeyIdFingerprint:
+        stored?.cdp_api_key_id_hash?.slice(0, 16) ?? null,
+      cdpApiKeySecretConfigured: Boolean(
+        stored?.encrypted_cdp_api_key_secret,
+      ),
+      cdpApiKeySecretFingerprint:
+        stored?.cdp_api_key_secret_hash?.slice(0, 16) ?? null,
+      bearerTokenConfigured: Boolean(
+        stored?.encrypted_bearer_token,
+      ),
+      bearerTokenFingerprint:
+        stored?.bearer_token_hash?.slice(0, 16) ?? null,
+    },
+    environmentCredentials: {
+      cdpApiKeyIdConfigured: hasConfiguredCredential(
+        env.CDP_API_KEY_ID,
+      ),
+      cdpApiKeySecretConfigured: hasConfiguredCredential(
+        env.CDP_API_KEY_SECRET,
+      ),
+      bearerTokenConfigured: hasConfiguredCredential(
+        env.X402_FACILITATOR_BEARER_TOKEN,
+      ),
+    },
+  };
+}
+
 function requireUpstreamProviderCredentialsEncryptionKey(env: PlatformEnv): string {
   if (
     !hasValidUpstreamProviderCredentialsEncryptionKey(
@@ -14814,7 +15457,10 @@ async function hasX402Schema(db: D1Database): Promise<boolean> {
            (SELECT upstream_cost_usd_micros || status ||
                    COALESCE(transaction_hash, '')
             FROM x402_batches LIMIT 1)
-             AS x402_batches_schema`,
+             AS x402_batches_schema,
+           (SELECT managed_enabled || enabled || revision
+            FROM x402_runtime_config WHERE id = 1)
+             AS x402_runtime_config_schema`,
       )
       .first();
     return true;
@@ -14825,6 +15471,7 @@ async function hasX402Schema(db: D1Database): Promise<boolean> {
 
 async function operationalReadiness(env: PlatformEnv) {
   const base = platformReadiness(env);
+  let x402RuntimeState = x402Runtime(env);
   let catalogReady = false;
   let schemaReady = false;
   let taxonomyReady = false;
@@ -14978,6 +15625,11 @@ async function operationalReadiness(env: PlatformEnv) {
         }>();
       schemaReady = row != null;
       x402SchemaReady = await hasX402Schema(env.DB);
+      if (x402SchemaReady) {
+        x402RuntimeState = (
+          await resolveX402Configuration(env, env.DB)
+        ).runtime;
+      }
       try {
         await assertStoredCatalogTaxonomyIntegrity(env.DB);
         taxonomyReady = true;
@@ -15052,7 +15704,6 @@ async function operationalReadiness(env: PlatformEnv) {
     schemaReady &&
     catalogReady &&
     reconciliationRecent;
-  const x402RuntimeState = x402Runtime(env);
   const x402Available =
     x402RuntimeState.enabled &&
     x402RuntimeState.configured &&
@@ -15080,6 +15731,9 @@ async function operationalReadiness(env: PlatformEnv) {
     mode,
     capabilities: {
       ...base.capabilities,
+      x402Enabled: x402RuntimeState.enabled,
+      x402Configured: x402RuntimeState.configured,
+      x402Mode: x402RuntimeState.mode,
       upstreamConfigured,
       proxyEnabled,
       schemaReady,

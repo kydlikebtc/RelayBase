@@ -183,6 +183,7 @@ const migrationFiles = [
   "drizzle/0014_reflective_firestar.sql",
   "drizzle/0015_tan_lila_cheney.sql",
   "drizzle/0016_windy_lord_tyger.sql",
+  "drizzle/0017_omniscient_zarda.sql",
 ];
 
 async function migrate(db, names = migrationFiles) {
@@ -8814,15 +8815,63 @@ test("quotes, settles and executes one x402 wallet-paid batch without touching b
   const env = baseEnv({
     DB: db,
     UPSTREAM_API_KEY: "upstream-key",
+    ADMIN_MASTER_SECRET: "x402-admin-secret-32-characters-minimum",
+    UPSTREAM_CREDENTIALS_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString(
+      "base64url",
+    ),
     RESELLER_AUTHORIZED: "true",
     LEGAL_REVIEW_CONFIRMED: "true",
     UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
     RECONCILIATION_SECRET: "x402-reconcile-secret-32-characters",
-    X402_ENABLED: "true",
-    X402_PAY_TO_ADDRESS: `0x${"1".repeat(40)}`,
-    X402_FACILITATOR_URL: "https://facilitator.example/x402",
-    X402_FACILITATOR_ALLOW_UNAUTHENTICATED: "true",
   });
+  const facilitatorToken = "managed-facilitator-bearer-token-0001";
+  const runtimeConfig = await fetchWorker(
+    "/api/admin/x402/runtime-config",
+    {
+      method: "PUT",
+      headers: {
+        authorization:
+          "Bearer x402-admin-secret-32-characters-minimum",
+        origin: "http://localhost",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        managedEnabled: true,
+        enabled: true,
+        payTo: `0x${"1".repeat(40)}`,
+        facilitatorUrl: "https://facilitator.example/x402",
+        bearerToken: facilitatorToken,
+        expectedRevision: 0,
+      }),
+    },
+    env,
+  );
+  assert.equal(runtimeConfig.status, 200);
+  const runtimeConfigData = await runtimeConfig.json();
+  assert.equal(runtimeConfigData.runtime.mode, "live");
+  assert.equal(runtimeConfigData.configuration.source, "managed");
+  assert.equal(
+    runtimeConfigData.configuration.managedCredentials
+      .bearerTokenConfigured,
+    true,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(runtimeConfigData),
+    new RegExp(facilitatorToken),
+  );
+  const storedRuntimeConfig = db.raw
+    .prepare(
+      `SELECT encrypted_bearer_token, bearer_token_hash,
+              revision
+       FROM x402_runtime_config WHERE id = 1`,
+    )
+    .get();
+  assert.match(storedRuntimeConfig.encrypted_bearer_token, /^v1\./);
+  assert.doesNotMatch(
+    storedRuntimeConfig.encrypted_bearer_token,
+    new RegExp(facilitatorToken),
+  );
+  assert.equal(storedRuntimeConfig.revision, 1);
   const body = JSON.stringify({
     endpoint,
     requests: [
@@ -8875,6 +8924,31 @@ test("quotes, settles and executes one x402 wallet-paid batch without touching b
     paymentRequired.extensions.relaybaseBatch.info.verifiedQuantity,
     2,
   );
+  const configWhileQuoteOpen = await fetchWorker(
+    "/api/admin/x402/runtime-config",
+    {
+      method: "PUT",
+      headers: {
+        authorization:
+          "Bearer x402-admin-secret-32-characters-minimum",
+        origin: "http://localhost",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        managedEnabled: true,
+        enabled: true,
+        payTo: `0x${"1".repeat(40)}`,
+        facilitatorUrl: "https://facilitator.example/x402",
+        expectedRevision: 1,
+      }),
+    },
+    env,
+  );
+  assert.equal(configWhileQuoteOpen.status, 409);
+  assert.equal(
+    (await configWhileQuoteOpen.json()).error.code,
+    "x402_runtime_config_has_open_batches",
+  );
 
   const paymentPayload = {
     x402Version: 2,
@@ -8899,6 +8973,10 @@ test("quotes, settles and executes one x402 wallet-paid batch without touching b
         : input.url,
     );
     if (url.origin === "https://facilitator.example") {
+      assert.equal(
+        new Headers(init.headers).get("authorization"),
+        `Bearer ${facilitatorToken}`,
+      );
       const facilitatorBody = JSON.parse(init.body);
       assert.equal(facilitatorBody.x402Version, 2);
       assert.deepEqual(
