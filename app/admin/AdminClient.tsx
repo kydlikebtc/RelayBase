@@ -70,6 +70,30 @@ type OverviewResponse = {
   generatedAt: string;
 };
 
+type AdminRole = "owner" | "operator" | "auditor";
+type AdminIdentity = {
+  userId: string;
+  email: string;
+  displayName: string;
+  role: AdminRole;
+};
+type AdminSessionResponse = {
+  admin: AdminIdentity;
+  bootstrapped?: boolean;
+};
+
+type AdminMember = AdminIdentity & {
+  status: "active" | "suspended";
+  grantedBy: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type AdminMembersResponse = {
+  members: AdminMember[];
+  count: number;
+};
+
 type AdminUser = {
   id: string;
   email: string;
@@ -666,9 +690,10 @@ type JsonValue =
   | { [key: string]: JsonValue };
 type Validator<T> = (value: unknown) => value is T;
 
-const SESSION_SECRET_KEY = "relaybase.admin.master-secret.v1";
+const NAMED_ADMIN_SESSION = "__named_admin_session__";
 const CATALOG_SAFETY_POLICY_VERSION = 1;
 const PENDING_CATALOG_PAGE_SIZE = 50;
+const ROUTE_CATALOG_PAGE_SIZE = 50;
 const validPaymentStatus = /^[a-z][a-z0-9_]{0,63}$/;
 const validSha256Digest = /^[a-f0-9]{64}$/;
 const EMPTY_UPSTREAM_CONFIG_DRAFT: UpstreamConfigDraft = {
@@ -747,6 +772,69 @@ function isNullableString(value: unknown, max = 2_000): value is string | null {
 function isDateString(value: unknown): value is string {
   return (
     isNonEmptyString(value, 64) && Number.isFinite(Date.parse(value))
+  );
+}
+
+function isAdminSessionResponse(
+  value: unknown,
+): value is AdminSessionResponse {
+  if (!isObject(value) || !isObject(value.admin)) return false;
+  const admin = value.admin;
+  return (
+    isNonEmptyString(admin.userId, 160) &&
+    isNonEmptyString(admin.email, 320) &&
+    isNonEmptyString(admin.displayName, 320) &&
+    (admin.role === "owner" ||
+      admin.role === "operator" ||
+      admin.role === "auditor") &&
+    (value.bootstrapped === undefined ||
+      typeof value.bootstrapped === "boolean")
+  );
+}
+
+function isAdminMembersResponse(
+  value: unknown,
+): value is AdminMembersResponse {
+  if (
+    !isObject(value) ||
+    !Array.isArray(value.members) ||
+    !isSafeNonNegativeInteger(value.count) ||
+    value.count !== value.members.length
+  ) {
+    return false;
+  }
+  return value.members.every(
+    (member) =>
+      isObject(member) &&
+      isNonEmptyString(member.userId, 160) &&
+      isNonEmptyString(member.email, 320) &&
+      isNonEmptyString(member.displayName, 320) &&
+      (member.role === "owner" ||
+        member.role === "operator" ||
+        member.role === "auditor") &&
+      (member.status === "active" || member.status === "suspended") &&
+      isNonEmptyString(member.grantedBy, 320) &&
+      isDateString(member.createdAt) &&
+      isDateString(member.updatedAt),
+  );
+}
+
+function isAdminMemberMutationResponse(
+  value: unknown,
+): value is {
+  ok: true;
+  userId: string;
+  role: AdminRole;
+  status: "active" | "suspended";
+} {
+  return (
+    isObject(value) &&
+    value.ok === true &&
+    isNonEmptyString(value.userId, 160) &&
+    (value.role === "owner" ||
+      value.role === "operator" ||
+      value.role === "auditor") &&
+    (value.status === "active" || value.status === "suspended")
   );
 }
 
@@ -2074,7 +2162,9 @@ async function adminRequest<T>(
     credentials: "same-origin",
     headers: {
       Accept: "application/json",
-      Authorization: `Bearer ${secret}`,
+      ...(secret && secret !== NAMED_ADMIN_SESSION
+        ? { Authorization: `Bearer ${secret}` }
+        : {}),
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
       ...init?.headers,
     },
@@ -2084,7 +2174,9 @@ async function adminRequest<T>(
   if (!response.ok) {
     let message =
       response.status === 401
-        ? "管理员密钥无效，或服务端尚未配置主密钥。"
+        ? "管理员会话已失效，请重新登录。"
+        : response.status === 403
+          ? "当前账户没有执行此操作所需的管理员角色。"
         : `管理接口请求失败（HTTP ${response.status}）。`;
     if (
       isObject(payload) &&
@@ -2932,8 +3024,46 @@ function PaymentReviewDialog({
   );
 }
 
+function RouteCatalogPagination({
+  page,
+  pageCount,
+  total,
+  onPageChange,
+}: {
+  page: number;
+  pageCount: number;
+  total: number;
+  onPageChange: (page: number) => void;
+}) {
+  if (total <= ROUTE_CATALOG_PAGE_SIZE) return null;
+  return (
+    <div className="admin-pending-catalog-pagination">
+      <button
+        className="button button-ghost button-small"
+        type="button"
+        disabled={page === 0}
+        onClick={() => onPageChange(Math.max(0, page - 1))}
+      >
+        上一页
+      </button>
+      <span>
+        第 {page + 1} / {pageCount} 页 · 共 {total.toLocaleString()} 条 ·
+        每页最多 {ROUTE_CATALOG_PAGE_SIZE} 条
+      </span>
+      <button
+        className="button button-ghost button-small"
+        type="button"
+        disabled={page >= pageCount - 1}
+        onClick={() => onPageChange(Math.min(pageCount - 1, page + 1))}
+      >
+        下一页
+      </button>
+    </div>
+  );
+}
+
 export function AdminClient() {
-  const restoredSecret = useRef(false);
+  const restoredAdminSession = useRef(false);
   const catalogBatchPreviewRetry = useRef<{
     requestSignature: string;
     idempotencyKey: string;
@@ -2945,8 +3075,9 @@ export function AdminClient() {
   } | null>(null);
   const [secretInput, setSecretInput] = useState("");
   const [adminSecret, setAdminSecret] = useState("");
-  const [rememberForTab, setRememberForTab] = useState(false);
-  const [checkingSecret, setCheckingSecret] = useState(false);
+  const [adminIdentity, setAdminIdentity] =
+    useState<AdminIdentity | null>(null);
+  const [checkingSecret, setCheckingSecret] = useState(true);
   const [authError, setAuthError] = useState("");
   const [activeTab, setActiveTab] = useState<AdminTab>("overview");
   const [upstreamView, setUpstreamView] =
@@ -2958,6 +3089,13 @@ export function AdminClient() {
   const [users, setUsers] = useState<RemoteState<UsersResponse>>({
     status: "idle",
   });
+  const [adminMembers, setAdminMembers] = useState<
+    RemoteState<AdminMembersResponse>
+  >({ status: "idle" });
+  const [newAdminEmail, setNewAdminEmail] = useState("");
+  const [newAdminRole, setNewAdminRole] =
+    useState<AdminRole>("auditor");
+  const [savingAdminMember, setSavingAdminMember] = useState(false);
   const [catalog, setCatalog] = useState<RemoteState<CatalogResponse>>({
     status: "idle",
   });
@@ -3000,6 +3138,7 @@ export function AdminClient() {
   const [userQuery, setUserQuery] = useState("");
   const [userStatus, setUserStatus] = useState("all");
   const [catalogQuery, setCatalogQuery] = useState("");
+  const [catalogPage, setCatalogPage] = useState(0);
   const [pendingCatalogQuery, setPendingCatalogQuery] = useState("");
   const [pendingCatalogPage, setPendingCatalogPage] = useState(0);
   const [catalogPlatform, setCatalogPlatform] = useState("all");
@@ -3151,6 +3290,30 @@ export function AdminClient() {
       });
     }
   }, [adminSecret]);
+
+  const loadAdminMembers = useCallback(
+    async (secret = adminSecret) => {
+      if (!secret) return;
+      setAdminMembers({ status: "loading" });
+      try {
+        const data = await adminRequest(
+          "/api/admin/members",
+          secret,
+          isAdminMembersResponse,
+        );
+        setAdminMembers({ status: "ready", data });
+      } catch (error) {
+        setAdminMembers({
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "无法读取管理员成员。",
+        });
+      }
+    },
+    [adminSecret],
+  );
 
   const loadCatalog = useCallback(async (secret = adminSecret) => {
     if (!secret) return;
@@ -3471,9 +3634,9 @@ export function AdminClient() {
   }, [adminSecret]);
 
   const authenticate = useCallback(
-    async (secret: string, persistForTab: boolean) => {
+    async (secret: string) => {
       if (secret.length < 32 || secret.length > 512) {
-        setAuthError("管理员密钥长度不符合安全要求。");
+        setAuthError("紧急引导凭证长度不符合安全要求。");
         return;
       }
       setCheckingSecret(true);
@@ -3481,33 +3644,35 @@ export function AdminClient() {
       setOverview({ status: "loading" });
 
       try {
+        const session = await adminRequest(
+          "/api/admin/session",
+          secret,
+          isAdminSessionResponse,
+          { method: "POST", body: "{}" },
+        );
         const data = await adminRequest(
           "/api/admin/overview",
-          secret,
+          NAMED_ADMIN_SESSION,
           isOverviewResponse,
         );
-        if (persistForTab) {
-          sessionStorage.setItem(SESSION_SECRET_KEY, secret);
-        } else {
-          sessionStorage.removeItem(SESSION_SECRET_KEY);
-        }
-        setAdminSecret(secret);
+        setAdminIdentity(session.admin);
+        setAdminSecret(NAMED_ADMIN_SESSION);
         setSecretInput("");
         setOverview({ status: "ready", data });
-        setRememberForTab(persistForTab);
-        void loadUsers(secret);
-        void loadUpstreamConfig(secret);
-        void loadUpstreamCredentials(secret);
-        void loadCatalog(secret);
-        void loadPendingCatalog(secret);
-        void loadPayments(secret);
-        void loadPaymentReviews(secret);
-        void loadX402Admin(secret);
+        void loadUsers(NAMED_ADMIN_SESSION);
+        void loadAdminMembers(NAMED_ADMIN_SESSION);
+        void loadUpstreamConfig(NAMED_ADMIN_SESSION);
+        void loadUpstreamCredentials(NAMED_ADMIN_SESSION);
+        void loadCatalog(NAMED_ADMIN_SESSION);
+        void loadPendingCatalog(NAMED_ADMIN_SESSION);
+        void loadPayments(NAMED_ADMIN_SESSION);
+        void loadPaymentReviews(NAMED_ADMIN_SESSION);
+        void loadX402Admin(NAMED_ADMIN_SESSION);
       } catch (error) {
-        sessionStorage.removeItem(SESSION_SECRET_KEY);
+        setAdminIdentity(null);
         setOverview({ status: "idle" });
         setAuthError(
-          error instanceof Error ? error.message : "管理员身份验证失败。",
+          error instanceof Error ? error.message : "管理员引导失败。",
         );
       } finally {
         setCheckingSecret(false);
@@ -3515,6 +3680,7 @@ export function AdminClient() {
     },
     [
       loadCatalog,
+      loadAdminMembers,
       loadPendingCatalog,
       loadPaymentReviews,
       loadPayments,
@@ -3526,15 +3692,62 @@ export function AdminClient() {
   );
 
   useEffect(() => {
-    if (restoredSecret.current) return;
-    restoredSecret.current = true;
-    const savedSecret = sessionStorage.getItem(SESSION_SECRET_KEY);
-    if (!savedSecret) return;
-    const restoreTimer = window.setTimeout(() => {
-      void authenticate(savedSecret, true);
-    }, 0);
-    return () => window.clearTimeout(restoreTimer);
-  }, [authenticate]);
+    if (restoredAdminSession.current) return;
+    restoredAdminSession.current = true;
+    let cancelled = false;
+    void adminRequest(
+      "/api/admin/session",
+      NAMED_ADMIN_SESSION,
+      isAdminSessionResponse,
+    )
+      .then(async (session) => {
+        if (cancelled) return;
+        const data = await adminRequest(
+          "/api/admin/overview",
+          NAMED_ADMIN_SESSION,
+          isOverviewResponse,
+        );
+        if (cancelled) return;
+        setAdminIdentity(session.admin);
+        setAdminSecret(NAMED_ADMIN_SESSION);
+        setOverview({ status: "ready", data });
+        void loadUsers(NAMED_ADMIN_SESSION);
+        void loadAdminMembers(NAMED_ADMIN_SESSION);
+        void loadUpstreamConfig(NAMED_ADMIN_SESSION);
+        void loadUpstreamCredentials(NAMED_ADMIN_SESSION);
+        void loadCatalog(NAMED_ADMIN_SESSION);
+        void loadPendingCatalog(NAMED_ADMIN_SESSION);
+        void loadPayments(NAMED_ADMIN_SESSION);
+        void loadPaymentReviews(NAMED_ADMIN_SESSION);
+        void loadX402Admin(NAMED_ADMIN_SESSION);
+      })
+      .catch((error: unknown) => {
+        if (
+          !cancelled &&
+          error instanceof AdminApiError &&
+          error.status !== 401 &&
+          error.status !== 403
+        ) {
+          setAuthError(error.message);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setCheckingSecret(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    loadCatalog,
+    loadAdminMembers,
+    loadPendingCatalog,
+    loadPaymentReviews,
+    loadPayments,
+    loadUpstreamConfig,
+    loadUpstreamCredentials,
+    loadUsers,
+    loadX402Admin,
+  ]);
 
   const visibleUsers = useMemo(() => {
     if (users.status !== "ready") return [];
@@ -3769,6 +3982,21 @@ export function AdminClient() {
 
   const displayedEndpoints =
     catalogView === "routes" ? visibleRouteEndpoints : visibleEndpoints;
+  const displayedEndpointPageCount = Math.max(
+    1,
+    Math.ceil(displayedEndpoints.length / ROUTE_CATALOG_PAGE_SIZE),
+  );
+  const safeCatalogPage = Math.min(
+    catalogPage,
+    displayedEndpointPageCount - 1,
+  );
+  const pagedDisplayedEndpoints = useMemo(() => {
+    const start = safeCatalogPage * ROUTE_CATALOG_PAGE_SIZE;
+    return displayedEndpoints.slice(
+      start,
+      start + ROUTE_CATALOG_PAGE_SIZE,
+    );
+  }, [displayedEndpoints, safeCatalogPage]);
   const publishedEndpointTotal =
     catalog.status === "ready"
       ? catalog.data.endpoints.filter((endpoint) => endpoint.enabled).length
@@ -3849,50 +4077,95 @@ export function AdminClient() {
     ).sort();
   }, [payments]);
 
-  function signOut() {
-    sessionStorage.removeItem(SESSION_SECRET_KEY);
-    setAdminSecret("");
-    setSecretInput("");
-    setRememberForTab(false);
-    setAuthError("");
+  async function createAdminMember(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const email = newAdminEmail.trim().toLocaleLowerCase("en-US");
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      setNotice("请输入已经登录过 RelayBase 的有效用户邮箱。");
+      return;
+    }
+    if (
+      !window.confirm(
+        `确认授予 ${email} ${newAdminRole.toUpperCase()} 权限？该操作会写入审计日志。`,
+      )
+    ) {
+      return;
+    }
+    setSavingAdminMember(true);
     setNotice("");
-    setUpstreamApiKey("");
-    setPendingCatalogQuery("");
-    setPendingCatalogPage(0);
-    setPendingPriceDrafts({});
-    setSavingPendingPath("");
-    setUpstreamConfigDraft({ ...EMPTY_UPSTREAM_CONFIG_DRAFT });
-    setSavingUpstreamConfig(false);
-    setSavingUpstreamCredential(false);
-    setConfirmAction(null);
-    setCatalogBatch(null);
-    setCatalogBatchRequest(null);
-    setCatalogBatchConfirmation("");
-    setCatalogBatchError("");
-    setPreviewingCatalogBatch(false);
-    setRefreshingCatalogBatch(false);
-    setApplyingCatalogBatch(false);
-    setSelectedPendingPaths(new Set());
-    setRouteBatchConfirmOpen(false);
-    setConfirmingRouteBatch(false);
-    setCatalogRuntimeAvailability("all");
-    catalogBatchPreviewRetry.current = null;
-    catalogBatchApplyRetry.current = null;
-    setOverview({ status: "idle" });
-    setUsers({ status: "idle" });
-    setUpstreamConfig({ status: "idle" });
-    setUpstreamCredentials({ status: "idle" });
-    setCatalog({ status: "idle" });
-    setPendingCatalog({ status: "idle" });
-    setPayments({ status: "idle" });
-    setX402Admin({ status: "idle" });
-    setPaymentReviews({ status: "idle" });
-    setReviewResolution(null);
+    try {
+      await adminRequest(
+        "/api/admin/members",
+        adminSecret,
+        isAdminMemberMutationResponse,
+        {
+          method: "POST",
+          body: JSON.stringify({ email, role: newAdminRole }),
+        },
+      );
+      setNewAdminEmail("");
+      setNewAdminRole("auditor");
+      await loadAdminMembers();
+      setNotice(`已授予 ${email} 管理员权限。`);
+    } catch (error) {
+      setNotice(
+        error instanceof Error ? error.message : "管理员授权失败。",
+      );
+    } finally {
+      setSavingAdminMember(false);
+    }
+  }
+
+  async function updateAdminMember(
+    member: AdminMember,
+    input: {
+      role: AdminRole;
+      status: "active" | "suspended";
+    },
+  ) {
+    const change =
+      input.status !== member.status
+        ? input.status === "active"
+          ? "恢复"
+          : "停用"
+        : `调整为 ${input.role.toUpperCase()}`;
+    if (
+      !window.confirm(
+        `确认${change}管理员 ${member.email}？该操作会立即生效并写入审计日志。`,
+      )
+    ) {
+      return;
+    }
+    setSavingAdminMember(true);
+    setNotice("");
+    try {
+      await adminRequest(
+        "/api/admin/members",
+        adminSecret,
+        isAdminMemberMutationResponse,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            userId: member.userId,
+            role: input.role,
+            status: input.status,
+          }),
+        },
+      );
+      await loadAdminMembers();
+      setNotice(`管理员 ${member.email} 已更新。`);
+    } catch (error) {
+      setNotice(
+        error instanceof Error ? error.message : "管理员更新失败。",
+      );
+    } finally {
+      setSavingAdminMember(false);
+    }
   }
 
   function submitSecret(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void authenticate(secretInput, rememberForTab);
+    void authenticate(secretInput);
   }
 
   async function submitUpstreamConfig(
@@ -4839,10 +5112,11 @@ export function AdminClient() {
           <p className="section-kicker">RELAYBASE / OPERATIONS</p>
           <h1 id="admin-login-title">运营管理后台</h1>
           <p className="admin-login-intro">
-            查看实际用户与调用数据，维护上游路由、成本、客户价和支付复核队列。
+            运营后台使用当前登录账户的具名管理员角色。首次启用时，
+            Owner 需要用紧急引导凭证完成一次绑定。
           </p>
           <form onSubmit={submitSecret}>
-            <label htmlFor="admin-secret">管理员主密钥</label>
+            <label htmlFor="admin-secret">首次引导 / 紧急恢复凭证</label>
             <input
               id="admin-secret"
               type="password"
@@ -4853,19 +5127,8 @@ export function AdminClient() {
               required
               value={secretInput}
               onChange={(event) => setSecretInput(event.target.value)}
-              placeholder="输入 ADMIN_MASTER_SECRET"
+              placeholder="仅首次绑定 Owner 时输入"
             />
-            <label className="admin-memory-option">
-              <input
-                type="checkbox"
-                checked={rememberForTab}
-                onChange={(event) => setRememberForTab(event.target.checked)}
-              />
-              <span>
-                在本标签页会话中记住
-                <small>关闭标签页后由浏览器清除</small>
-              </span>
-            </label>
             {authError ? (
               <p className="admin-form-error" role="alert">
                 {authError}
@@ -4876,16 +5139,15 @@ export function AdminClient() {
               type="submit"
               disabled={checkingSecret}
             >
-              {checkingSecret ? "正在验证…" : "进入管理后台"}
+              {checkingSecret ? "正在绑定…" : "绑定当前账户为 Owner"}
               <span aria-hidden="true">→</span>
             </button>
           </form>
           <aside className="admin-security-note">
-            <strong>密钥存储说明</strong>
+            <strong>具名权限说明</strong>
             <p>
-              默认仅保存在当前页面的 React
-              内存，不写入 Cookie、localStorage 或数据库。勾选后只写入当前标签页的
-              sessionStorage，并仅作为同源管理接口的 Bearer 凭证发送。
+              引导凭证只提交一次且不会写入浏览器存储。绑定成功后，所有请求使用
+              当前登录账户的服务端会话、角色权限和审计身份；日常操作不再携带共享主密钥。
             </p>
           </aside>
         </section>
@@ -5002,6 +5264,14 @@ export function AdminClient() {
             </div>
           </div>
           <div className="admin-topbar-actions">
+            {adminIdentity ? (
+              <span
+                className="admin-last-refresh"
+                title={adminIdentity.email}
+              >
+                {adminIdentity.displayName} · {adminIdentity.role.toUpperCase()}
+              </span>
+            ) : null}
             {overviewData ? (
               <span className="admin-last-refresh">
                 数据更新 {formatDate(overviewData.generatedAt)}
@@ -5019,9 +5289,9 @@ export function AdminClient() {
                   : "生产配置未完全就绪"
                 : "正在读取状态"}
             </span>
-            <button className="button button-ghost button-small" onClick={signOut}>
-              锁定后台
-            </button>
+            <a className="button button-ghost button-small" href="/console">
+              返回用户控制台
+            </a>
           </div>
         </header>
 
@@ -5367,10 +5637,182 @@ export function AdminClient() {
               </div>
               <button
                 className="button button-ghost button-small"
-                onClick={() => void loadUsers()}
+                onClick={() =>
+                  void Promise.all([loadUsers(), loadAdminMembers()])
+                }
               >
-                刷新用户
+                刷新身份
               </button>
+            </div>
+            <div className="admin-panel admin-members-panel">
+              <div className="admin-panel-head">
+                <div>
+                  <span className="admin-index">00</span>
+                  <div>
+                    <h3>运营后台成员</h3>
+                    <p>
+                      使用具名账户和最小权限角色；紧急主密钥只用于首次引导或灾难恢复。
+                    </p>
+                  </div>
+                </div>
+                {adminIdentity ? (
+                  <span className="admin-account-status is-active">
+                    当前角色：{adminIdentity.role.toUpperCase()}
+                  </span>
+                ) : null}
+              </div>
+              {adminIdentity?.role === "owner" ? (
+                <form
+                  className="admin-member-create"
+                  onSubmit={createAdminMember}
+                >
+                  <label>
+                    <span>已登录用户邮箱</span>
+                    <input
+                      type="email"
+                      required
+                      value={newAdminEmail}
+                      placeholder="operator@example.com"
+                      onChange={(event) =>
+                        setNewAdminEmail(event.target.value)
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>角色</span>
+                    <select
+                      value={newAdminRole}
+                      onChange={(event) =>
+                        setNewAdminRole(event.target.value as AdminRole)
+                      }
+                    >
+                      <option value="auditor">Auditor · 只读审计</option>
+                      <option value="operator">
+                        Operator · 目录运营
+                      </option>
+                      <option value="owner">Owner · 全部权限</option>
+                    </select>
+                  </label>
+                  <button
+                    className="button button-blue button-small"
+                    type="submit"
+                    disabled={savingAdminMember}
+                  >
+                    {savingAdminMember ? "正在授权…" : "授予权限"}
+                  </button>
+                </form>
+              ) : (
+                <p className="admin-member-boundary">
+                  只有 Owner 可以授予、变更或停用管理员；当前角色仅展示权限边界内的数据和操作。
+                </p>
+              )}
+              <StatePanel
+                state={adminMembers}
+                label="管理员成员"
+                onRetry={() => void loadAdminMembers()}
+              >
+                {adminMembers.status === "ready" ? (
+                  adminMembers.data.members.length ? (
+                    <div className="admin-table-wrap admin-saas-table-wrap">
+                      <table className="admin-table admin-saas-table">
+                        <thead>
+                          <tr>
+                            <th>成员</th>
+                            <th>角色</th>
+                            <th>状态</th>
+                            <th>最近变更</th>
+                            <th>权限操作</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {adminMembers.data.members.map((member) => (
+                            <tr key={member.userId}>
+                              <td>
+                                <strong>{member.displayName}</strong>
+                                <small>{member.email}</small>
+                              </td>
+                              <td>
+                                {adminIdentity?.role === "owner" ? (
+                                  <select
+                                    aria-label={`调整 ${member.email} 的角色`}
+                                    value={member.role}
+                                    disabled={savingAdminMember}
+                                    onChange={(event) =>
+                                      void updateAdminMember(member, {
+                                        role: event.target
+                                          .value as AdminRole,
+                                        status: member.status,
+                                      })
+                                    }
+                                  >
+                                    <option value="owner">Owner</option>
+                                    <option value="operator">
+                                      Operator
+                                    </option>
+                                    <option value="auditor">
+                                      Auditor
+                                    </option>
+                                  </select>
+                                ) : (
+                                  <strong>{member.role.toUpperCase()}</strong>
+                                )}
+                              </td>
+                              <td>
+                                <span
+                                  className={`admin-account-status is-${member.status}`}
+                                >
+                                  {member.status === "active"
+                                    ? "有效"
+                                    : "已停用"}
+                                </span>
+                              </td>
+                              <td>
+                                <span>{formatDate(member.updatedAt)}</span>
+                                <small title={member.grantedBy}>
+                                  授权来源 {member.grantedBy}
+                                </small>
+                              </td>
+                              <td>
+                                {adminIdentity?.role === "owner" ? (
+                                  <button
+                                    className={`button button-small ${
+                                      member.status === "active"
+                                        ? "admin-button-danger-ghost"
+                                        : "button-blue"
+                                    }`}
+                                    type="button"
+                                    disabled={savingAdminMember}
+                                    onClick={() =>
+                                      void updateAdminMember(member, {
+                                        role: member.role,
+                                        status:
+                                          member.status === "active"
+                                            ? "suspended"
+                                            : "active",
+                                      })
+                                    }
+                                  >
+                                    {member.status === "active"
+                                      ? "停用"
+                                      : "恢复"}
+                                  </button>
+                                ) : (
+                                  <small>只读</small>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="admin-empty">
+                      <strong>尚未建立具名管理员</strong>
+                      <p>请使用紧急主密钥完成首位 Owner 引导。</p>
+                    </div>
+                  )
+                ) : null}
+              </StatePanel>
             </div>
             <StatePanel
               state={users}
@@ -6564,7 +7006,10 @@ export function AdminClient() {
                   key={id}
                   className={catalogView === id ? "is-active" : ""}
                   aria-current={catalogView === id ? "page" : undefined}
-                  onClick={() => setCatalogView(id)}
+                  onClick={() => {
+                    setCatalogView(id);
+                    setCatalogPage(0);
+                  }}
                 >
                   <strong>{label}</strong>
                   <small>{description}</small>
@@ -7236,9 +7681,10 @@ export function AdminClient() {
                             type="search"
                             maxLength={120}
                             value={catalogQuery}
-                            onChange={(event) =>
-                              setCatalogQuery(event.target.value)
-                            }
+                            onChange={(event) => {
+                              setCatalogQuery(event.target.value);
+                              setCatalogPage(0);
+                            }}
                             placeholder="平台、摘要或 /v1/ 路径"
                           />
                         </label>
@@ -7246,9 +7692,10 @@ export function AdminClient() {
                           <span>平台</span>
                           <select
                             value={catalogPlatform}
-                            onChange={(event) =>
-                              setCatalogPlatform(event.target.value)
-                            }
+                            onChange={(event) => {
+                              setCatalogPlatform(event.target.value);
+                              setCatalogPage(0);
+                            }}
                           >
                             <option value="all">全部平台</option>
                             {catalogPlatforms.map((platform) => (
@@ -7269,6 +7716,7 @@ export function AdminClient() {
                                 isCatalogDataType(value)
                               ) {
                                 setCatalogDataType(value);
+                                setCatalogPage(0);
                               }
                             }}
                           >
@@ -7300,6 +7748,7 @@ export function AdminClient() {
                         </div>
                       </div>
                       {displayedEndpoints.length ? (
+                        <>
                         <div className="admin-table-wrap admin-route-list-wrap">
                           <table className="admin-table admin-route-list is-pricing-view">
                             <thead>
@@ -7317,7 +7766,7 @@ export function AdminClient() {
                               </tr>
                             </thead>
                             <tbody>
-                              {displayedEndpoints.map((endpoint) => {
+                              {pagedDisplayedEndpoints.map((endpoint) => {
                                 const draft = x402Drafts[endpoint.path] ?? {
                                   price: usdInputValue(
                                     endpoint.customerPriceUsdMicros,
@@ -7495,6 +7944,13 @@ export function AdminClient() {
                             </tbody>
                           </table>
                         </div>
+                        <RouteCatalogPagination
+                          page={safeCatalogPage}
+                          pageCount={displayedEndpointPageCount}
+                          total={displayedEndpoints.length}
+                          onPageChange={setCatalogPage}
+                        />
+                        </>
                       ) : (
                         <div className="admin-empty">
                           <strong>没有符合条件的路由</strong>
@@ -7665,9 +8121,10 @@ export function AdminClient() {
                             type="search"
                             maxLength={120}
                             value={catalogQuery}
-                            onChange={(event) =>
-                              setCatalogQuery(event.target.value)
-                            }
+                            onChange={(event) => {
+                              setCatalogQuery(event.target.value);
+                              setCatalogPage(0);
+                            }}
                             placeholder="平台、标签、operationId、摘要或 /v1/ 路径"
                           />
                         </label>
@@ -7675,9 +8132,10 @@ export function AdminClient() {
                           <span>平台</span>
                           <select
                             value={catalogPlatform}
-                            onChange={(event) =>
-                              setCatalogPlatform(event.target.value)
-                            }
+                            onChange={(event) => {
+                              setCatalogPlatform(event.target.value);
+                              setCatalogPage(0);
+                            }}
                           >
                             <option value="all">全部平台</option>
                             {catalogPlatforms.map((platform) => (
@@ -7698,6 +8156,7 @@ export function AdminClient() {
                                 isCatalogDataType(value)
                               ) {
                                 setCatalogDataType(value);
+                                setCatalogPage(0);
                               }
                             }}
                           >
@@ -7722,6 +8181,7 @@ export function AdminClient() {
                                   value === "unavailable"
                                 ) {
                                   setCatalogRuntimeAvailability(value);
+                                  setCatalogPage(0);
                                 }
                               }}
                             >
@@ -7740,6 +8200,7 @@ export function AdminClient() {
                                   const value = event.target.value;
                                   if (isCatalogFilterStatus(value)) {
                                     setCatalogStatus(value);
+                                    setCatalogPage(0);
                                   }
                                 }}
                               >
@@ -7757,6 +8218,7 @@ export function AdminClient() {
                                   const value = event.target.value;
                                   if (isCatalogSafetyFilter(value)) {
                                     setCatalogSafety(value);
+                                    setCatalogPage(0);
                                   }
                                 }}
                               >
@@ -7785,8 +8247,10 @@ export function AdminClient() {
                                       const value = event.target.value;
                                       if (value === "") {
                                         setCatalogTag(null);
+                                        setCatalogPage(0);
                                       } else if (isCatalogTag(value)) {
                                         setCatalogTag(value);
+                                        setCatalogPage(0);
                                       }
                                     }}
                                   >
@@ -7812,6 +8276,7 @@ export function AdminClient() {
                                         isCatalogSurface(value)
                                       ) {
                                         setCatalogSurface(value);
+                                        setCatalogPage(0);
                                       }
                                     }}
                                   >
@@ -8001,6 +8466,7 @@ export function AdminClient() {
                     </div>
                   ) : null}
                   {displayedEndpoints.length ? (
+                    <>
                     <div className="admin-table-wrap admin-route-list-wrap">
                       <table
                         className={`admin-table admin-route-list ${
@@ -8057,7 +8523,7 @@ export function AdminClient() {
                           </tr>
                         </thead>
                         <tbody>
-                          {displayedEndpoints.map((endpoint) => {
+                          {pagedDisplayedEndpoints.map((endpoint) => {
                             const draft = priceDrafts[endpoint.path] ?? "";
                             const parsedDraft = parseUsdInput(draft);
                             const priceChanged =
@@ -8406,6 +8872,7 @@ export function AdminClient() {
                                           });
                                         } else {
                                           setCatalogView("pricing");
+                                          setCatalogPage(0);
                                         }
                                       }}
                                     >
@@ -8419,6 +8886,13 @@ export function AdminClient() {
                         </tbody>
                       </table>
                     </div>
+                    <RouteCatalogPagination
+                      page={safeCatalogPage}
+                      pageCount={displayedEndpointPageCount}
+                      total={displayedEndpoints.length}
+                      onPageChange={setCatalogPage}
+                    />
+                    </>
                   ) : (
                     <div className="admin-empty">
                       <strong>没有符合条件的接口</strong>
@@ -8437,7 +8911,10 @@ export function AdminClient() {
                         <button
                           className="button button-ghost button-small"
                           type="button"
-                          onClick={() => setCatalogView("add")}
+                          onClick={() => {
+                            setCatalogView("add");
+                            setCatalogPage(0);
+                          }}
                         >
                           打开新增 / 同步流程
                         </button>

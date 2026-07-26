@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { getLocale } from "../locale";
+import { PricingPaymentOptions } from "./PricingPaymentOptions";
 
 export async function generateMetadata(): Promise<Metadata> {
   const locale = await getLocale();
@@ -75,7 +76,7 @@ const content = {
     ],
     ctaKicker: "Start with $10. No subscription.",
     ctaTitle: "Keep the budget for useful requests.",
-    ctaPrimary: "Top up in console ↗",
+    ctaPrimary: "Check billing availability ↗",
     ctaSecondary: "Read API docs",
   },
   zh: {
@@ -135,7 +136,7 @@ const content = {
     ],
     ctaKicker: "从 $10 开始，无需订阅。",
     ctaTitle: "把预算留给有效请求。",
-    ctaPrimary: "进入控制台充值 ↗",
+    ctaPrimary: "查看充值可用状态 ↗",
     ctaSecondary: "查看 API 文档",
   },
 } as const;
@@ -192,32 +193,13 @@ export default async function PricingPage() {
           </div>
           <p>{c.topupIntro}</p>
         </div>
-        <div className="topup-grid">
-          {c.topups.map(([amount, label, note], index) => (
-            <article
-              className={`topup-card${index === 2 ? " topup-featured" : ""}`}
-              key={amount}
-            >
-              {index === 2 ? <span className="topup-badge">{c.recommended}</span> : null}
-              <span className="topup-label">{label}</span>
-              <strong>{amount}</strong>
-              <p>{note}</p>
-              <ul>
-                <li>USDT · TRC20</li>
-                <li>USDT · ERC20</li>
-                <li>USDC · Base</li>
-              </ul>
-              <a
-                className={`button ${index === 2 ? "button-lime" : "button-dark"}`}
-                href="/console"
-              >
-                {c.topupButton} {amount}
-                <span aria-hidden="true">→</span>
-              </a>
-            </article>
-          ))}
-        </div>
-        <p className="topup-fineprint">{c.topupFineprint}</p>
+        <PricingPaymentOptions
+          locale={locale}
+          recommended={c.recommended}
+          topupButton={c.topupButton}
+          topupFineprint={c.topupFineprint}
+          topups={c.topups}
+        />
       </section>
 
       <section className="unit-pricing">
@@ -275,7 +257,7 @@ export default async function PricingPage() {
         <p>{c.ctaKicker}</p>
         <h2>{c.ctaTitle}</h2>
         <div>
-          <a className="button button-lime button-large" href="/console">{c.ctaPrimary}</a>
+          <a className="button button-lime button-large" href="/console/billing">{c.ctaPrimary}</a>
           <Link className="button button-ghost-light button-large" href="/docs">{c.ctaSecondary}</Link>
         </div>
       </section>

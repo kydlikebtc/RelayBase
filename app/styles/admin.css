@@ -6010,6 +6010,58 @@
   }
 }
 
+.admin-members-panel {
+  margin-bottom: 14px;
+}
+
+.admin-member-create {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(180px, 0.45fr) auto;
+  gap: 10px;
+  align-items: end;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-alt);
+}
+
+.admin-member-create label {
+  display: grid;
+  gap: 5px;
+}
+
+.admin-member-create label > span,
+.admin-member-boundary {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.admin-member-create input,
+.admin-member-create select,
+.admin-members-panel .admin-table select {
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 7px 9px;
+  font: inherit;
+}
+
+.admin-member-boundary {
+  margin: 0;
+  padding: 11px 13px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-alt);
+}
+
+@media (max-width: 760px) {
+  .admin-member-create {
+    grid-template-columns: 1fr;
+  }
+}
+
 .admin-x402-runtime-config {
   display: grid;
   gap: 14px;

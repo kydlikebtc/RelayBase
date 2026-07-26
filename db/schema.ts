@@ -294,6 +294,34 @@ export const adminAuditLogs = sqliteTable(
   ],
 );
 
+export const adminMemberships = sqliteTable(
+  "admin_memberships",
+  {
+    userId: text("user_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    role: text("role").notNull().default("auditor"),
+    status: text("status").notNull().default("active"),
+    grantedBy: text("granted_by").notNull(),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("admin_memberships_role_status_idx").on(
+      table.role,
+      table.status,
+    ),
+    check(
+      "admin_memberships_role_values",
+      sql`${table.role} IN ('owner', 'operator', 'auditor')`,
+    ),
+    check(
+      "admin_memberships_status_values",
+      sql`${table.status} IN ('active', 'suspended')`,
+    ),
+  ],
+);
+
 export const operationHeartbeats = sqliteTable("operation_heartbeats", {
   name: text("name").primaryKey(),
   lastSuccessAt: text("last_success_at").notNull(),

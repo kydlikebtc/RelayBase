@@ -687,6 +687,46 @@
   text-align: right;
 }
 
+.runtime-capability-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin: -12px 0 24px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.runtime-capability-banner > span {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  place-items: center;
+  border-radius: 50%;
+  color: white;
+  background: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.runtime-capability-banner.is-available > span {
+  background: var(--green);
+}
+
+.runtime-capability-banner strong {
+  display: block;
+  font-size: 13px;
+}
+
+.runtime-capability-banner p {
+  margin: 4px 0 0;
+  color: var(--ink-2);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
 .topup-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -787,6 +827,11 @@
 .topup-card .button {
   width: 100%;
   margin-top: auto;
+}
+
+.topup-card .button.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .topup-fineprint {

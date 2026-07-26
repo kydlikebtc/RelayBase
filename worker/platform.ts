@@ -204,6 +204,12 @@ type AuthenticatedUser = {
   walletAddress: string | null;
 };
 
+type AdminRole = "owner" | "operator" | "auditor";
+type NamedAdminAccess = {
+  user: AuthenticatedUser;
+  role: AdminRole;
+};
+
 type ApiKeyRecord = {
   id: string;
   user_id: string;
@@ -957,6 +963,8 @@ class PlatformError extends Error {
   }
 }
 
+const namedAdminAuthorizedRequests = new WeakSet<Request>();
+
 export async function handlePlatformRequest(
   request: Request,
   env: PlatformEnv,
@@ -967,11 +975,22 @@ export async function handlePlatformRequest(
 
   try {
     if (
-      (url.pathname === "/console" || url.pathname.startsWith("/console/")) &&
+      (url.pathname === "/console" ||
+        url.pathname.startsWith("/console/") ||
+        url.pathname === "/admin") &&
       (request.method === "GET" || request.method === "HEAD")
     ) {
       const redirectResponse = await handleConsolePageGate(request, env);
       if (redirectResponse) return redirectResponse;
+    }
+
+    if (
+      url.pathname.startsWith("/api/admin/") &&
+      url.pathname !== "/api/admin/session" &&
+      !bearerToken(request)
+    ) {
+      await authorizeNamedAdminRequest(request, env);
+      namedAdminAuthorizedRequests.add(request);
     }
 
     if (url.pathname === "/api/health" && request.method === "GET") {
@@ -1107,6 +1126,41 @@ export async function handlePlatformRequest(
       request.method === "GET"
     ) {
       return await handleX402BatchList(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/admin/session" &&
+      request.method === "GET"
+    ) {
+      return await handleAdminSessionGet(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/admin/session" &&
+      request.method === "POST"
+    ) {
+      return await handleAdminSessionBootstrap(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/admin/members" &&
+      request.method === "GET"
+    ) {
+      return await handleAdminMembersList(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/admin/members" &&
+      request.method === "POST"
+    ) {
+      return await handleAdminMemberCreate(request, env, requestId);
+    }
+
+    if (
+      url.pathname === "/api/admin/members" &&
+      request.method === "PATCH"
+    ) {
+      return await handleAdminMemberUpdate(request, env, requestId);
     }
 
     if (
@@ -9785,173 +9839,96 @@ async function handlePublicCatalog(
   env: PlatformEnv,
   requestId: string,
 ): Promise<Response> {
-  const db = requireDb(env);
   const url = new URL(request.url);
-  const sourceConfig = await loadUpstreamSourceConfig(db, env, false);
   const filters = normalizeCatalogListFilters(url, {
     admin: false,
     defaultLimit: 200,
     maxLimit: 200,
     maxOffset: 5_000,
   });
-  await assertStoredCatalogTaxonomyIntegrity(db);
-  if (!sourceConfig) {
-    const readiness = await operationalReadiness(env);
-    return jsonResponse(
-      {
-        mode: readiness.mode,
-        catalog: {
-          revision: "cat_pending",
-          updatedAt: null,
-          complete: false,
-        },
-        endpoints: [],
-        count: 0,
-        total: 0,
-        offset: filters.offset,
-        nextOffset: null,
-      },
-      200,
-      requestId,
-      { "cache-control": "public, max-age=30, s-maxage=60" },
+  const [readiness, overlay] = await Promise.all([
+    operationalReadiness(env),
+    loadMarketplaceCatalogOverlay(env),
+  ]);
+  if (
+    readiness.capabilities.schemaReady &&
+    !readiness.capabilities.taxonomyReady
+  ) {
+    throw new PlatformError(
+      503,
+      "catalog_taxonomy_invalid",
+      "运行时目录分类数据无效，客户调用目录已停止发布。",
     );
   }
-  const clauses = [
-    "endpoint_catalog.enabled = 1",
-    "endpoint_catalog.read_only = 1",
-    "endpoint_catalog.price_verified = 1",
-    "endpoint_catalog.safety_classification = 'safe_data_read'",
-    `endpoint_catalog.safety_policy_version =
-       ${CATALOG_SAFETY_POLICY_VERSION}`,
-    catalogTaxonomyValidWhere("endpoint_catalog"),
-    `endpoint_catalog.sync_generation = (
-       SELECT last_success_generation
-       FROM catalog_sync_state
-       WHERE id = 1
-     )`,
-    `EXISTS (
-       SELECT 1 FROM catalog_sync_state
-       WHERE id = 1 AND ${CATALOG_COVERAGE_WHERE}
-         AND source_config_version = ?
-         AND source_config_hash = ?
-     )`,
-  ];
-  const bindings: unknown[] = [
-    sourceConfig.version,
-    sourceConfig.hash,
-  ];
-  for (const prefix of sourceConfig.publicExcludedPrefixes) {
-    clauses.push(
-      "endpoint_catalog.path != ? AND endpoint_catalog.path NOT LIKE ?",
+  const filtered = mergedMarketplaceEndpoints(overlay)
+    .filter((endpoint) => endpoint.availability === "available")
+    .filter((endpoint) => {
+      const row = overlay.rows.get(
+        `${endpoint.method ?? "UNKNOWN"}:${endpoint.path}`,
+      );
+      if (!row || endpoint.method === null) return false;
+      const queryFields = [
+        endpoint.path,
+        endpoint.platform,
+        endpoint.dataType,
+        endpoint.summary,
+        row.operationId ?? "",
+      ];
+      return (
+        (filters.platform === null ||
+          endpoint.platform === filters.platform) &&
+        (filters.dataType === null ||
+          endpoint.dataType === filters.dataType) &&
+        (filters.surface === null ||
+          endpoint.surface === filters.surface) &&
+        (filters.method === null || endpoint.method === filters.method) &&
+        (filters.tag === null ||
+          row.tags.some(
+            (tag) => tag.toLocaleLowerCase("en-US") === filters.tag,
+          )) &&
+        (filters.q === null ||
+          queryFields.some((value) =>
+            (value ?? "")
+              .toLocaleLowerCase("en-US")
+              .includes(filters.q ?? ""),
+          ))
+      );
+    })
+    .sort(
+      (left, right) =>
+        left.platform.localeCompare(right.platform, "en-US") ||
+        left.path.localeCompare(right.path, "en-US"),
     );
-    bindings.push(prefix.replace(/\/$/, ""), `${prefix}%`);
-  }
-  appendCatalogTaxonomyFilters(clauses, bindings, filters);
-  const where = clauses.join(" AND ");
-  const query = db
-    .prepare(
-      `SELECT path, platform, http_method, data_type, tags_json, surface,
-              operation_id, summary, parameter_schema_json,
-              customer_price_usd_micros,
-              rate_limit_rps, updated_at
-       FROM endpoint_catalog
-       WHERE ${where}
-       ORDER BY endpoint_catalog.platform ASC,
-                endpoint_catalog.path ASC
-       LIMIT ? OFFSET ?`,
-    )
-    .bind(...bindings, filters.limit, filters.offset);
-  const countQuery = db
-    .prepare(
-      `SELECT COUNT(*) AS count
-       FROM endpoint_catalog
-       WHERE ${where}`,
-    )
-    .bind(...bindings);
-  const rows = await query.all<{
-    path: string;
-    platform: string;
-    http_method: string;
-    data_type: CatalogDataType;
-    tags_json: string;
-    surface: MarketplaceSurface;
-    operation_id: string | null;
-    summary: string | null;
-    parameter_schema_json: string | null;
-    customer_price_usd_micros: number;
-    rate_limit_rps: number | null;
-    updated_at: string;
-  }>();
-  const endpoints = (rows.results ?? []).map((row) => {
-    const taxonomy = strictStoredCatalogTaxonomy(row);
-    const parameterSchema = safeStoredJson(row.parameter_schema_json);
-    return {
-      id: marketplaceServiceId(
-        row.http_method as "GET" | "POST",
-        row.path,
-      ),
-      path: row.path,
-      platform: row.platform,
-      dataType: taxonomy.dataType,
-      categories: [taxonomy.dataType, taxonomy.surface].sort(),
-      surface: taxonomy.surface,
-      method: row.http_method,
-      summary: marketplaceGeneratedSummary(row.path),
-      pricing: {
-        amountUsdMicros: row.customer_price_usd_micros,
-        currency: "USD",
-        unit: "request",
-        verified: true,
-      },
-      rateLimitRps:
-        row.rate_limit_rps == null ? null : Number(row.rate_limit_rps),
-      capability: endpointCapabilityFor(
-        row.path,
-        parameterSchema,
-        "complete",
-        row.http_method as "GET" | "POST",
-      ),
-      updatedAt: row.updated_at,
-    };
-  });
-  const countRow = await countQuery.first<{ count: number }>();
-  const catalogState = await db
-    .prepare(
-      `SELECT last_success_generation, synced_at,
-              CASE WHEN ${CATALOG_COVERAGE_WHERE}
-                   THEN 1 ELSE 0 END AS complete
-       FROM catalog_sync_state
-       WHERE id = 1 AND source_config_version = ?
-         AND source_config_hash = ?`,
-    )
-    .bind(sourceConfig.version, sourceConfig.hash)
-    .first<{
-      last_success_generation: string;
-      synced_at: string;
-      complete: number;
-    }>();
-  const total = Number(countRow?.count ?? 0);
+  const total = filtered.length;
+  const endpoints = filtered
+    .slice(filters.offset, filters.offset + filters.limit)
+    .map((endpoint) => ({
+      id: endpoint.id,
+      path: endpoint.path,
+      platform: endpoint.platform,
+      dataType: endpoint.dataType,
+      categories: endpoint.categories,
+      surface: endpoint.surface,
+      method: endpoint.method,
+      summary: endpoint.summary,
+      pricing: endpoint.pricing,
+      rateLimitRps: endpoint.rateLimitRps,
+      capability: endpoint.capability,
+      updatedAt: endpoint.updatedAt,
+    }));
   const nextOffset =
     filters.offset + endpoints.length < total &&
     filters.offset + endpoints.length < 5_000
       ? filters.offset + endpoints.length
       : null;
-  const readiness = await operationalReadiness(env);
 
   return jsonResponse(
     {
       mode: readiness.mode,
       catalog: {
-        revision:
-          catalogState?.last_success_generation ?? "cat_pending",
-        updatedAt:
-          endpoints
-            .map((endpoint) => endpoint.updatedAt)
-            .sort()
-            .at(-1) ??
-          catalogState?.synced_at ??
-          null,
-        complete: Number(catalogState?.complete ?? 0) === 1,
+        revision: overlay.catalog.revision ?? "cat_pending",
+        updatedAt: overlay.catalog.updatedAt,
+        complete: overlay.catalog.complete,
       },
       endpoints,
       count: endpoints.length,
@@ -12133,6 +12110,334 @@ async function catalogBatchResponse(
       offset,
       nextOffset,
     },
+    200,
+    requestId,
+  );
+}
+
+async function handleAdminSessionGet(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  const access = await requireNamedAdminAccess(request, env);
+  return jsonResponse(
+    {
+      admin: {
+        userId: access.user.id,
+        email: access.user.email,
+        displayName: access.user.displayName,
+        role: access.role,
+      },
+    },
+    200,
+    requestId,
+    { "cache-control": "private, no-store" },
+  );
+}
+
+async function handleAdminSessionBootstrap(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  assertSameOrigin(request, env);
+  const supplied = bearerToken(request);
+  if (
+    !supplied ||
+    !hasConfiguredAdminSecret(env.ADMIN_MASTER_SECRET) ||
+    !constantTimeEqual(supplied, env.ADMIN_MASTER_SECRET)
+  ) {
+    throw new PlatformError(
+      401,
+      "admin_bootstrap_unauthorized",
+      "紧急引导凭证无效。",
+    );
+  }
+  const db = requireDb(env);
+  const user = await requireAuthenticatedUser(request, db, env);
+  const [existing, ownerCount] = await Promise.all([
+    db
+      .prepare(
+        `SELECT role, status
+         FROM admin_memberships
+         WHERE user_id = ?`,
+      )
+      .bind(user.id)
+      .first<{ role: AdminRole; status: string }>(),
+    db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM admin_memberships
+         WHERE role = 'owner' AND status = 'active'`,
+      )
+      .first<{ count: number }>(),
+  ]);
+  if (existing?.status === "active") {
+    return jsonResponse(
+      {
+        admin: {
+          userId: user.id,
+          email: user.email,
+          displayName: user.displayName,
+          role: existing.role,
+        },
+        bootstrapped: false,
+      },
+      200,
+      requestId,
+      { "cache-control": "private, no-store" },
+    );
+  }
+  if (Number(ownerCount?.count ?? 0) > 0) {
+    throw new PlatformError(
+      409,
+      "admin_bootstrap_closed",
+      "具名管理员已经启用。请由现有 Owner 在后台授予权限。",
+    );
+  }
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO admin_memberships
+         (user_id, role, status, granted_by, created_at, updated_at)
+         VALUES (?, 'owner', 'active', 'break_glass', CURRENT_TIMESTAMP,
+                 CURRENT_TIMESTAMP)
+         ON CONFLICT(user_id) DO UPDATE SET
+           role = 'owner',
+           status = 'active',
+           granted_by = 'break_glass',
+           updated_at = CURRENT_TIMESTAMP`,
+      )
+      .bind(user.id),
+    await prepareAdminAuditStatement(db, request, {
+      action: "admin.bootstrap",
+      targetType: "admin_membership",
+      targetId: user.id,
+      details: {
+        email: user.email,
+        role: "owner",
+        authenticationProvider: user.provider,
+      },
+    }),
+  ]);
+  return jsonResponse(
+    {
+      admin: {
+        userId: user.id,
+        email: user.email,
+        displayName: user.displayName,
+        role: "owner",
+      },
+      bootstrapped: true,
+    },
+    201,
+    requestId,
+    { "cache-control": "private, no-store" },
+  );
+}
+
+async function handleAdminMembersList(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  requireAdminSecret(request, env, "platform");
+  const rows = await requireDb(env)
+    .prepare(
+      `SELECT m.user_id, u.email, u.display_name, m.role, m.status,
+              m.granted_by, m.created_at, m.updated_at
+       FROM admin_memberships m
+       JOIN users u ON u.id = m.user_id
+       ORDER BY
+         CASE m.role WHEN 'owner' THEN 0
+                     WHEN 'operator' THEN 1 ELSE 2 END,
+         lower(u.email) ASC`,
+    )
+    .all<{
+      user_id: string;
+      email: string;
+      display_name: string | null;
+      role: AdminRole;
+      status: "active" | "suspended";
+      granted_by: string;
+      created_at: string;
+      updated_at: string;
+    }>();
+  const members = (rows.results ?? []).map((row) => ({
+    userId: row.user_id,
+    email: row.email,
+    displayName: row.display_name ?? row.email,
+    role: row.role,
+    status: row.status,
+    grantedBy: row.granted_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+  return jsonResponse(
+    { members, count: members.length },
+    200,
+    requestId,
+    { "cache-control": "private, no-store" },
+  );
+}
+
+async function handleAdminMemberCreate(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  requireAdminSecret(request, env, "platform");
+  const body = await readJsonBody<{
+    email?: unknown;
+    role?: unknown;
+  }>(request, 4_096);
+  const email =
+    typeof body.email === "string"
+      ? body.email.trim().toLowerCase()
+      : "";
+  const role = body.role;
+  if (
+    !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) ||
+    !isAdminRole(role)
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_admin_membership",
+      "管理员邮箱或角色无效。",
+    );
+  }
+  const db = requireDb(env);
+  const user = await db
+    .prepare(
+      `SELECT id, email
+       FROM users
+       WHERE email = ? AND status = 'active'`,
+    )
+    .bind(email)
+    .first<{ id: string; email: string }>();
+  if (!user) {
+    throw new PlatformError(
+      404,
+      "admin_user_not_found",
+      "该用户需要先登录 RelayBase，才能被授予管理员角色。",
+    );
+  }
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO admin_memberships
+         (user_id, role, status, granted_by, created_at, updated_at)
+         VALUES (?, ?, 'active', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ON CONFLICT(user_id) DO UPDATE SET
+           role = excluded.role,
+           status = 'active',
+           granted_by = excluded.granted_by,
+           updated_at = CURRENT_TIMESTAMP`,
+      )
+      .bind(user.id, role, await adminActorFingerprint(db, request)),
+    await prepareAdminAuditStatement(db, request, {
+      action: "admin.membership.grant",
+      targetType: "admin_membership",
+      targetId: user.id,
+      details: { email: user.email, role },
+    }),
+  ]);
+  return jsonResponse(
+    { ok: true, userId: user.id, role, status: "active" },
+    201,
+    requestId,
+  );
+}
+
+async function handleAdminMemberUpdate(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  requireAdminSecret(request, env, "platform");
+  const body = await readJsonBody<{
+    userId?: unknown;
+    role?: unknown;
+    status?: unknown;
+  }>(request, 4_096);
+  const userId =
+    typeof body.userId === "string" ? body.userId.trim() : "";
+  const role = body.role;
+  const status = body.status;
+  if (
+    !/^usr_[A-Za-z0-9_-]{8,80}$/.test(userId) ||
+    !isAdminRole(role) ||
+    (status !== "active" && status !== "suspended")
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_admin_membership",
+      "管理员成员更新参数无效。",
+    );
+  }
+  const db = requireDb(env);
+  const current = await db
+    .prepare(
+      `SELECT role, status
+       FROM admin_memberships
+       WHERE user_id = ?`,
+    )
+    .bind(userId)
+    .first<{ role: AdminRole; status: "active" | "suspended" }>();
+  if (!current) {
+    throw new PlatformError(
+      404,
+      "admin_membership_not_found",
+      "管理员成员不存在。",
+    );
+  }
+  if (
+    current.role === "owner" &&
+    current.status === "active" &&
+    (role !== "owner" || status !== "active")
+  ) {
+    const owners = await db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM admin_memberships
+         WHERE role = 'owner' AND status = 'active'`,
+      )
+      .first<{ count: number }>();
+    if (Number(owners?.count ?? 0) <= 1) {
+      throw new PlatformError(
+        409,
+        "last_admin_owner",
+        "不能停用或降级最后一位 Owner。",
+      );
+    }
+  }
+  const result = await db
+    .prepare(
+      `UPDATE admin_memberships
+       SET role = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE user_id = ?`,
+    )
+    .bind(role, status, userId)
+    .run();
+  if (Number(result.meta.changes ?? 0) !== 1) {
+    throw new PlatformError(
+      409,
+      "admin_membership_conflict",
+      "管理员成员状态已变化，请刷新后重试。",
+    );
+  }
+  await writeAdminAudit(db, request, {
+    action: "admin.membership.update",
+    targetType: "admin_membership",
+    targetId: userId,
+    details: {
+      from: current,
+      to: { role, status },
+    },
+  });
+  return jsonResponse(
+    { ok: true, userId, role, status },
     200,
     requestId,
   );
@@ -18281,6 +18586,9 @@ async function operationalReadiness(env: PlatformEnv) {
                AS payment_review_credit_schema,
              (SELECT id FROM admin_audit_logs LIMIT 1)
                AS admin_audit_schema,
+             (SELECT role || status
+              FROM admin_memberships LIMIT 1)
+               AS admin_membership_schema,
              (SELECT secret_hash FROM upstream_credentials LIMIT 1)
                AS upstream_credentials_schema,
              (SELECT managed_enabled
@@ -21101,11 +21409,78 @@ function requireDb(env: PlatformEnv): D1Database {
   return env.DB;
 }
 
+function isAdminRole(value: unknown): value is AdminRole {
+  return value === "owner" || value === "operator" || value === "auditor";
+}
+
+async function requireNamedAdminAccess(
+  request: Request,
+  env: PlatformEnv,
+): Promise<NamedAdminAccess> {
+  const db = requireDb(env);
+  const user = await requireAuthenticatedUser(request, db, env);
+  const membership = await db
+    .prepare(
+      `SELECT role, status
+       FROM admin_memberships
+       WHERE user_id = ?`,
+    )
+    .bind(user.id)
+    .first<{ role: string; status: string }>();
+  if (
+    !membership ||
+    membership.status !== "active" ||
+    !isAdminRole(membership.role)
+  ) {
+    throw new PlatformError(
+      403,
+      "admin_membership_required",
+      "当前账户没有运营后台权限。",
+    );
+  }
+  return { user, role: membership.role };
+}
+
+function namedAdminPermission(
+  request: Request,
+): "read" | "catalog_write" | "owner_write" {
+  if (request.method === "GET" || request.method === "HEAD") return "read";
+  const path = new URL(request.url).pathname;
+  if (path.startsWith("/api/admin/catalog")) {
+    return "catalog_write";
+  }
+  return "owner_write";
+}
+
+async function authorizeNamedAdminRequest(
+  request: Request,
+  env: PlatformEnv,
+): Promise<NamedAdminAccess> {
+  const access = await requireNamedAdminAccess(request, env);
+  const permission = namedAdminPermission(request);
+  const allowed =
+    access.role === "owner" ||
+    permission === "read" ||
+    (access.role === "operator" && permission === "catalog_write");
+  if (!allowed) {
+    throw new PlatformError(
+      403,
+      "admin_role_forbidden",
+      "当前管理员角色无权执行此操作。",
+    );
+  }
+  if (permission !== "read") {
+    assertSameOrigin(request, env);
+  }
+  return access;
+}
+
 function requireAdminSecret(
   request: Request,
   env: PlatformEnv,
   scope: "catalog" | "payments" | "reconciliation" | "platform",
 ): void {
+  if (namedAdminAuthorizedRequests.has(request)) return;
   const supplied = bearerToken(request);
   const scoped =
     scope === "catalog"
@@ -21127,6 +21502,58 @@ function requireAdminSecret(
   ) {
     throw new PlatformError(401, "admin_unauthorized", "管理员凭证无效。");
   }
+}
+
+async function adminActorFingerprint(
+  db: D1Database,
+  request: Request,
+): Promise<string> {
+  const supplied = bearerToken(request);
+  if (supplied) return (await sha256Hex(supplied)).slice(0, 16);
+
+  const sessionToken = cookieValue(request, SESSION_COOKIE);
+  if (
+    sessionToken &&
+    /^[A-Za-z0-9_-]{32,160}$/.test(sessionToken)
+  ) {
+    const tokenHash = await sha256Hex(sessionToken);
+    const actor = await db
+      .prepare(
+        `SELECT m.user_id, m.role
+         FROM auth_sessions s
+         JOIN admin_memberships m ON m.user_id = s.user_id
+         WHERE s.token_hash = ?
+           AND datetime(s.expires_at) > datetime('now')
+           AND m.status = 'active'
+         LIMIT 1`,
+      )
+      .bind(tokenHash)
+      .first<{ user_id: string; role: AdminRole }>();
+    if (actor) return `user:${actor.user_id}:${actor.role}`;
+  }
+
+  const email = request.headers
+    .get(USER_EMAIL_HEADER)
+    ?.trim()
+    .toLowerCase();
+  if (email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    const userId = `usr_${(await sha256Hex(email)).slice(0, 24)}`;
+    const actor = await db
+      .prepare(
+        `SELECT role
+         FROM admin_memberships
+         WHERE user_id = ? AND status = 'active'`,
+      )
+      .bind(userId)
+      .first<{ role: AdminRole }>();
+    if (actor) return `user:${userId}:${actor.role}`;
+  }
+
+  throw new PlatformError(
+    401,
+    "admin_unauthorized",
+    "管理员身份无法写入审计记录。",
+  );
 }
 
 async function writeAdminAudit(
@@ -21195,10 +21622,7 @@ async function prepareAdminAuditStatement(
     };
   },
 ): Promise<D1PreparedStatement> {
-  const supplied = bearerToken(request);
-  if (!supplied) {
-    throw new PlatformError(401, "admin_unauthorized", "管理员凭证无效。");
-  }
+  const actorFingerprint = await adminActorFingerprint(db, request);
   const details = input.details ? JSON.stringify(input.details) : null;
   if (details != null && details.length > 8_192) {
     throw new PlatformError(
@@ -21233,7 +21657,7 @@ async function prepareAdminAuditStatement(
     : `aud_${randomBase64Url(18)}`;
   const values = [
     auditId,
-    (await sha256Hex(supplied)).slice(0, 16),
+    actorFingerprint,
     input.action.slice(0, 120),
     input.targetType.slice(0, 80),
     input.targetId.slice(0, 180),

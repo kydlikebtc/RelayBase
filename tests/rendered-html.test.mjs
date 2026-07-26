@@ -186,6 +186,7 @@ const migrationFiles = [
   "drizzle/0017_omniscient_zarda.sql",
   "drizzle/0018_previous_jackpot.sql",
   "drizzle/0019_previous_patriot.sql",
+  "drizzle/0020_regular_steve_rogers.sql",
 ];
 
 async function migrate(db, names = migrationFiles) {
@@ -5910,18 +5911,11 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
   );
   assert.equal(publicCatalog.status, 200);
   const publicData = await publicCatalog.json();
-  assert.equal(publicData.count, 1);
-  assert.equal(publicData.total, 1);
+  assert.equal(publicData.count, 0);
+  assert.equal(publicData.total, 0);
   assert.equal(publicData.offset, 0);
   assert.equal(publicData.nextOffset, null);
-  assert.equal(
-    publicData.endpoints[0].path,
-    "/v1/youtube/web/fetch_video",
-  );
-  assert.deepEqual(publicData.endpoints[0].categories, [
-    "content",
-    "web",
-  ]);
+  assert.deepEqual(publicData.endpoints, []);
 
   youtubeTags = ["YouTube-Web-V2-API"];
   const taxonomyChanged = await sync();
@@ -5942,7 +5936,7 @@ test("serializes catalog sync and refuses to re-enable removed endpoints", async
   });
 });
 
-test("normalizes a custom API prefix and anonymously publishes an optional-auth catalog without an active managed key", async (t) => {
+test("normalizes a custom API prefix without publishing an unavailable runtime route", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
   await migrate(db);
@@ -6112,11 +6106,8 @@ test("normalizes a custom API prefix and anonymously publishes an optional-auth 
   assert.equal(published.status, 200);
   const publishedData = await published.json();
   assert.equal(publishedData.catalog.complete, true);
-  assert.equal(publishedData.count, 1);
-  assert.equal(
-    publishedData.endpoints[0].path,
-    "/v1/example/web/fetch_profile",
-  );
+  assert.equal(publishedData.count, 0);
+  assert.deepEqual(publishedData.endpoints, []);
 
   db.raw
     .prepare(
@@ -7826,11 +7817,8 @@ test("keeps the last successful catalog live when a staged sync batch fails", as
   const stillLive = await fetchWorker("/api/catalog", {}, env);
   assert.equal(stillLive.status, 200);
   const liveData = await stillLive.json();
-  assert.equal(liveData.total, 1);
-  assert.equal(
-    liveData.endpoints[0].path,
-    "/v1/tiktok/web/fetch_user_profile",
-  );
+  assert.equal(liveData.total, 0);
+  assert.deepEqual(liveData.endpoints, []);
   assert.equal(
     db.raw
       .prepare(
@@ -8029,6 +8017,18 @@ test("uses one backend availability result for admin and Data Market", async (t)
       endpoint.path === "/v1/tiktok/web/fetch_user_profile",
   );
   assert.equal(marketReadyEndpoint.availability, "available");
+  const publicCatalogReady = await fetchWorker(
+    "/api/catalog?platform=tiktok&limit=100&offset=0",
+    {},
+    readyEnv,
+  );
+  assert.equal(publicCatalogReady.status, 200);
+  assert.ok(
+    (await publicCatalogReady.json()).endpoints.some(
+      (endpoint) =>
+        endpoint.path === "/v1/tiktok/web/fetch_user_profile",
+    ),
+  );
 
   const disable = await fetchWorker(
     "/api/admin/catalog",
@@ -8085,6 +8085,130 @@ test("uses one backend availability result for admin and Data Market", async (t)
       endpoint.path === "/v1/tiktok/web/fetch_user_profile",
   );
   assert.equal(marketPendingEndpoint.availability, "pending");
+  const publicCatalogPending = await fetchWorker(
+    "/api/catalog?platform=tiktok&limit=100&offset=0",
+    {},
+    readyEnv,
+  );
+  assert.equal(publicCatalogPending.status, 200);
+  assert.equal(
+    (await publicCatalogPending.json()).endpoints.some(
+      (endpoint) =>
+        endpoint.path === "/v1/tiktok/web/fetch_user_profile",
+    ),
+    false,
+  );
+});
+
+test("bootstraps named admins once and enforces role permissions", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const adminSecret = "named-admin-bootstrap-secret-32-characters";
+  const env = baseEnv({
+    DB: db,
+    ADMIN_MASTER_SECRET: adminSecret,
+  });
+  const ownerHeaders = signedInHeaders();
+  const auditorHeaders = signedInHeaders({
+    "oai-authenticated-user-email": "auditor@example.com",
+    "oai-authenticated-user-full-name": "Relay%20Auditor",
+  });
+  const outsiderHeaders = signedInHeaders({
+    "oai-authenticated-user-email": "outsider@example.com",
+    "oai-authenticated-user-full-name": "Relay%20Outsider",
+  });
+
+  const bootstrap = await fetchWorker(
+    "/api/admin/session",
+    {
+      method: "POST",
+      headers: {
+        ...ownerHeaders,
+        authorization: `Bearer ${adminSecret}`,
+      },
+      body: "{}",
+    },
+    env,
+  );
+  assert.equal(bootstrap.status, 201, await bootstrap.clone().text());
+  const bootstrapData = await bootstrap.json();
+  assert.equal(bootstrapData.admin.email, "owner@example.com");
+  assert.equal(bootstrapData.admin.role, "owner");
+  assert.equal(bootstrapData.bootstrapped, true);
+
+  const ownerSession = await fetchWorker(
+    "/api/admin/session",
+    { headers: ownerHeaders },
+    env,
+  );
+  assert.equal(ownerSession.status, 200);
+  assert.equal((await ownerSession.json()).admin.role, "owner");
+
+  const auditorLogin = await fetchWorker(
+    "/api/auth/me",
+    { headers: auditorHeaders },
+    env,
+  );
+  assert.equal(auditorLogin.status, 200);
+  const grant = await fetchWorker(
+    "/api/admin/members",
+    {
+      method: "POST",
+      headers: ownerHeaders,
+      body: JSON.stringify({
+        email: "auditor@example.com",
+        role: "auditor",
+      }),
+    },
+    env,
+  );
+  assert.equal(grant.status, 201, await grant.clone().text());
+
+  const auditorRead = await fetchWorker(
+    "/api/admin/overview",
+    { headers: auditorHeaders },
+    env,
+  );
+  assert.equal(auditorRead.status, 200);
+  const auditorWrite = await fetchWorker(
+    "/api/admin/members",
+    {
+      method: "PATCH",
+      headers: auditorHeaders,
+      body: JSON.stringify({
+        userId: bootstrapData.admin.userId,
+        role: "auditor",
+        status: "suspended",
+      }),
+    },
+    env,
+  );
+  assert.equal(auditorWrite.status, 403);
+  assert.equal(
+    (await auditorWrite.json()).error.code,
+    "admin_role_forbidden",
+  );
+
+  const outsider = await fetchWorker(
+    "/api/admin/overview",
+    { headers: outsiderHeaders },
+    env,
+  );
+  assert.equal(outsider.status, 403);
+  assert.equal(
+    (await outsider.json()).error.code,
+    "admin_membership_required",
+  );
+
+  const audit = db.raw
+    .prepare(
+      `SELECT actor_fingerprint, action
+       FROM admin_audit_logs
+       WHERE action = 'admin.membership.grant'`,
+    )
+    .get();
+  assert.match(audit.actor_fingerprint, /^user:usr_/);
 });
 
 test("atomically confirms selected pending routes for the frontend", async (t) => {

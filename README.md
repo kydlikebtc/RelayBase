@@ -5,7 +5,7 @@ RelayBase 是面向 AI、产品与研究团队的多平台数据市场。它将�
 访问 Key 消费统一 `/v1/...` 路径，服务端负责供给审核、客户定价、余额预扣、
 上游调用、失败退款、幂等、限流和审计。
 
-当前应用版本：`v0.4.0-preview.4`。默认运行在安全沙盒。未完成书面商业授权、法律审查、
+当前应用版本：`v0.4.0-preview.5`。默认运行在安全沙盒。未完成书面商业授权、法律审查、
 支付商审批、登录配置、目录审核和近期对账之前，真实代理与稳定币充值都会安全关闭。
 
 ## 已实现能力
@@ -165,13 +165,15 @@ Google 登录使用 PKCE、state 与 nonce；钱包登录使用一次性限时�
 - `NOWPAYMENTS_API_KEY` / `NOWPAYMENTS_IPN_SECRET`
 - `CRYPTO_PAYMENTS_ENABLED=true`
 - `LEGAL_REVIEW_CONFIRMED=true`
-- `ADMIN_MASTER_SECRET`
+- `ADMIN_MASTER_SECRET`：只用于首次 Owner 引导和灾难恢复，不作为日常浏览器会话
 - `CATALOG_SYNC_SECRET`
 - `RECONCILIATION_SECRET`
 - `PAYMENT_ADMIN_SECRET`
 
-管理与调度密钥必须互不相同，且至少包含 32 个高熵字符。浏览器只在当前管理会话
-内存中保留主密钥；服务端审计仅记录不可逆指纹。
+管理与调度密钥必须互不相同，且至少包含 32 个高熵字符。首位已登录用户使用主密钥
+完成一次引导后，后台改用具名成员身份；主密钥不保存到浏览器。Owner 可以授予
+`owner`、`operator`、`auditor` 三种角色，服务端按最小权限校验，写操作审计记录
+具体用户和角色。调度器继续使用独立 scoped secret，不获得浏览器管理员会话。
 
 ### x402 Agent 批量结算
 
@@ -218,6 +220,7 @@ ${PUBLIC_APP_URL}/admin
 
 后台提供：
 
+- 具名 Owner / Operator / Auditor 成员、最小权限和高风险变更审计
 - 实际用户、身份、会话、API Key 和用量统计
 - 加密上游凭据的保存、在线验证、切换与永久撤销
 - TikHub 容量组、账号有效 RPS、接口附加上限、路由优先级/权重、Key 健康与最近状态

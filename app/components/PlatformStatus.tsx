@@ -3,21 +3,29 @@
 import { useEffect, useState } from "react";
 import type { Locale } from "../locale";
 
-type PlatformMode = "checking" | "sandbox" | "partial" | "live" | "unknown";
+type PlatformMode =
+  | "checking"
+  | "sandbox"
+  | "partial"
+  | "live"
+  | "configuring"
+  | "unknown";
 
 const labels: Record<Locale, Record<PlatformMode, string>> = {
   en: {
     checking: "Checking status",
-    sandbox: "Operational",
+    sandbox: "Sandbox preview",
     partial: "Partially available",
     live: "Operational",
+    configuring: "Configuration incomplete",
     unknown: "Status unavailable",
   },
   zh: {
     checking: "检查状态",
-    sandbox: "服务正常",
+    sandbox: "沙盒预览",
     partial: "部分可用",
     live: "服务正常",
+    configuring: "配置未完成",
     unknown: "状态不可用",
   },
 };
@@ -41,13 +49,24 @@ export function PlatformStatus({
     })
       .then(async (response) => {
         if (!response.ok) throw new Error("health check failed");
-        const payload = (await response.json()) as { mode?: unknown };
+        const payload = (await response.json()) as {
+          mode?: unknown;
+          ready?: unknown;
+        };
         if (
           payload.mode === "sandbox" ||
           payload.mode === "partial" ||
           payload.mode === "live"
         ) {
-          setMode(payload.mode);
+          if (payload.ready === true && payload.mode === "live") {
+            setMode("live");
+          } else if (payload.mode === "sandbox") {
+            setMode("sandbox");
+          } else if (payload.mode === "partial") {
+            setMode("partial");
+          } else {
+            setMode("configuring");
+          }
           return;
         }
         setMode("unknown");

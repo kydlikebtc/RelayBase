@@ -290,7 +290,8 @@ strong,
 }
 
 .platform-status-sandbox .status-dot,
-.platform-status-partial .status-dot {
+.platform-status-partial .status-dot,
+.platform-status-configuring .status-dot {
   background: var(--warning);
 }
 
