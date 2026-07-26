@@ -33,6 +33,78 @@ RelayBase 通过运行时配置的第三方数据源提供数据能力。公开�
 - 来源白名单、运行时来源记录和加密主密钥属于私有运营配置，不得通过市场 API、
   健康接口、日志或构建产物公开。
 
+## TikHub 容量组与多 Key 路由
+
+RelayBase 不把“一个 Key”直接等同为“一份容量”。TikHub 官方当前说明默认
+`10 RPS`，RPS 套餐可以提升到 `20–100+`，但未承诺每个接口都独享这份容量；
+因此运营后台中的容量组代表真实 TikHub 账号或套餐的全局共享限额：
+
+- 同一 TikHub 账号签发的多个 Key 必须加入同一容量组。组内所有 Key 和所有 API
+  路径共享 `configured_rps_per_endpoint` 所记录的套餐 RPS，不会因 Key 或路径
+  数量增加而重复计算容量。字段名为首版兼容名称，语义是容量组全局 RPS。
+- 只有彼此独立、确有独立限额的 TikHub 账号才能建立不同容量组。多个活动容量组
+  的有效 RPS 可以叠加。
+- `headroom_bps` 为安全使用比例，默认 `8000`（80%）。有效上限是
+  `min(容量组套餐 RPS, 目录声明 RPS) × 安全比例`，向下取整且至少为 1 RPS。
+- 每次调用先消费 `capacity_group_id + __all__` 全局桶。如果目录为目标接口声明了
+  更低 RPS，再消费 `capacity_group_id + endpoint_path` 接口桶；任一层满即停止
+  上游调用。这样多接口并发不会把套餐总量放大。
+- 标准 API Key 调用与 x402 批量执行必须调用相同的限流和路由实现，禁止另建绕过
+  上游限额的批量并发通道。
+
+凭据包含 `routing_enabled`、`priority` 和 `weight`。目录活动凭据仍是同步证明的
+权威来源；它与运行时路由池是两个明确概念。已验证、未撤销、配置哈希匹配、授权
+范围覆盖目标路径、容量组活动且未处于冷却的 Key 才能进入路由候选。
+
+每次真实调用最多尝试两条路由：
+
+1. 优先选择更低的 priority、健康状态更好、EWMA 延迟更低的候选；同级使用
+   weight 做稳定加权选择。
+2. `401/403` 等可明确归因于凭据的失败先隔离具体 Key，可切换到同容量组的另一
+   健康 Key；过期或禁用 Key 在候选阶段直接排除。这只提供凭据级容灾，不增加
+   该账号的 RPS。
+3. `402` 余额不足、`429` 账号限流、`408/5xx` 和无法归因到单 Key 的网络错误
+   隔离整个容量组；同组其他 Key 不能绕过账号余额、账号级限流或上游整体故障。
+4. 有另一独立容量组时最多故障切换一次；没有安全容量时快速返回
+   `upstream_capacity_exhausted`。
+5. 每次尝试写入只含指纹的审计记录，不保存明文 Key。健康、冷却与接口级限流状态
+   存在 D1，使多个 Worker 实例共享同一判断。
+
+迁移 `0018` 为旧活动凭据创建默认 `10 RPS × 80%` 全局容量组；为了避免把未经确认的
+备用 Key 当成独立容量，迁移只启用当时的活动凭据。运营方应根据真实 TikHub
+账号归属重新分组并补齐其他 Key。
+
+限流口径以 TikHub 官方 API 概览和 Pricing 的当前账号套餐说明为准。运营方仍
+必须按实际购买的账号套餐填写，不能根据 Key 数量推算容量。
+
+## 端点能力与执行单位
+
+RelayBase 不用端点名称推断上游能力。每个目录产品返回统一能力对象：
+
+- `executionMode`：`direct`、`native_batch`、`paginated`、`async_job`
+  或 x402 使用的 `fanout`
+- `nativeBatchSupported`、`nativeBatchMax`、`targetField`、
+  `targetEncoding`
+- `pagination.style`、请求/响应游标字段、page-size 字段和已证明的上限
+- `typicalItemsPerResponse` 与 `responseItemsPath`；不能可靠证明时为 `null`
+- `evidence.status`：`verified`、`openapi_inferred`、`pending`，以及来源 URL、
+  说明、校验日期和能力 revision
+
+计量单位必须分开：
+
+- `Hc`：客户到 RelayBase 的 HTTP 请求
+- `Hu`：RelayBase 到 TikHub 的实际 HTTP attempt（包括有限故障转移）
+- `T`：逻辑 ID、帖子或其他目标数
+- `D`：能从已验证响应路径可靠计算的返回条目数
+- `P`：显式 page/cursor 请求单位
+
+`native_batch` 仅允许端点级官方证据充分、HTTP method/入口版本一致、除目标字段外
+参数完全相同的请求合并；APP 与 WEB、不同版本、字段覆盖或权限语义不同的端点永不
+自动互换。分页端点每个显式 page/cursor 计为一个 `Hc` 和至少一个 `Hu`，标准
+端点不会自动追页。x402 报价持久化能力 revision、执行模式、目标数与计划上游
+请求数；付款前必须取得容量租约，付款后按冻结分片执行。x402 只可使用容量组安全
+份额，标准 API 与 x402 仍共享容量组全局桶。
+
 ## 中性化迁移
 
 - `0014` 会把旧来源标识改为中性标识，并永久撤销迁移前的全部托管凭据。

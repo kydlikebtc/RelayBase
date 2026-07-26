@@ -15,10 +15,22 @@ export const users = sqliteTable(
     email: text("email").notNull(),
     displayName: text("display_name"),
     status: text("status").notNull().default("active"),
+    rateLimitRps: integer("rate_limit_rps").notNull().default(3),
+    rateLimitBurst: integer("rate_limit_burst").notNull().default(6),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
-  (table) => [uniqueIndex("users_email_unique").on(table.email)],
+  (table) => [
+    uniqueIndex("users_email_unique").on(table.email),
+    check(
+      "users_rate_limit_rps_range",
+      sql`${table.rateLimitRps} BETWEEN 1 AND 1000`,
+    ),
+    check(
+      "users_rate_limit_burst_range",
+      sql`${table.rateLimitBurst} BETWEEN ${table.rateLimitRps} AND 2000`,
+    ),
+  ],
 );
 
 export const apiKeys = sqliteTable(
@@ -32,6 +44,8 @@ export const apiKeys = sqliteTable(
     keyPrefix: text("key_prefix").notNull(),
     keyHash: text("key_hash").notNull(),
     rateLimitRpm: integer("rate_limit_rpm").notNull().default(60),
+    rateLimitRps: integer("rate_limit_rps").notNull().default(3),
+    rateLimitBurst: integer("rate_limit_burst").notNull().default(6),
     lastUsedAt: text("last_used_at"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     revokedAt: text("revoked_at"),
@@ -39,6 +53,14 @@ export const apiKeys = sqliteTable(
   (table) => [
     uniqueIndex("api_keys_hash_unique").on(table.keyHash),
     index("api_keys_user_idx").on(table.userId),
+    check(
+      "api_keys_rate_limit_rps_range",
+      sql`${table.rateLimitRps} BETWEEN 1 AND 1000`,
+    ),
+    check(
+      "api_keys_rate_limit_burst_range",
+      sql`${table.rateLimitBurst} BETWEEN ${table.rateLimitRps} AND 2000`,
+    ),
   ],
 );
 
@@ -303,12 +325,56 @@ export const upstreamSourceConfig = sqliteTable(
   ],
 );
 
+export const upstreamCapacityGroups = sqliteTable(
+  "upstream_capacity_groups",
+  {
+    id: text("id").primaryKey(),
+    provider: text("provider").notNull().default("primary"),
+    label: text("label").notNull(),
+    configuredRpsPerEndpoint: integer("configured_rps_per_endpoint")
+      .notNull()
+      .default(10),
+    headroomBps: integer("headroom_bps").notNull().default(8000),
+    status: text("status").notNull().default("active"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("upstream_capacity_groups_provider_label_unique").on(
+      table.provider,
+      table.label,
+    ),
+    index("upstream_capacity_groups_status_idx").on(table.status),
+    check(
+      "upstream_capacity_groups_rps_range",
+      sql`${table.configuredRpsPerEndpoint} BETWEEN 1 AND 10000`,
+    ),
+    check(
+      "upstream_capacity_groups_headroom_range",
+      sql`${table.headroomBps} BETWEEN 1000 AND 10000`,
+    ),
+    check(
+      "upstream_capacity_groups_status_values",
+      sql`${table.status} IN ('active', 'draining', 'disabled')`,
+    ),
+  ],
+);
+
 export const upstreamCredentials = sqliteTable(
   "upstream_credentials",
   {
     id: text("id").primaryKey(),
     provider: text("provider").notNull().default("primary"),
     label: text("label").notNull(),
+    capacityGroupId: text("capacity_group_id").references(
+      () => upstreamCapacityGroups.id,
+      { onDelete: "restrict" },
+    ),
+    routingEnabled: integer("routing_enabled", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    priority: integer("priority").notNull().default(100),
+    weight: integer("weight").notNull().default(100),
     encryptedSecret: text("encrypted_secret").notNull(),
     secretHash: text("secret_hash").notNull(),
     verifiedScopesJson: text("verified_scopes_json"),
@@ -327,6 +393,46 @@ export const upstreamCredentials = sqliteTable(
     index("upstream_credentials_provider_created_idx").on(
       table.provider,
       table.createdAt,
+    ),
+    index("upstream_credentials_capacity_group_idx").on(
+      table.capacityGroupId,
+      table.routingEnabled,
+    ),
+    check(
+      "upstream_credentials_priority_range",
+      sql`${table.priority} BETWEEN 1 AND 10000`,
+    ),
+    check(
+      "upstream_credentials_weight_range",
+      sql`${table.weight} BETWEEN 1 AND 10000`,
+    ),
+  ],
+);
+
+export const upstreamCredentialHealth = sqliteTable(
+  "upstream_credential_health",
+  {
+    credentialId: text("credential_id")
+      .primaryKey()
+      .references(() => upstreamCredentials.id, { onDelete: "cascade" }),
+    state: text("state").notNull().default("healthy"),
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    ewmaLatencyMs: integer("ewma_latency_ms"),
+    cooldownUntil: text("cooldown_until"),
+    lastStatusCode: integer("last_status_code"),
+    lastErrorCode: text("last_error_code"),
+    lastSuccessAt: text("last_success_at"),
+    lastFailureAt: text("last_failure_at"),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("upstream_credential_health_state_idx").on(
+      table.state,
+      table.cooldownUntil,
+    ),
+    check(
+      "upstream_credential_health_state_values",
+      sql`${table.state} IN ('healthy', 'degraded', 'auth_failed', 'balance_low', 'circuit_open')`,
     ),
   ],
 );
@@ -384,6 +490,8 @@ export const endpointCatalog = sqliteTable(
     parameterSchemaJson: text("parameter_schema_json"),
     upstreamPriceUsdMicros: integer("upstream_price_usd_micros").notNull(),
     customerPriceUsdMicros: integer("customer_price_usd_micros").notNull(),
+    rateLimitRaw: text("rate_limit_raw"),
+    rateLimitRps: integer("rate_limit_rps"),
     priceVerified: integer("price_verified", { mode: "boolean" })
       .notNull()
       .default(false),
@@ -419,6 +527,71 @@ export const endpointCatalog = sqliteTable(
     index("endpoint_catalog_surface_enabled_idx").on(
       table.surface,
       table.enabled,
+    ),
+  ],
+);
+
+export const endpointCapabilities = sqliteTable(
+  "endpoint_capabilities",
+  {
+    path: text("path")
+      .primaryKey()
+      .references(() => endpointCatalog.path, { onDelete: "cascade" }),
+    executionMode: text("execution_mode").notNull().default("direct"),
+    nativeBatchSupported: integer("native_batch_supported", {
+      mode: "boolean",
+    })
+      .notNull()
+      .default(false),
+    nativeBatchMax: integer("native_batch_max"),
+    targetField: text("target_field"),
+    targetEncoding: text("target_encoding"),
+    paginationStyle: text("pagination_style"),
+    paginationRequestField: text("pagination_request_field"),
+    paginationResponseField: text("pagination_response_field"),
+    paginationPageSizeField: text("pagination_page_size_field"),
+    paginationPageSizeMax: integer("pagination_page_size_max"),
+    typicalItemsPerResponse: integer("typical_items_per_response"),
+    responseItemsPath: text("response_items_path"),
+    evidenceStatus: text("evidence_status").notNull().default("pending"),
+    evidenceUrl: text("evidence_url"),
+    evidenceNote: text("evidence_note"),
+    capabilityRevision: integer("capability_revision").notNull().default(1),
+    verifiedAt: text("verified_at"),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("endpoint_capabilities_mode_status_idx").on(
+      table.executionMode,
+      table.evidenceStatus,
+    ),
+    check(
+      "endpoint_capabilities_execution_mode_values",
+      sql`${table.executionMode} IN ('direct', 'native_batch', 'paginated', 'async_job', 'fanout')`,
+    ),
+    check(
+      "endpoint_capabilities_target_encoding_values",
+      sql`${table.targetEncoding} IS NULL OR ${table.targetEncoding} IN ('json_array', 'csv_query', 'csv_body')`,
+    ),
+    check(
+      "endpoint_capabilities_pagination_style_values",
+      sql`${table.paginationStyle} IS NULL OR ${table.paginationStyle} IN ('cursor', 'page', 'offset', 'mixed')`,
+    ),
+    check(
+      "endpoint_capabilities_evidence_status_values",
+      sql`${table.evidenceStatus} IN ('verified', 'openapi_inferred', 'pending')`,
+    ),
+    check(
+      "endpoint_capabilities_native_batch_range",
+      sql`${table.nativeBatchMax} IS NULL OR ${table.nativeBatchMax} BETWEEN 1 AND 1000`,
+    ),
+    check(
+      "endpoint_capabilities_typical_items_range",
+      sql`${table.typicalItemsPerResponse} IS NULL OR ${table.typicalItemsPerResponse} BETWEEN 1 AND 100000`,
+    ),
+    check(
+      "endpoint_capabilities_page_size_range",
+      sql`${table.paginationPageSizeMax} IS NULL OR ${table.paginationPageSizeMax} BETWEEN 1 AND 100000`,
     ),
   ],
 );
@@ -493,6 +666,16 @@ export const x402Batches = sqliteTable(
     upstreamCostUsdMicros: integer("upstream_cost_usd_micros")
       .notNull()
       .default(0),
+    executionMode: text("execution_mode").notNull().default("fanout"),
+    capabilityRevision: integer("capability_revision").notNull().default(1),
+    plannedUpstreamRequests: integer("planned_upstream_requests")
+      .notNull()
+      .default(1),
+    actualUpstreamAttempts: integer("actual_upstream_attempts")
+      .notNull()
+      .default(0),
+    returnedItemCount: integer("returned_item_count"),
+    capacityGroupId: text("capacity_group_id"),
     status: text("status").notNull().default("quoted"),
     network: text("network").notNull().default("eip155:8453"),
     asset: text("asset").notNull(),
@@ -548,6 +731,14 @@ export const x402Batches = sqliteTable(
     check(
       "x402_batches_amount_range",
       sql`${table.amountUsdcAtomic} BETWEEN 1 AND 100000000000`,
+    ),
+    check(
+      "x402_batches_execution_mode_values",
+      sql`${table.executionMode} IN ('native_batch', 'fanout')`,
+    ),
+    check(
+      "x402_batches_upstream_request_range",
+      sql`${table.plannedUpstreamRequests} BETWEEN 1 AND 1000 AND ${table.actualUpstreamAttempts} BETWEEN 0 AND 2000`,
     ),
   ],
 );
@@ -780,6 +971,8 @@ export const catalogSyncStaging = sqliteTable(
     suggestedCustomerPriceUsdMicros: integer(
       "suggested_customer_price_usd_micros",
     ).notNull(),
+    rateLimitRaw: text("rate_limit_raw"),
+    rateLimitRps: integer("rate_limit_rps"),
     priceVerified: integer("price_verified", { mode: "boolean" })
       .notNull()
       .default(false),
@@ -875,6 +1068,143 @@ export const upstreamRateLimitBuckets = sqliteTable(
   ],
 );
 
+export const requestRateLimitState = sqliteTable(
+  "request_rate_limit_state",
+  {
+    scope: text("scope").notNull(),
+    subjectId: text("subject_id").notNull(),
+    theoreticalArrivalMs: integer("theoretical_arrival_ms").notNull(),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("request_rate_limit_state_unique").on(
+      table.scope,
+      table.subjectId,
+    ),
+    index("request_rate_limit_state_updated_idx").on(table.updatedAt),
+  ],
+);
+
+export const upstreamRateLimitState = sqliteTable(
+  "upstream_rate_limit_state",
+  {
+    capacityGroupId: text("capacity_group_id").notNull(),
+    endpointPath: text("endpoint_path").notNull(),
+    theoreticalArrivalMs: integer("theoretical_arrival_ms").notNull(),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("upstream_rate_limit_state_unique").on(
+      table.capacityGroupId,
+      table.endpointPath,
+    ),
+    index("upstream_rate_limit_state_updated_idx").on(table.updatedAt),
+  ],
+);
+
+export const upstreamRouteHealth = sqliteTable(
+  "upstream_route_health",
+  {
+    capacityGroupId: text("capacity_group_id").notNull(),
+    endpointPath: text("endpoint_path").notNull(),
+    state: text("state").notNull().default("healthy"),
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    consecutiveRateLimits: integer("consecutive_rate_limits")
+      .notNull()
+      .default(0),
+    cooldownUntil: text("cooldown_until"),
+    lastStatusCode: integer("last_status_code"),
+    lastFailureAt: text("last_failure_at"),
+    lastSuccessAt: text("last_success_at"),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("upstream_route_health_unique").on(
+      table.capacityGroupId,
+      table.endpointPath,
+    ),
+    index("upstream_route_health_state_idx").on(
+      table.state,
+      table.cooldownUntil,
+    ),
+    check(
+      "upstream_route_health_state_values",
+      sql`${table.state} IN ('healthy', 'rate_limited', 'degraded', 'circuit_open')`,
+    ),
+  ],
+);
+
+export const upstreamRequestAttempts = sqliteTable(
+  "upstream_request_attempts",
+  {
+    id: text("id").primaryKey(),
+    contextType: text("context_type").notNull(),
+    contextId: text("context_id").notNull(),
+    endpointPath: text("endpoint_path").notNull(),
+    capacityGroupId: text("capacity_group_id"),
+    credentialId: text("credential_id"),
+    credentialFingerprint: text("credential_fingerprint"),
+    attemptNumber: integer("attempt_number").notNull(),
+    outcome: text("outcome").notNull(),
+    statusCode: integer("status_code"),
+    latencyMs: integer("latency_ms").notNull(),
+    upstreamRequestId: text("upstream_request_id"),
+    targetCount: integer("target_count").notNull().default(1),
+    returnedItemCount: integer("returned_item_count"),
+    paginationUnitCount: integer("pagination_unit_count")
+      .notNull()
+      .default(0),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("upstream_request_attempts_context_idx").on(
+      table.contextType,
+      table.contextId,
+    ),
+    index("upstream_request_attempts_route_idx").on(
+      table.capacityGroupId,
+      table.endpointPath,
+      table.createdAt,
+    ),
+  ],
+);
+
+export const upstreamCapacityLeases = sqliteTable(
+  "upstream_capacity_leases",
+  {
+    id: text("id").primaryKey(),
+    contextType: text("context_type").notNull(),
+    contextId: text("context_id").notNull(),
+    capacityGroupId: text("capacity_group_id").notNull(),
+    endpointPath: text("endpoint_path").notNull(),
+    plannedRequests: integer("planned_requests").notNull(),
+    status: text("status").notNull().default("reserved"),
+    expiresAt: text("expires_at").notNull(),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("upstream_capacity_leases_context_unique").on(
+      table.contextType,
+      table.contextId,
+    ),
+    index("upstream_capacity_leases_group_endpoint_idx").on(
+      table.capacityGroupId,
+      table.endpointPath,
+      table.status,
+      table.expiresAt,
+    ),
+    check(
+      "upstream_capacity_leases_status_values",
+      sql`${table.status} IN ('reserved', 'consuming', 'released', 'expired')`,
+    ),
+    check(
+      "upstream_capacity_leases_request_range",
+      sql`${table.plannedRequests} BETWEEN 1 AND 1000`,
+    ),
+  ],
+);
+
 export const proxyRequests = sqliteTable(
   "proxy_requests",
   {
@@ -928,6 +1258,17 @@ export const apiCalls = sqliteTable(
       .notNull()
       .default(0),
     latencyMs: integer("latency_ms").notNull(),
+    customerRequestCount: integer("customer_request_count")
+      .notNull()
+      .default(1),
+    upstreamAttemptCount: integer("upstream_attempt_count")
+      .notNull()
+      .default(1),
+    targetCount: integer("target_count").notNull().default(1),
+    returnedItemCount: integer("returned_item_count"),
+    paginationUnitCount: integer("pagination_unit_count")
+      .notNull()
+      .default(0),
     refunded: integer("refunded", { mode: "boolean" })
       .notNull()
       .default(false),

@@ -127,6 +127,20 @@
       "when": 1784969119647,
       "tag": "0017_omniscient_zarda",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1785031278700,
+      "tag": "0018_previous_jackpot",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1785034684602,
+      "tag": "0019_previous_patriot",
+      "breakpoints": true
     }
   ]
 }

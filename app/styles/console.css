@@ -635,6 +635,16 @@
   text-overflow: ellipsis;
 }
 
+.request-unit-metrics {
+  display: block;
+  margin-top: 0.35rem;
+  color: var(--console-muted);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
 .request-status {
   display: inline-flex;
   align-items: center;

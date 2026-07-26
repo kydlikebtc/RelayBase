@@ -55,6 +55,36 @@ type MarketplaceX402 = {
   apiKeyUsedForPayment: false;
 };
 
+type MarketplaceCapability = {
+  executionMode:
+    | "direct"
+    | "native_batch"
+    | "paginated"
+    | "async_job"
+    | "fanout";
+  nativeBatchSupported: boolean;
+  nativeBatchMax: number | null;
+  targetField: string | null;
+  targetEncoding: "json_array" | "csv_query" | "csv_body" | null;
+  pagination: {
+    style: "cursor" | "page" | "offset" | "mixed";
+    requestField: string | null;
+    responseField: string | null;
+    pageSizeField: string | null;
+    pageSizeMax: number | null;
+    autoFollow: false;
+  } | null;
+  typicalItemsPerResponse: number | null;
+  responseItemsPath: string | null;
+  evidence: {
+    status: "verified" | "openapi_inferred" | "pending";
+    url: string | null;
+    note: string;
+    verifiedAt: string | null;
+  };
+  revision: number;
+};
+
 type MarketplaceStats = {
   total: number;
   available: number;
@@ -91,6 +121,7 @@ type MarketplaceEndpoint = {
   summary: string | null;
   pricing: MarketplacePricing;
   rateLimitRps: number | null;
+  capability: MarketplaceCapability;
   x402: MarketplaceX402;
   documentationStatus: "complete" | "pending";
 };
@@ -644,6 +675,59 @@ function isMarketplaceFacets(value: unknown): value is MarketplaceFacets {
   );
 }
 
+function isMarketplaceCapability(
+  value: unknown,
+): value is MarketplaceCapability {
+  if (!isPlainRecord(value) || !isPlainRecord(value.evidence)) {
+    return false;
+  }
+  const pagination = value.pagination;
+  return (
+    (value.executionMode === "direct" ||
+      value.executionMode === "native_batch" ||
+      value.executionMode === "paginated" ||
+      value.executionMode === "async_job" ||
+      value.executionMode === "fanout") &&
+    typeof value.nativeBatchSupported === "boolean" &&
+    (value.nativeBatchMax === null ||
+      isSafeIntegerInRange(value.nativeBatchMax, 1, 1_000)) &&
+    (value.targetField === null || isSafeText(value.targetField, 120)) &&
+    (value.targetEncoding === null ||
+      value.targetEncoding === "json_array" ||
+      value.targetEncoding === "csv_query" ||
+      value.targetEncoding === "csv_body") &&
+    (pagination === null ||
+      (isPlainRecord(pagination) &&
+        (pagination.style === "cursor" ||
+          pagination.style === "page" ||
+          pagination.style === "offset" ||
+          pagination.style === "mixed") &&
+        (pagination.requestField === null ||
+          isSafeText(pagination.requestField, 120)) &&
+        (pagination.responseField === null ||
+          isSafeText(pagination.responseField, 120)) &&
+        (pagination.pageSizeField === null ||
+          isSafeText(pagination.pageSizeField, 120)) &&
+        (pagination.pageSizeMax === null ||
+          isSafeIntegerInRange(pagination.pageSizeMax, 1, 100_000)) &&
+        pagination.autoFollow === false)) &&
+    (value.typicalItemsPerResponse === null ||
+      isSafeIntegerInRange(value.typicalItemsPerResponse, 1, 100_000)) &&
+    (value.responseItemsPath === null ||
+      isSafeText(value.responseItemsPath, 240)) &&
+    (value.evidence.status === "verified" ||
+      value.evidence.status === "openapi_inferred" ||
+      value.evidence.status === "pending") &&
+    (value.evidence.url === null ||
+      (isSafeText(value.evidence.url, 1_000) &&
+        value.evidence.url.startsWith("https://"))) &&
+    isSafeText(value.evidence.note, 2_000) &&
+    (value.evidence.verifiedAt === null ||
+      isSafeText(value.evidence.verifiedAt, 40)) &&
+    isSafeIntegerInRange(value.revision, 1, 2_147_483_647)
+  );
+}
+
 function isMarketplaceEndpoint(
   value: unknown,
 ): value is MarketplaceEndpoint {
@@ -669,6 +753,7 @@ function isMarketplaceEndpoint(
     pricing.unit === "request" &&
     typeof pricing.verified === "boolean" &&
     (!pricing.verified || pricing.amountUsdMicros !== null) &&
+    isMarketplaceCapability(value.capability) &&
     isPlainRecord(x402) &&
     typeof x402.enabled === "boolean" &&
     typeof x402.available === "boolean" &&
@@ -1175,6 +1260,74 @@ function DetailPanel({
               </strong>
             </div>
           </div>
+
+          <section
+            className="marketplace-response-section"
+            aria-labelledby="marketplace-capability-title"
+          >
+            <h3 id="marketplace-capability-title">
+              {locale === "zh" ? "请求与返回能力" : "Request & response capability"}
+            </h3>
+            <div className="marketplace-response-card">
+              <dl>
+                <div>
+                  <dt>{locale === "zh" ? "执行方式" : "Execution"}</dt>
+                  <dd>{endpoint.capability.executionMode}</dd>
+                </div>
+                <div>
+                  <dt>{locale === "zh" ? "原生批量" : "Native batch"}</dt>
+                  <dd>
+                    {endpoint.capability.nativeBatchSupported
+                      ? `${locale === "zh" ? "支持，单次最多" : "Yes, up to"} ${endpoint.capability.nativeBatchMax?.toLocaleString() ?? "—"}`
+                      : locale === "zh"
+                        ? "未确认；按 1:1 请求处理"
+                        : "Unverified; handled 1:1"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{locale === "zh" ? "分页单位" : "Pagination unit"}</dt>
+                  <dd>
+                    {endpoint.capability.pagination
+                      ? `${endpoint.capability.pagination.style} · ${endpoint.capability.pagination.requestField ?? "—"}`
+                      : locale === "zh"
+                        ? "未声明"
+                        : "Not declared"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{locale === "zh" ? "单页/单次规模" : "Page / response size"}</dt>
+                  <dd>
+                    {endpoint.capability.pagination?.pageSizeMax
+                      ? `${locale === "zh" ? "最多" : "Max"} ${endpoint.capability.pagination.pageSizeMax.toLocaleString()}`
+                      : endpoint.capability.typicalItemsPerResponse?.toLocaleString() ??
+                        (locale === "zh" ? "待确认" : "Pending verification")}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{locale === "zh" ? "证据状态" : "Evidence"}</dt>
+                  <dd>{endpoint.capability.evidence.status}</dd>
+                </div>
+                <div>
+                  <dt>{locale === "zh" ? "自动翻页" : "Auto-follow pages"}</dt>
+                  <dd>
+                    {locale === "zh"
+                      ? "否；每个 page/cursor 是一次请求"
+                      : "No; each page/cursor is one request"}
+                  </dd>
+                </div>
+              </dl>
+              <p>{endpoint.capability.evidence.note}</p>
+              {endpoint.capability.evidence.url ? (
+                <a
+                  href={endpoint.capability.evidence.url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {locale === "zh" ? "查看 TikHub 能力证据 →" : "Open TikHub evidence →"}
+                </a>
+              ) : null}
+            </div>
+          </section>
 
           {endpoint.x402.enabled ? (
             <section
@@ -1732,6 +1885,21 @@ export default function CatalogClient({ locale }: { locale: Locale }) {
                 {c.specPending}
               </span>
             ) : null}
+            <span
+              className={`marketplace-availability ${
+                endpoint.capability.evidence.status === "verified"
+                  ? "is-available"
+                  : "is-pending"
+              }`}
+            >
+              {endpoint.capability.executionMode === "native_batch"
+                ? `${locale === "zh" ? "原生批量" : "native batch"} · ${endpoint.capability.nativeBatchMax ?? "—"}`
+                : endpoint.capability.executionMode === "paginated"
+                  ? `${locale === "zh" ? "分页" : "paginated"} · ${endpoint.capability.pagination?.style ?? "—"}`
+                  : locale === "zh"
+                    ? "1:1 直连"
+                    : "1:1 direct"}
+            </span>
             {endpoint.x402.enabled ? (
               <span
                 className={`marketplace-availability ${

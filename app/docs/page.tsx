@@ -70,7 +70,7 @@ const copy = {
     currentVersion: "Current version",
     navLabel: "Documentation",
     nav: [
-      ["Start", [["#overview", "Conventions"], ["#quickstart", "5-minute quickstart"], ["#catalog", "Market & catalog"], ["#auth", "Authentication"], ["#x402", "x402 Agent batches"], ["#examples", "Request examples"]]],
+      ["Start", [["#overview", "Conventions"], ["#quickstart", "5-minute quickstart"], ["#catalog", "Market & catalog"], ["#capabilities", "Batch & pagination"], ["#auth", "Authentication"], ["#x402", "x402 Agent batches"], ["#examples", "Request examples"]]],
       ["Operate", [["#response", "Response & request ID"], ["#errors", "Error model"], ["#retries", "Rate limits & retries"], ["#billing", "Billing semantics"], ["#webhooks", "Payment confirmation"], ["#production", "Production checklist"]]],
     ],
     helpTitle: "Need help?",
@@ -137,8 +137,12 @@ const copy = {
     meaning: "Meaning",
     retriesTitle: "Rate limits and safe retries",
     retriesBody:
-      "For 429, 502 and 503, use exponential backoff with jitter and a retry budget. Respect Retry-After when present. Reuse the original idempotency key only when transport failed and the server outcome is unknown; if a definitive response was received and you intentionally start a new billable attempt, use a new key.",
+      "Standard /v1 requests pass two persistent limits: the API Key limit and the aggregate account limit. All Keys on one account share the account ceiling, so more Keys do not add throughput. The upstream router enforces every independent TikHub account as one aggregate capacity group, then applies any lower per-endpoint catalog limit. For 429, 502 and 503, use exponential backoff with jitter and a retry budget. Respect Retry-After when present. Reuse the original idempotency key only when transport failed and the server outcome is unknown; after a definitive response, use a new key only for an intentional new billable attempt.",
     retriesChecks: [
+      "Read X-RateLimit-Scope: api-key and account identify customer policy; upstream means all safe source capacity for this path is temporarily occupied.",
+      "Multiple Keys from one TikHub account are credential redundancy only: RelayBase may switch on 401/403, expiry or a key-local failure, but all Keys still share the same account RPS and balance. Account-level 429, 402 and provider-wide failure stop the whole capacity group.",
+      "X-RateLimit-Limit is RPS, X-RateLimit-Remaining is the current burst allowance, and X-RateLimit-Reset is a Unix timestamp.",
+      "A customer or upstream-capacity 429 does not create a final usage charge. If a balance reservation already happened, RelayBase refunds it before responding.",
       "Cap exponential backoff and add random jitter to avoid synchronized retries.",
       "Treat 409 as a recorded prior attempt. Reconcile it in the console before creating a new attempt.",
       "Do not retry 400, 401 or 402 until the request, credential or balance has changed.",
@@ -181,7 +185,7 @@ const copy = {
     currentVersion: "当前版本",
     navLabel: "文档目录",
     nav: [
-      ["开始", [["#overview", "基本约定"], ["#quickstart", "5 分钟快速开始"], ["#catalog", "数据市场与目录"], ["#auth", "鉴权"], ["#x402", "x402 Agent 批次"], ["#examples", "请求示例"]]],
+      ["开始", [["#overview", "基本约定"], ["#quickstart", "5 分钟快速开始"], ["#catalog", "数据市场与目录"], ["#capabilities", "批量与分页"], ["#auth", "鉴权"], ["#x402", "x402 Agent 批次"], ["#examples", "请求示例"]]],
       ["运行", [["#response", "响应与请求 ID"], ["#errors", "错误模型"], ["#retries", "限流与重试"], ["#billing", "计费语义"], ["#webhooks", "支付确认"], ["#production", "上线检查"]]],
     ],
     helpTitle: "卡住了？",
@@ -246,8 +250,12 @@ const copy = {
     meaning: "说明",
     retriesTitle: "限流与安全重试",
     retriesBody:
-      "对 429、502、503 使用带抖动的指数退避和重试预算；存在 Retry-After 时优先遵循。仅当网络失败且无法判断服务端结果时复用原幂等键；已收到明确终态且要发起新的计费尝试时，使用新键。",
+      "标准 /v1 请求经过两层持久化限制：API Key 限制和账户聚合限制。同一账户的所有 Key 共享账户上限，增加 Key 不会增加吞吐。上游路由把每个独立 TikHub 账号作为一个全局容量组，再叠加目录中更低的单接口限制。对 429、502、503 使用带抖动的指数退避和重试预算；存在 Retry-After 时优先遵循。仅当网络失败且无法判断服务端结果时复用原幂等键；收到明确终态后，只有确实要新建计费尝试时才使用新键。",
     retriesChecks: [
+      "读取 X-RateLimit-Scope：api-key 和 account 表示客户策略；upstream 表示安全上游账号或接口容量暂时用满。",
+      "同一 TikHub 账号的多个 Key 只提供凭据容灾：401/403、过期或单 Key 异常可切换，但所有 Key 仍共享账号 RPS 与余额；账号级 429、402 和上游整体故障会暂停整个容量组。",
+      "X-RateLimit-Limit 的单位是 RPS，X-RateLimit-Remaining 是当前突发余量，X-RateLimit-Reset 是 Unix 时间戳。",
+      "客户限流或上游容量 429 不产生最终用量费用；若此前已预留余额，RelayBase 会先退款再响应。",
       "为指数退避设置上限并增加随机抖动，避免同步重试。",
       "把 409 视为已有请求记录；先在控制台核对，再决定是否新建尝试。",
       "在请求、凭据或余额改变前，不要重试 400、401、402。",
@@ -296,8 +304,10 @@ const errors = {
     ["404", "endpoint_not_enabled", "The endpoint is not currently callable"],
     ["409", "idempotency_conflict", "The key was already used; no duplicate call or charge"],
     ["409", "price_quote_exceeded", "The live price exceeds the declared ceiling"],
-    ["429", "rate_limit_exceeded", "A customer, account or shared upstream limit was reached"],
+    ["429", "customer_rate_limit_exceeded", "The API Key or aggregate account RPS policy was reached"],
+    ["429", "upstream_capacity_exhausted", "All safe upstream account or endpoint capacity is temporarily occupied"],
     ["502", "upstream_unavailable", "The source network failed; the request was refunded"],
+    ["503", "x402_upstream_route_unavailable", "No healthy authorized route is available, so no wallet-payment quote is accepted"],
     ["503", "commercial_clearance_required", "Required commercial authorization is not active"],
     ["503", "upstream_not_authorized", "Upstream access is not available for this deployment"],
   ],
@@ -313,8 +323,10 @@ const errors = {
     ["404", "endpoint_not_enabled", "接口当前不可调用"],
     ["409", "idempotency_conflict", "幂等键已使用；不会重复调用或扣费"],
     ["409", "price_quote_exceeded", "实时客户价超过请求声明上限"],
-    ["429", "rate_limit_exceeded", "客户、账户或共享来源达到速率限制"],
+    ["429", "customer_rate_limit_exceeded", "API Key 或账户聚合 RPS 达到上限"],
+    ["429", "upstream_capacity_exhausted", "安全上游账号或接口容量暂时用满"],
     ["502", "upstream_unavailable", "来源网络不可用；请求已退款"],
+    ["503", "x402_upstream_route_unavailable", "当前没有健康且已授权的上游路由，因此不会接受钱包付款报价"],
     ["503", "commercial_clearance_required", "所需商业授权尚未生效"],
     ["503", "upstream_not_authorized", "当前部署尚未启用来源访问"],
   ],
@@ -423,6 +435,70 @@ GET ${origin}/api/catalog?platform=example&dataType=profile_creator&tag=profile_
             <Callout symbol="!" title={c.availabilityTitle} body={c.availabilityBody} warning />
           </section>
 
+          <section id="capabilities">
+            <div className="docs-section-label">04 / CAPABILITY CONTRACT</div>
+            <h2>
+              {locale === "zh"
+                ? "请求数、目标数和返回条目是三个不同单位。"
+                : "Requests, targets and returned items are different units."}
+            </h2>
+            <p>
+              {locale === "zh"
+                ? "每个数据产品详情都公开 executionMode、原生批量上限、目标字段与编码、分页字段、单页上限、典型返回规模以及证据状态。verified 来自端点级 TikHub 文档；openapi_inferred 仅表示当前输入 schema 可证明分页字段；pending 表示仍需官方文档或受控实测，RelayBase 不会据路径名猜测批量能力。"
+                : "Every product detail exposes executionMode, native batch maximum, target field and encoding, pagination fields, page-size ceiling, typical response size and evidence status. verified is backed by endpoint-specific TikHub documentation; openapi_inferred only proves pagination input fields in the current schema; pending requires official evidence or controlled testing. RelayBase never guesses batching from a path name."}
+            </p>
+            <div className="docs-table-wrap">
+              <table className="docs-table">
+                <thead>
+                  <tr>
+                    <th>{locale === "zh" ? "模式" : "Mode"}</th>
+                    <th>{locale === "zh" ? "上游单位" : "Upstream unit"}</th>
+                    <th>{locale === "zh" ? "RelayBase 行为" : "RelayBase behavior"}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>native_batch</code></td>
+                    <td>{locale === "zh" ? "一个原生批量 HTTP 请求" : "One native batch HTTP request"}</td>
+                    <td>{locale === "zh" ? "按 nativeBatchMax 分片；只对 verified 且语义等价的端点启用" : "Chunked by nativeBatchMax; enabled only for verified, semantically equivalent endpoints"}</td>
+                  </tr>
+                  <tr>
+                    <td><code>paginated</code></td>
+                    <td>{locale === "zh" ? "一个 page / cursor" : "One page / cursor"}</td>
+                    <td>{locale === "zh" ? "每页是一次客户请求和一次上游请求；不会隐式追下一页" : "Each page is one customer request and one upstream request; pages are never auto-followed"}</td>
+                  </tr>
+                  <tr>
+                    <td><code>direct</code></td>
+                    <td>{locale === "zh" ? "一个客户 HTTP 请求" : "One customer HTTP request"}</td>
+                    <td>{locale === "zh" ? "当前 1:1 转发；批量、异步和返回规模未获证据时保持待确认" : "Currently forwarded 1:1; batch, async and response-size claims remain pending without evidence"}</td>
+                  </tr>
+                  <tr>
+                    <td><code>fanout</code></td>
+                    <td>{locale === "zh" ? "每个逻辑目标一次请求" : "One request per logical target"}</td>
+                    <td>{locale === "zh" ? "仅用于 x402 且没有已验证原生批量能力的产品，并在报价中公开 plannedUpstreamRequests" : "Used by x402 only when no verified native batch exists; plannedUpstreamRequests is disclosed in the quote"}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <Checklist
+              items={
+                locale === "zh"
+                  ? [
+                      "客户 HTTP 请求 Hc、TikHub HTTP attempt Hu、逻辑目标数 T、返回条目 D 和分页单位 P 分别记录。",
+                      "原生批量报价按完整校验后的目标数计价，同时把 plannedUpstreamRequests = ceil(T / nativeBatchMax) 固定在批次记录。",
+                      "除目标 ID 外的参数必须完全一致；APP / WEB、版本、字段覆盖或授权范围不同的请求不会合并。",
+                      "返回结构无法可靠计数时 returnedItemCount 显示待确认，而不是伪造 0。",
+                    ]
+                  : [
+                      "Customer HTTP requests Hc, TikHub HTTP attempts Hu, logical targets T, returned items D and page units P are recorded independently.",
+                      "A native-batch quote prices the fully validated target count and freezes plannedUpstreamRequests = ceil(T / nativeBatchMax).",
+                      "All non-target parameters must match exactly; APP / WEB surfaces, versions, field coverage and authorization semantics are never merged.",
+                      "When a response shape cannot be counted reliably, returnedItemCount stays unverified instead of being fabricated as zero.",
+                    ]
+              }
+            />
+          </section>
+
           <section id="auth">
             <div className="docs-section-label">04 / AUTH</div>
             <h2>{c.authTitle}</h2>
@@ -472,8 +548,8 @@ X-RelayBase-Max-Cost-Usd-Micros: 2000`}
                 <b>{locale === "zh" ? "支付后整批执行" : "Pay, then execute all"}</b>
                 <p>
                   {locale === "zh"
-                    ? "钱包签署报价后，用相同请求体和 Idempotency-Key 重试；服务端一次验证、一次结算，再执行整批并返回付款回执。"
-                    : "After the wallet signs the quote, retry the same body and Idempotency-Key. The server verifies and settles once, then executes the whole batch and returns a receipt."}
+                    ? "钱包签署报价后，用相同请求体和 Idempotency-Key 重试；服务端一次验证、一次结算，再按已冻结的 native_batch 分片或 fanout 计划执行并返回付款回执。"
+                    : "After the wallet signs the quote, retry the same body and Idempotency-Key. The server verifies and settles once, then executes the frozen native_batch chunk or fanout plan and returns a receipt."}
                 </p>
               </div>
             </div>
@@ -510,12 +586,16 @@ PAYMENT-SIGNATURE: <base64-encoded x402 v2 wallet payload>
                   ? [
                       "首版固定使用 exact、Base 主网原生 USDC、同步批量、先支付后执行。",
                       "一个批次只能包含同一数据产品，数量不得超过市场详情中的 maxBatchSize。",
+                      "requests 表示逻辑输入，不表示上游 HTTP 请求。已验证原生批量端点按 nativeBatchMax 分片；其他端点明确使用 fanout。",
+                      "原生批量中除 ID/目标字段外的参数必须完全一致；不同 APP/WEB 入口、版本或语义不会被合并。",
                       "x402 结算不充值余额，也不会写入余额账本；在控制台用 xb_ 编号查询链上结算和执行状态。",
                       "付款已结算后执行仍可能失败；首版不提供退款、争议或部分成功计费。",
                     ]
                   : [
                       "v1 is fixed to exact, Base mainnet native USDC, synchronous batches and pay-before-execute.",
                       "A batch targets one data product and cannot exceed maxBatchSize from its market detail.",
+                      "requests are logical inputs, not upstream HTTP requests. Verified native endpoints are chunked by nativeBatchMax; all other products explicitly use fanout.",
+                      "All non-target fields in a native batch must match exactly; different APP/WEB surfaces, versions or semantics are never merged.",
                       "x402 settlement does not top up or write to the balance ledger; use the xb_ ID in the console to inspect settlement and execution.",
                       "Execution can still fail after settlement; v1 has no refunds, disputes or partial-success pricing.",
                     ]
@@ -555,7 +635,11 @@ PAYMENT-SIGNATURE: <base64-encoded x402 v2 wallet payload>
             <CodePanel title="RelayBase response headers" language="HTTP">
               {`X-Request-Id: req_01K2...
 X-RelayBase-Cost-Usd-Micros: 2000
-X-RelayBase-Balance-Usd-Micros: 24998000`}
+X-RelayBase-Balance-Usd-Micros: 24998000
+X-RateLimit-Limit: 3
+X-RateLimit-Remaining: 5
+X-RateLimit-Reset: 1785062401
+X-RateLimit-Scope: account`}
             </CodePanel>
             <div className="docs-facts">
               {c.facts.map(([status, title, body]) => (

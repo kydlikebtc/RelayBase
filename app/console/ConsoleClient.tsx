@@ -10,6 +10,8 @@ type ApiKeyRecord = {
   id: string;
   label: string;
   prefix: string;
+  rateLimitRps: number;
+  rateLimitBurst: number;
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
@@ -40,6 +42,11 @@ type CallRecord = {
   costUsdMicros: number;
   refunded: boolean;
   latencyMs: number;
+  customerRequestCount: number;
+  upstreamAttemptCount: number;
+  targetCount: number;
+  returnedItemCount: number | null;
+  paginationUnitCount: number;
   createdAt: string;
 };
 
@@ -78,6 +85,12 @@ type DashboardData = {
     spend30dUsdMicros: number;
     successRate: number;
   };
+  rateLimits: {
+    account: {
+      rps: number;
+      burst: number;
+    };
+  };
   usage: {
     periodDays: 30;
     totalCalls30d: number;
@@ -115,6 +128,8 @@ type CreatedKey = {
   label: string;
   prefix: string;
   secret: string;
+  rateLimitRps: number;
+  rateLimitBurst: number;
   createdAt: string;
 };
 
@@ -155,6 +170,12 @@ type X402Batch = {
   verifiedQuantity: number;
   unitPriceUsdMicros: number;
   amountUsdcAtomic: number;
+  executionMode: "native_batch" | "fanout";
+  capabilityRevision: number;
+  plannedUpstreamRequests: number;
+  actualUpstreamAttempts: number;
+  returnedItemCount: number | null;
+  capacityGroupId: string | null;
   network: string;
   asset: string;
   payer: string | null;
@@ -317,6 +338,10 @@ const consoleCopy = {
       "Revoke a Key immediately when access is no longer required.",
     ],
     keyStatus: "Key status",
+    requestLimit: "Request limit",
+    accountLimit: "Account limit",
+    requestLimitHint:
+      "All active Keys share the account ceiling; creating more Keys does not add throughput.",
     keyName: "Name",
     keyPrefix: "Key prefix",
     lastUsed: "Last used",
@@ -500,6 +525,10 @@ const consoleCopy = {
       "不再需要的 Key 应立即撤销。",
     ],
     keyStatus: "Key 状态",
+    requestLimit: "请求限制",
+    accountLimit: "账户上限",
+    requestLimitHint:
+      "所有有效 Key 共享账户总上限；增加 Key 数量不会叠加吞吐。",
     keyName: "名称",
     keyPrefix: "Key 前缀",
     lastUsed: "最近使用",
@@ -790,7 +819,10 @@ function englishApiError(
     invalid_request: "The request is invalid.",
     invalid_payment: "The top-up request is invalid.",
     payments_not_enabled: "Top-ups are not currently available.",
-    rate_limit_exceeded: "Too many requests. Try again shortly.",
+    customer_rate_limit_exceeded:
+      "The API Key or account request limit was reached. Respect Retry-After.",
+    upstream_capacity_exhausted:
+      "Safe source account or endpoint capacity is temporarily full. Respect Retry-After.",
     schema_not_ready: "Account storage is not ready. Try again shortly.",
     user_suspended: "This account is unavailable. Contact support.",
   };
@@ -885,6 +917,12 @@ function isApiKeyRecord(value: unknown): value is ApiKeyRecord {
     typeof value.id === "string" &&
     typeof value.label === "string" &&
     typeof value.prefix === "string" &&
+    isNonNegativeInteger(value.rateLimitRps) &&
+    value.rateLimitRps >= 1 &&
+    value.rateLimitRps <= 1_000 &&
+    isNonNegativeInteger(value.rateLimitBurst) &&
+    value.rateLimitBurst >= value.rateLimitRps &&
+    value.rateLimitBurst <= 2_000 &&
     typeof value.createdAt === "string" &&
     isNullableString(value.lastUsedAt) &&
     isNullableString(value.revokedAt)
@@ -921,6 +959,12 @@ function isCallRecord(value: unknown): value is CallRecord {
     isNonNegativeInteger(value.costUsdMicros) &&
     typeof value.refunded === "boolean" &&
     isNonNegativeInteger(value.latencyMs) &&
+    isNonNegativeInteger(value.customerRequestCount) &&
+    isNonNegativeInteger(value.upstreamAttemptCount) &&
+    isNonNegativeInteger(value.targetCount) &&
+    (value.returnedItemCount === null ||
+      isNonNegativeInteger(value.returnedItemCount)) &&
+    isNonNegativeInteger(value.paginationUnitCount) &&
     typeof value.createdAt === "string"
   );
 }
@@ -935,6 +979,16 @@ function isX402Batch(value: unknown): value is X402Batch {
     isNonNegativeInteger(value.verifiedQuantity) &&
     isNonNegativeInteger(value.unitPriceUsdMicros) &&
     isNonNegativeInteger(value.amountUsdcAtomic) &&
+    (value.executionMode === "native_batch" ||
+      value.executionMode === "fanout") &&
+    isNonNegativeInteger(value.capabilityRevision) &&
+    value.capabilityRevision >= 1 &&
+    isNonNegativeInteger(value.plannedUpstreamRequests) &&
+    value.plannedUpstreamRequests >= 1 &&
+    isNonNegativeInteger(value.actualUpstreamAttempts) &&
+    (value.returnedItemCount === null ||
+      isNonNegativeInteger(value.returnedItemCount)) &&
+    isNullableString(value.capacityGroupId) &&
     typeof value.network === "string" &&
     typeof value.asset === "string" &&
     isNullableString(value.payer) &&
@@ -980,6 +1034,7 @@ function isDashboardData(value: unknown): value is DashboardData {
     capabilities,
     stats,
     usage,
+    rateLimits,
     x402,
     keys,
     payments,
@@ -990,6 +1045,8 @@ function isDashboardData(value: unknown): value is DashboardData {
     !isRecord(capabilities) ||
     !isRecord(stats) ||
     !isRecord(usage) ||
+    !isRecord(rateLimits) ||
+    !isRecord(rateLimits.account) ||
     !isRecord(x402) ||
     !isRecord(x402.runtime) ||
     !isRecord(x402.historyScope)
@@ -1031,6 +1088,12 @@ function isDashboardData(value: unknown): value is DashboardData {
     isFiniteNumber(stats.successRate) &&
     stats.successRate >= 0 &&
     stats.successRate <= 1 &&
+    isNonNegativeInteger(rateLimits.account.rps) &&
+    rateLimits.account.rps >= 1 &&
+    rateLimits.account.rps <= 1_000 &&
+    isNonNegativeInteger(rateLimits.account.burst) &&
+    rateLimits.account.burst >= rateLimits.account.rps &&
+    rateLimits.account.burst <= 2_000 &&
     usage.periodDays === 30 &&
     isNonNegativeInteger(usage.totalCalls30d) &&
     isNonNegativeInteger(usage.prepaidCalls30d) &&
@@ -2070,6 +2133,20 @@ export function ConsoleClient({
                               <i>{call.method}</i>
                               <code>{call.path}</code>
                             </span>
+                            <small
+                              className="request-unit-metrics"
+                              title={
+                                locale === "zh"
+                                  ? "客户请求 · 上游尝试 · 目标数 · 返回条目 · 分页单位"
+                                  : "Customer request · upstream attempt · targets · returned items · page units"
+                              }
+                            >
+                              Hc {call.customerRequestCount} · Hu{" "}
+                              {call.upstreamAttemptCount} · T {call.targetCount}
+                              {" · D "}
+                              {call.returnedItemCount ?? "—"} · P{" "}
+                              {call.paginationUnitCount}
+                            </small>
                           </td>
                           <td>{platformDisplayName(call.platform, call.platform, locale)}</td>
                           <td>
@@ -2177,6 +2254,19 @@ export function ConsoleClient({
               <article><span>{c.activeKeys}</span><strong>{activeKeys.length}</strong></article>
               <article><span>{c.keysUsed}</span><strong>{usedKeys}</strong></article>
               <article><span>{c.keysUnused}</span><strong>{unusedKeys}</strong></article>
+              <article>
+                <span>{c.accountLimit}</span>
+                <strong>
+                  {dashboard
+                    ? `${dashboard.rateLimits.account.rps} RPS`
+                    : "—"}
+                </strong>
+                <small>
+                  {dashboard
+                    ? `Burst ${dashboard.rateLimits.account.burst}`
+                    : c.requestLimitHint}
+                </small>
+              </article>
             </section>
 
             <div className="console-keys-grid">
@@ -2217,6 +2307,10 @@ export function ConsoleClient({
                       <button type="button" aria-label={c.closeNewKey} onClick={() => setCreatedKey(null)}>×</button>
                     </div>
                     <p>{c.saveSecret}</p>
+                    <small>
+                      {c.requestLimit}: {createdKey.rateLimitRps} RPS ·
+                      Burst {createdKey.rateLimitBurst}
+                    </small>
                     <div className="secret-value">
                       <code>{createdKey.secret}</code>
                       <button type="button" onClick={() => void copyText(createdKey.secret, c.keyCopied)}>
@@ -2235,6 +2329,7 @@ export function ConsoleClient({
                         <tr>
                           <th>{c.keyName}</th>
                           <th>{c.keyPrefix}</th>
+                          <th>{c.requestLimit}</th>
                           <th>{c.created}</th>
                           <th>{c.lastUsed}</th>
                           <th>{c.keyStatus}</th>
@@ -2246,6 +2341,10 @@ export function ConsoleClient({
                           <tr key={key.id}>
                             <td><b>{key.label}</b></td>
                             <td><code>{key.prefix}••••••••</code></td>
+                            <td>
+                              <b>{key.rateLimitRps} RPS</b>
+                              <small> Burst {key.rateLimitBurst}</small>
+                            </td>
                             <td>{formatDate(key.createdAt, locale)}</td>
                             <td>{formatDate(key.lastUsedAt, locale, true)}</td>
                             <td><span className="key-active">{c.active}</span></td>
@@ -2279,7 +2378,9 @@ export function ConsoleClient({
                     <h2>{c.securityPractices}</h2>
                   </div>
                 </div>
-                <p>{c.credentialHelp}</p>
+                <p>
+                  {c.credentialHelp} {c.requestLimitHint}
+                </p>
                 <ul>
                   {c.securityItems.map((item, index) => (
                     <li key={item}><span>{index + 1}</span>{item}</li>
@@ -2782,8 +2883,29 @@ export function ConsoleClient({
                         <dd><code>{x402Batch.endpoint}</code></dd>
                       </div>
                       <div>
+                        <dt>{locale === "zh" ? "执行方式" : "Execution"}</dt>
+                        <dd>{x402Batch.executionMode}</dd>
+                      </div>
+                      <div>
                         <dt>{x.quantity}</dt>
                         <dd>{x402Batch.verifiedQuantity.toLocaleString()}</dd>
+                      </div>
+                      <div>
+                        <dt>{locale === "zh" ? "上游请求" : "Upstream requests"}</dt>
+                        <dd>
+                          {x402Batch.actualUpstreamAttempts.toLocaleString()}
+                          {" / "}
+                          {x402Batch.plannedUpstreamRequests.toLocaleString()}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>{locale === "zh" ? "返回条目" : "Returned items"}</dt>
+                        <dd>
+                          {x402Batch.returnedItemCount?.toLocaleString() ??
+                            (locale === "zh"
+                              ? "响应结构待确认"
+                              : "Response shape unverified")}
+                        </dd>
                       </div>
                       <div>
                         <dt>{x.unitPrice}</dt>

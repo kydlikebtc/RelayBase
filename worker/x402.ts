@@ -44,6 +44,10 @@ export type X402BatchBinding = {
   verifiedQuantity: number;
   unitPriceUsdMicros: number;
   amountUsdcAtomic: number;
+  executionMode: "native_batch" | "fanout";
+  capabilityRevision: number;
+  plannedUpstreamRequests: number;
+  nativeBatchMax: number | null;
 };
 
 export type X402PaymentRequired = {
@@ -177,6 +181,10 @@ export function buildX402PaymentRequired(input: {
             "verifiedQuantity",
             "unitPriceUsdMicros",
             "amountUsdcAtomic",
+            "executionMode",
+            "capabilityRevision",
+            "plannedUpstreamRequests",
+            "nativeBatchMax",
           ],
           additionalProperties: false,
         },

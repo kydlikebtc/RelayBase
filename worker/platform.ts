@@ -158,6 +158,10 @@ export interface PlatformEnv {
   LEGAL_REVIEW_CONFIRMED?: string;
   PUBLIC_APP_URL?: string;
   API_RATE_LIMIT_RPM?: string;
+  API_RATE_LIMIT_RPS?: string;
+  API_RATE_LIMIT_BURST?: string;
+  ACCOUNT_RATE_LIMIT_RPS?: string;
+  ACCOUNT_RATE_LIMIT_BURST?: string;
   UPSTREAM_TIMEOUT_MS?: string;
   UPSTREAM_MAX_RESPONSE_BYTES?: string;
   CATALOG_SYNC_SECRET?: string;
@@ -171,6 +175,10 @@ export interface PlatformEnv {
   TRUST_SITES_IDENTITY_HEADERS?: string;
   PRICE_MARKUP_BPS?: string;
   UPSTREAM_RATE_LIMIT_RPS?: string;
+  UPSTREAM_RATE_LIMIT_BURST?: string;
+  UPSTREAM_ROUTING_WAIT_MS?: string;
+  UPSTREAM_X402_RATE_SHARE_BPS?: string;
+  X402_CAPACITY_WINDOW_SECONDS?: string;
   ACCOUNT_CONCURRENCY_LIMIT?: string;
   PAYMENT_CREATE_LIMIT_PER_MINUTE?: string;
   PAYMENT_PROVIDER_LIMIT_PER_MINUTE?: string;
@@ -200,6 +208,10 @@ type ApiKeyRecord = {
   id: string;
   user_id: string;
   rate_limit_rpm: number;
+  rate_limit_rps: number;
+  rate_limit_burst: number;
+  account_rate_limit_rps: number;
+  account_rate_limit_burst: number;
 };
 
 type CatalogRecord = {
@@ -210,8 +222,10 @@ type CatalogRecord = {
   tags_json: string;
   surface: MarketplaceSurface;
   operation_id: string | null;
+  parameter_schema_json: string | null;
   upstream_price_usd_micros: number;
   customer_price_usd_micros: number;
+  rate_limit_rps: number | null;
   price_verified: number;
   enabled: number;
   read_only: number;
@@ -243,6 +257,40 @@ type CatalogDataType =
   | "other";
 type MarketplaceAvailability = "available" | "pending" | "restricted";
 type MarketplaceDocumentationStatus = "complete" | "pending";
+type EndpointExecutionMode =
+  | "direct"
+  | "native_batch"
+  | "paginated"
+  | "async_job"
+  | "fanout";
+type EndpointEvidenceStatus =
+  | "verified"
+  | "openapi_inferred"
+  | "pending";
+type EndpointCapability = {
+  executionMode: EndpointExecutionMode;
+  nativeBatchSupported: boolean;
+  nativeBatchMax: number | null;
+  targetField: string | null;
+  targetEncoding: "json_array" | "csv_query" | "csv_body" | null;
+  pagination: {
+    style: "cursor" | "page" | "offset" | "mixed";
+    requestField: string | null;
+    responseField: string | null;
+    pageSizeField: string | null;
+    pageSizeMax: number | null;
+    autoFollow: false;
+  } | null;
+  typicalItemsPerResponse: number | null;
+  responseItemsPath: string | null;
+  evidence: {
+    status: EndpointEvidenceStatus;
+    url: string | null;
+    note: string;
+    verifiedAt: string | null;
+  };
+  revision: number;
+};
 
 type MarketplaceReferenceEndpoint = {
   id: string;
@@ -288,6 +336,7 @@ type MarketplaceCatalogOverlay = {
   description: string | null;
   parameter_schema_json: string | null;
   customer_price_usd_micros: number;
+  rate_limit_rps: number | null;
   price_verified: number;
   enabled: number;
   read_only: number;
@@ -339,9 +388,322 @@ type MarketplaceOverlayRow = {
   x402MaxBatchSize: number | null;
   x402Revision: number;
   rateLimitRps: number | null;
+  runtimeRouteAvailable: boolean;
+  capability: EndpointCapability;
   updatedAt: string;
   documentationStatus: MarketplaceDocumentationStatus;
 };
+
+const VERIFIED_ENDPOINT_CAPABILITIES: Readonly<
+  Record<string, EndpointCapability>
+> = {
+  "/v1/tiktok/app/v3/fetch_multi_video": {
+    executionMode: "native_batch",
+    nativeBatchSupported: true,
+    nativeBatchMax: 10,
+    targetField: "aweme_ids",
+    targetEncoding: "json_array",
+    pagination: null,
+    typicalItemsPerResponse: null,
+    responseItemsPath: null,
+    evidence: {
+      status: "verified",
+      url: "https://docs.tikhub.io/190419367e0",
+      note:
+        "TikHub endpoint documentation states that one POST accepts up to 10 aweme IDs and is billed per upstream request.",
+      verifiedAt: "2026-07-26",
+    },
+    revision: 1,
+  },
+  "/v1/tiktok/app/v3/fetch_multi_video_v2": {
+    executionMode: "native_batch",
+    nativeBatchSupported: true,
+    nativeBatchMax: 25,
+    targetField: "aweme_ids",
+    targetEncoding: "json_array",
+    pagination: null,
+    typicalItemsPerResponse: null,
+    responseItemsPath: null,
+    evidence: {
+      status: "verified",
+      url: "https://docs.tikhub.io/258124428e0",
+      note:
+        "The endpoint-specific TikHub document states a maximum of 25 aweme IDs per POST. It is stronger evidence than a conflicting landing-page summary.",
+      verifiedAt: "2026-07-26",
+    },
+    revision: 1,
+  },
+  "/v1/douyin/app/v3/fetch_multi_video_v2": {
+    executionMode: "native_batch",
+    nativeBatchSupported: true,
+    nativeBatchMax: 50,
+    targetField: "aweme_ids",
+    targetEncoding: "json_array",
+    pagination: null,
+    typicalItemsPerResponse: null,
+    responseItemsPath: null,
+    evidence: {
+      status: "verified",
+      url: "https://docs.tikhub.io/339033805e0",
+      note:
+        "TikHub endpoint documentation states that one POST accepts up to 50 aweme IDs and is billed per upstream request.",
+      verifiedAt: "2026-07-26",
+    },
+    revision: 1,
+  },
+  "/v1/douyin/web/fetch_multi_video": {
+    executionMode: "native_batch",
+    nativeBatchSupported: true,
+    nativeBatchMax: 50,
+    targetField: "aweme_ids",
+    targetEncoding: "json_array",
+    pagination: null,
+    typicalItemsPerResponse: null,
+    responseItemsPath: null,
+    evidence: {
+      status: "verified",
+      url: "https://docs.tikhub.io/244469112e0",
+      note:
+        "TikHub endpoint documentation states that one POST accepts up to 50 aweme IDs.",
+      verifiedAt: "2026-07-26",
+    },
+    revision: 1,
+  },
+  "/v1/douyin/app/v3/fetch_multi_video_statistics": {
+    executionMode: "native_batch",
+    nativeBatchSupported: true,
+    nativeBatchMax: 50,
+    targetField: "aweme_ids",
+    targetEncoding: "csv_query",
+    pagination: null,
+    typicalItemsPerResponse: null,
+    responseItemsPath: null,
+    evidence: {
+      status: "verified",
+      url: "https://docs.tikhub.io/256258480e0",
+      note:
+        "TikHub documents a comma-separated aweme_ids query parameter with a maximum of 50 IDs per GET.",
+      verifiedAt: "2026-07-26",
+    },
+    revision: 1,
+  },
+  "/v1/douyin/web/fetch_multi_video_high_quality_play_url": {
+    executionMode: "native_batch",
+    nativeBatchSupported: true,
+    nativeBatchMax: 50,
+    targetField: "aweme_ids",
+    targetEncoding: "csv_body",
+    pagination: null,
+    typicalItemsPerResponse: null,
+    responseItemsPath: null,
+    evidence: {
+      status: "verified",
+      url: "https://docs.tikhub.io/360401424e0",
+      note:
+        "TikHub documents up to 50 comma-separated aweme IDs per POST and notes special minimum-50 charging and longer processing.",
+      verifiedAt: "2026-07-26",
+    },
+    revision: 1,
+  },
+  "/v1/instagram/v3/get_user_posts": {
+    executionMode: "paginated",
+    nativeBatchSupported: false,
+    nativeBatchMax: null,
+    targetField: null,
+    targetEncoding: null,
+    pagination: {
+      style: "cursor",
+      requestField: "pagination_token",
+      responseField: null,
+      pageSizeField: "count",
+      pageSizeMax: 50,
+      autoFollow: false,
+    },
+    typicalItemsPerResponse: null,
+    responseItemsPath: null,
+    evidence: {
+      status: "verified",
+      url: "https://docs.tikhub.io/419083061e0",
+      note:
+        "TikHub documents at most 50 posts per page. RelayBase never follows the next-page token implicitly.",
+      verifiedAt: "2026-07-26",
+    },
+    revision: 1,
+  },
+  "/v1/instagram/v3/get_user_following": {
+    executionMode: "paginated",
+    nativeBatchSupported: false,
+    nativeBatchMax: null,
+    targetField: null,
+    targetEncoding: null,
+    pagination: {
+      style: "cursor",
+      requestField: "pagination_token",
+      responseField: null,
+      pageSizeField: "count",
+      pageSizeMax: 100,
+      autoFollow: false,
+    },
+    typicalItemsPerResponse: null,
+    responseItemsPath: null,
+    evidence: {
+      status: "verified",
+      url: "https://docs.tikhub.io/419083077e0",
+      note:
+        "TikHub documents at most 100 following records per page. RelayBase treats each cursor page as one upstream request.",
+      verifiedAt: "2026-07-26",
+    },
+    revision: 1,
+  },
+};
+
+const VERIFIED_ENDPOINT_METHODS: Readonly<Record<string, "GET" | "POST">> = {
+  "/v1/tiktok/app/v3/fetch_multi_video": "POST",
+  "/v1/tiktok/app/v3/fetch_multi_video_v2": "POST",
+  "/v1/douyin/app/v3/fetch_multi_video_v2": "POST",
+  "/v1/douyin/web/fetch_multi_video": "POST",
+  "/v1/douyin/app/v3/fetch_multi_video_statistics": "GET",
+  "/v1/douyin/web/fetch_multi_video_high_quality_play_url": "POST",
+  "/v1/instagram/v3/get_user_posts": "GET",
+  "/v1/instagram/v3/get_user_following": "GET",
+};
+
+function collectCapabilityInputFields(
+  value: unknown,
+  fields = new Map<string, number | null>(),
+  depth = 0,
+): Map<string, number | null> {
+  if (depth > 24) return fields;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectCapabilityInputFields(item, fields, depth + 1);
+    }
+    return fields;
+  }
+  if (!isPlainRecord(value)) return fields;
+  if (typeof value.name === "string") {
+    const name = value.name.trim().toLowerCase();
+    const schema = isPlainRecord(value.schema) ? value.schema : value;
+    const maximum =
+      typeof schema.maximum === "number" &&
+      Number.isSafeInteger(schema.maximum) &&
+      schema.maximum > 0
+        ? schema.maximum
+        : null;
+    if (name) fields.set(name, maximum);
+  }
+  if (isPlainRecord(value.properties)) {
+    for (const [name, schema] of Object.entries(value.properties)) {
+      const normalized = name.trim().toLowerCase();
+      const maximum =
+        isPlainRecord(schema) &&
+        typeof schema.maximum === "number" &&
+        Number.isSafeInteger(schema.maximum) &&
+        schema.maximum > 0
+          ? schema.maximum
+          : null;
+      if (normalized) fields.set(normalized, maximum);
+    }
+  }
+  for (const child of Object.values(value)) {
+    collectCapabilityInputFields(child, fields, depth + 1);
+  }
+  return fields;
+}
+
+function inferredPaginationCapability(
+  parameterSchema: unknown,
+): EndpointCapability["pagination"] {
+  const fields = collectCapabilityInputFields(parameterSchema);
+  const names = [...fields.keys()];
+  const cursorField = names.find((name) =>
+    /^(?:cursor|max_cursor|min_cursor|pagination_token|next_cursor|end_cursor)$/.test(
+      name,
+    ),
+  );
+  const pageField = names.find((name) =>
+    /^(?:page|page_no|page_num|page_index|page_number)$/.test(name),
+  );
+  const offsetField = names.find((name) =>
+    /^(?:offset|start|start_index)$/.test(name),
+  );
+  const pageSizeField = names.find((name) =>
+    /^(?:count|limit|page_size|page_count|size|number)$/.test(name),
+  );
+  const styles = [
+    cursorField ? "cursor" : null,
+    pageField ? "page" : null,
+    offsetField ? "offset" : null,
+  ].filter(Boolean);
+  if (styles.length === 0) return null;
+  return {
+    style:
+      styles.length > 1
+        ? "mixed"
+        : (styles[0] as "cursor" | "page" | "offset"),
+    requestField: cursorField ?? pageField ?? offsetField ?? null,
+    responseField: null,
+    pageSizeField: pageSizeField ?? null,
+    pageSizeMax: pageSizeField ? (fields.get(pageSizeField) ?? null) : null,
+    autoFollow: false,
+  };
+}
+
+function endpointCapabilityFor(
+  path: string,
+  parameterSchema: unknown,
+  documentationStatus: MarketplaceDocumentationStatus,
+  method: "GET" | "POST" | null,
+): EndpointCapability {
+  const verified = VERIFIED_ENDPOINT_CAPABILITIES[path];
+  if (verified && VERIFIED_ENDPOINT_METHODS[path] === method) return verified;
+  const pagination =
+    documentationStatus === "complete"
+      ? inferredPaginationCapability(parameterSchema)
+      : null;
+  if (pagination) {
+    return {
+      executionMode: "paginated",
+      nativeBatchSupported: false,
+      nativeBatchMax: null,
+      targetField: null,
+      targetEncoding: null,
+      pagination,
+      typicalItemsPerResponse: null,
+      responseItemsPath: null,
+      evidence: {
+        status: "openapi_inferred",
+        url: null,
+        note:
+          "Pagination is inferred from the current TikHub OpenAPI input fields. Response cursor and typical page size remain unverified unless shown separately.",
+        verifiedAt: null,
+      },
+      revision: 1,
+    };
+  }
+  return {
+    executionMode: "direct",
+    nativeBatchSupported: false,
+    nativeBatchMax: null,
+    targetField: null,
+    targetEncoding: null,
+    pagination: null,
+    typicalItemsPerResponse: null,
+    responseItemsPath: null,
+    evidence: {
+      status: "pending",
+      url: null,
+      note:
+        documentationStatus === "pending"
+          ? "The HTTP method and input contract are not present in the current OpenAPI snapshot. Capability must be confirmed from official documentation or a controlled upstream test."
+          : verified
+            ? `The current catalog method (${method ?? "unknown"}) does not match the endpoint-specific evidence (${VERIFIED_ENDPOINT_METHODS[path]}). RelayBase keeps execution 1:1 until the catalog contract is reconciled.`
+          : "RelayBase currently forwards one customer request as one upstream request. Native batching, response size and async behavior are not assumed without endpoint-specific evidence.",
+      verifiedAt: null,
+    },
+    revision: 1,
+  };
+}
 
 type UpstreamSourceConfigRecord = {
   id: number;
@@ -490,6 +852,14 @@ type PaymentOrderRecord = {
 type ManagedUpstreamCredentialRecord = {
   id: string;
   label: string;
+  capacity_group_id: string | null;
+  capacity_group_label: string | null;
+  configured_rps_per_endpoint: number | null;
+  headroom_bps: number | null;
+  group_status: "active" | "draining" | "disabled" | null;
+  routing_enabled: number;
+  priority: number;
+  weight: number;
   encrypted_secret: string;
   secret_hash: string;
   verified_scopes_json: string | null;
@@ -500,6 +870,14 @@ type ManagedUpstreamCredentialRecord = {
   created_at: string;
   last_used_at: string | null;
   revoked_at: string | null;
+  health_state: "healthy" | "degraded" | "auth_failed" | "balance_low" | "circuit_open";
+  consecutive_failures: number;
+  ewma_latency_ms: number | null;
+  cooldown_until: string | null;
+  last_status_code: number | null;
+  last_error_code: string | null;
+  last_success_at: string | null;
+  last_failure_at: string | null;
 };
 
 type ResolvedUpstreamProviderCredential = {
@@ -511,6 +889,17 @@ type ResolvedUpstreamProviderCredential = {
   expiresAt: string | null;
   stateVersion: number;
   configHash: string;
+  capacityGroupId: string;
+  capacityGroupLabel: string;
+  configuredRpsPerEndpoint: number;
+  headroomBps: number;
+  effectiveRpsPerEndpoint: number;
+  routingEnabled: boolean;
+  priority: number;
+  weight: number;
+  healthState: ManagedUpstreamCredentialRecord["health_state"];
+  ewmaLatencyMs: number | null;
+  cooldownUntil: string | null;
 };
 
 type X402RuntimeConfigRecord = {
@@ -562,6 +951,7 @@ class PlatformError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    readonly headers?: HeadersInit,
   ) {
     super(message);
   }
@@ -930,6 +1320,7 @@ export async function handlePlatformRequest(
         error.code,
         error.message,
         requestId,
+        error.headers,
       );
     }
 
@@ -1324,7 +1715,7 @@ async function handleGoogleAuthCallback(
 
     const displayName =
       compactIdentityName(tokenInfo.name) ?? email.split("@")[0] ?? email;
-    const user = await upsertAuthIdentity(db, {
+    const user = await upsertAuthIdentity(db, env, {
       provider: "google",
       subject,
       email,
@@ -1556,7 +1947,7 @@ async function handleWalletVerify(
   }
 
   const normalizedAddress = address.toLowerCase();
-  const user = await upsertAuthIdentity(db, {
+  const user = await upsertAuthIdentity(db, env, {
     provider: "wallet",
     subject: normalizedAddress,
     email: null,
@@ -1649,6 +2040,7 @@ function publicAuthUser(user: AuthenticatedUser) {
 
 async function upsertAuthIdentity(
   db: D1Database,
+  env: PlatformEnv,
   input: {
     provider: "google" | "wallet";
     subject: string;
@@ -1737,12 +2129,25 @@ async function upsertAuthIdentity(
   const identityId = `aid_${(
     await sha256Hex(`${input.provider}:${input.subject}`)
   ).slice(0, 28)}`;
+  const accountRateLimitRps = clampInteger(
+    env.ACCOUNT_RATE_LIMIT_RPS,
+    3,
+    1,
+    1_000,
+  );
+  const accountRateLimitBurst = clampInteger(
+    env.ACCOUNT_RATE_LIMIT_BURST,
+    6,
+    accountRateLimitRps,
+    2_000,
+  );
   await db.batch([
     db
       .prepare(
         `INSERT OR IGNORE INTO users
-         (id, email, display_name, status, created_at, updated_at)
-         SELECT ?, ?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+         (id, email, display_name, status, rate_limit_rps,
+          rate_limit_burst, created_at, updated_at)
+         SELECT ?, ?, ?, 'active', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
          WHERE NOT EXISTS (
            SELECT 1
            FROM auth_identities
@@ -1753,6 +2158,8 @@ async function upsertAuthIdentity(
         candidateUserId,
         syntheticEmail,
         input.displayName,
+        accountRateLimitRps,
+        accountRateLimitBurst,
         input.provider,
         input.subject,
       ),
@@ -2128,7 +2535,8 @@ async function handleDashboard(
       .bind(user.id),
     db
       .prepare(
-        `SELECT id, label, key_prefix, created_at, last_used_at, revoked_at
+        `SELECT id, label, key_prefix, rate_limit_rps, rate_limit_burst,
+                created_at, last_used_at, revoked_at
          FROM api_keys
          WHERE user_id = ?
          ORDER BY created_at DESC
@@ -2183,7 +2591,10 @@ async function handleDashboard(
     db
       .prepare(
         `SELECT id, method, upstream_path, platform, status_code,
-                cost_usd_micros, latency_ms, refunded, created_at
+                cost_usd_micros, latency_ms, refunded,
+                customer_request_count, upstream_attempt_count,
+                target_count, returned_item_count, pagination_unit_count,
+                created_at
          FROM api_calls
          WHERE user_id = ?
          ORDER BY created_at DESC
@@ -2320,6 +2731,32 @@ async function handleDashboard(
   const usageDaily = Array.from(dailyUsage.values()).sort((left, right) =>
     left.day.localeCompare(right.day),
   );
+  const accountRatePolicy = await db
+    .prepare(
+      `SELECT rate_limit_rps, rate_limit_burst
+       FROM users
+       WHERE id = ?`,
+    )
+    .bind(user.id)
+    .first<{
+      rate_limit_rps: number;
+      rate_limit_burst: number;
+    }>();
+  const accountRateLimitRps = clampInteger(
+    accountRatePolicy?.rate_limit_rps,
+    clampInteger(env.ACCOUNT_RATE_LIMIT_RPS, 3, 1, 1000),
+    1,
+    1000,
+  );
+  const accountRateLimitBurst = clampInteger(
+    accountRatePolicy?.rate_limit_burst,
+    Math.max(
+      accountRateLimitRps,
+      clampInteger(env.ACCOUNT_RATE_LIMIT_BURST, 6, 1, 2000),
+    ),
+    accountRateLimitRps,
+    2000,
+  );
 
   return jsonResponse(
     {
@@ -2362,10 +2799,18 @@ async function handleDashboard(
           walletAddress: user.walletAddress,
         },
       },
+      rateLimits: {
+        account: {
+          rps: accountRateLimitRps,
+          burst: accountRateLimitBurst,
+        },
+      },
       keys: resultRows<{
         id: string;
         label: string;
         key_prefix: string;
+        rate_limit_rps: number;
+        rate_limit_burst: number;
         created_at: string;
         last_used_at: string | null;
         revoked_at: string | null;
@@ -2373,6 +2818,8 @@ async function handleDashboard(
         id: row.id,
         label: row.label,
         prefix: row.key_prefix,
+        rateLimitRps: row.rate_limit_rps,
+        rateLimitBurst: row.rate_limit_burst,
         createdAt: row.created_at,
         lastUsedAt: row.last_used_at,
         revokedAt: row.revoked_at,
@@ -2415,6 +2862,11 @@ async function handleDashboard(
         cost_usd_micros: number;
         latency_ms: number;
         refunded: number;
+        customer_request_count: number;
+        upstream_attempt_count: number;
+        target_count: number;
+        returned_item_count: number | null;
+        pagination_unit_count: number;
         created_at: string;
       }>(callsResult).map((row) => ({
         id: row.id,
@@ -2425,6 +2877,14 @@ async function handleDashboard(
         costUsdMicros: row.cost_usd_micros,
         refunded: row.refunded === 1,
         latencyMs: row.latency_ms,
+        customerRequestCount: Number(row.customer_request_count),
+        upstreamAttemptCount: Number(row.upstream_attempt_count),
+        targetCount: Number(row.target_count),
+        returnedItemCount:
+          row.returned_item_count === null
+            ? null
+            : Number(row.returned_item_count),
+        paginationUnitCount: Number(row.pagination_unit_count),
         createdAt: row.created_at,
       })),
     },
@@ -3221,6 +3681,12 @@ function publicX402Batch(
     verifiedQuantity: batch.verified_quantity,
     unitPriceUsdMicros: batch.unit_price_usd_micros,
     amountUsdcAtomic: batch.amount_usdc_atomic,
+    executionMode: batch.execution_mode,
+    capabilityRevision: batch.capability_revision,
+    plannedUpstreamRequests: batch.planned_upstream_requests,
+    actualUpstreamAttempts: batch.actual_upstream_attempts,
+    returnedItemCount: batch.returned_item_count,
+    capacityGroupId: batch.capacity_group_id,
     network: batch.network,
     asset: batch.asset,
     payer: payer
@@ -3275,6 +3741,14 @@ async function handleCreateApiKey(
   requestId: string,
 ): Promise<Response> {
   assertSameOrigin(request, env);
+  const readiness = await operationalReadiness(env);
+  if (!readiness.capabilities.schemaReady) {
+    throw new PlatformError(
+      503,
+      "database_migrations_required",
+      "数据库迁移尚未完成，暂不能创建 API Key。",
+    );
+  }
   const db = requireDb(env);
   const user = await requireAuthenticatedUser(request, db, env);
   const body = await readJsonBody<{ label?: unknown }>(
@@ -3287,15 +3761,51 @@ async function handleCreateApiKey(
   const secret = `rb_live_${randomBase64Url(32)}`;
   const keyHash = await sha256Hex(secret);
   const prefix = `${secret.slice(0, 16)}…`;
-  const rateLimit = clampInteger(env.API_RATE_LIMIT_RPM, 60, 1, 600);
+  const accountPolicy = await db
+    .prepare(
+      `SELECT rate_limit_rps, rate_limit_burst
+       FROM users
+       WHERE id = ? AND status = 'active'`,
+    )
+    .bind(user.id)
+    .first<{
+      rate_limit_rps: number;
+      rate_limit_burst: number;
+    }>();
+  if (!accountPolicy) {
+    throw new PlatformError(403, "account_suspended", "账户当前不可用。");
+  }
+  const rateLimitRps = Math.min(
+    clampInteger(accountPolicy.rate_limit_rps, 3, 1, 1_000),
+    clampInteger(env.API_RATE_LIMIT_RPS, 3, 1, 1_000),
+  );
+  const rateLimitBurst = Math.min(
+    clampInteger(
+      accountPolicy.rate_limit_burst,
+      Math.max(rateLimitRps, 6),
+      rateLimitRps,
+      2_000,
+    ),
+    Math.max(
+      rateLimitRps,
+      clampInteger(
+        env.API_RATE_LIMIT_BURST,
+        6,
+        rateLimitRps,
+        2_000,
+      ),
+    ),
+  );
+  const rateLimit = Math.min(60_000, rateLimitRps * 60);
   const createdAt = new Date().toISOString();
 
   const [inserted, statusResult] = await db.batch([
     db
       .prepare(
         `INSERT INTO api_keys
-         (id, user_id, label, key_prefix, key_hash, rate_limit_rpm, created_at)
-         SELECT ?, ?, ?, ?, ?, ?, ?
+         (id, user_id, label, key_prefix, key_hash, rate_limit_rpm,
+          rate_limit_rps, rate_limit_burst, created_at)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
          WHERE EXISTS (
            SELECT 1 FROM users
            WHERE id = ? AND status = 'active'
@@ -3313,6 +3823,8 @@ async function handleCreateApiKey(
         prefix,
         keyHash,
         rateLimit,
+        rateLimitRps,
+        rateLimitBurst,
         createdAt,
         user.id,
         user.id,
@@ -3340,6 +3852,8 @@ async function handleCreateApiKey(
         label,
         prefix,
         secret,
+        rateLimitRps,
+        rateLimitBurst,
         createdAt,
       },
     },
@@ -3651,6 +4165,12 @@ type X402BatchRecord = {
   unit_price_usd_micros: number;
   amount_usdc_atomic: number;
   upstream_cost_usd_micros: number;
+  execution_mode: "native_batch" | "fanout";
+  capability_revision: number;
+  planned_upstream_requests: number;
+  actual_upstream_attempts: number;
+  returned_item_count: number | null;
+  capacity_group_id: string | null;
   status: X402BatchStatus;
   network: string;
   asset: string;
@@ -3687,6 +4207,28 @@ type NormalizedX402Batch = {
   endpoint: string;
   requests: Record<string, unknown>[];
 };
+
+type X402ExecutionPlan =
+  | {
+      mode: "fanout";
+      capability: EndpointCapability;
+      verifiedQuantity: number;
+      plannedUpstreamRequests: number;
+      requests: Record<string, unknown>[];
+    }
+  | {
+      mode: "native_batch";
+      capability: EndpointCapability;
+      verifiedQuantity: number;
+      plannedUpstreamRequests: number;
+      baseInput: Record<string, unknown>;
+      targetValues: Array<string | number>;
+      chunks: Array<{
+        index: number;
+        inputIndexes: number[];
+        targetValues: Array<string | number>;
+      }>;
+    };
 
 async function handleX402Batch(
   request: Request,
@@ -3762,6 +4304,45 @@ async function handleX402Batch(
         "重试批次与原报价端点不一致。",
       );
     }
+    const existingCatalog = await x402CatalogForQuote(
+      db,
+      existing.endpoint_path,
+    );
+    validateX402Targets(batch, existingCatalog);
+    const existingPlan = buildX402ExecutionPlanForStored(
+      batch,
+      existingCatalog,
+      existing,
+    );
+    if (
+      existingPlan.mode !== existing.execution_mode ||
+      existingPlan.capability.revision !==
+        existing.capability_revision ||
+      existingPlan.verifiedQuantity !== existing.verified_quantity ||
+      existingPlan.plannedUpstreamRequests !==
+        existing.planned_upstream_requests
+    ) {
+      throw new PlatformError(
+        409,
+        "x402_capability_revision_conflict",
+        "该幂等批次绑定的执行能力或分片计划已变化；请使用新的 Idempotency-Key 重新报价。",
+      );
+    }
+    if (
+      existing.status === "quoted" ||
+      existing.status === "payment_rejected"
+    ) {
+      await assertX402UpstreamRouteAvailable(
+        env,
+        db,
+        existing.endpoint_path,
+      );
+      await reserveX402CapacityLease(env, db, {
+        batchId: existing.id,
+        endpointPath: existing.endpoint_path,
+        plannedRequests: existing.planned_upstream_requests,
+      });
+    }
     return await continueX402Batch(
       request,
       env,
@@ -3776,16 +4357,18 @@ async function handleX402Batch(
 
   const catalog = await x402CatalogForQuote(db, batch.endpoint);
   assertX402CatalogCallable(catalog);
-  if (batch.requests.length > catalog.x402_max_batch_size) {
+  await assertX402UpstreamRouteAvailable(env, db, batch.endpoint);
+  validateX402Targets(batch, catalog);
+  const executionPlan = buildX402ExecutionPlan(batch, catalog);
+  if (executionPlan.verifiedQuantity > catalog.x402_max_batch_size) {
     throw new PlatformError(
       400,
       "x402_batch_limit_exceeded",
       `该数据产品每批最多 ${catalog.x402_max_batch_size} 个目标。`,
     );
   }
-  validateX402Targets(batch, catalog);
 
-  const verifiedQuantity = batch.requests.length;
+  const verifiedQuantity = executionPlan.verifiedQuantity;
   const amountUsdcAtomic =
     verifiedQuantity * catalog.x402_unit_price_usd_micros;
   if (
@@ -3800,6 +4383,11 @@ async function handleX402Batch(
     );
   }
   const batchId = `xb_${randomBase64Url(24)}`;
+  const capacityGroupId = await reserveX402CapacityLease(env, db, {
+    batchId,
+    endpointPath: batch.endpoint,
+    plannedRequests: executionPlan.plannedUpstreamRequests,
+  });
   const requirements = buildX402Requirements({
     amountUsdcAtomic,
     payTo: runtime.payTo,
@@ -3812,6 +4400,10 @@ async function handleX402Batch(
     verifiedQuantity,
     unitPriceUsdMicros: catalog.x402_unit_price_usd_micros,
     amountUsdcAtomic,
+    executionMode: executionPlan.mode,
+    capabilityRevision: executionPlan.capability.revision,
+    plannedUpstreamRequests: executionPlan.plannedUpstreamRequests,
+    nativeBatchMax: executionPlan.capability.nativeBatchMax,
   };
   const paymentRequired = buildX402PaymentRequired({
     origin: canonicalAppOrigin(request, env),
@@ -3821,17 +4413,21 @@ async function handleX402Batch(
   const createdAt = new Date().toISOString();
   const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
   const upstreamCostUsdMicros =
-    verifiedQuantity * catalog.upstream_cost_usd_micros;
+    executionPlan.plannedUpstreamRequests *
+    catalog.upstream_cost_usd_micros;
   try {
     await db
       .prepare(
         `INSERT INTO x402_batches
          (id, idempotency_hash, endpoint_path, request_hash,
           verified_quantity, unit_price_usd_micros, amount_usdc_atomic,
-          upstream_cost_usd_micros, status, network, asset, pay_to,
+          upstream_cost_usd_micros, execution_mode, capability_revision,
+          planned_upstream_requests, actual_upstream_attempts,
+          capacity_group_id, status, network, asset, pay_to,
           payment_requirements_json, facilitator_mode, created_at,
           quoted_at, expires_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'quoted',
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         batchId,
@@ -3842,6 +4438,10 @@ async function handleX402Batch(
         catalog.x402_unit_price_usd_micros,
         amountUsdcAtomic,
         upstreamCostUsdMicros,
+        executionPlan.mode,
+        executionPlan.capability.revision,
+        executionPlan.plannedUpstreamRequests,
+        capacityGroupId,
         X402_NETWORK,
         X402_ASSET,
         runtime.payTo,
@@ -3854,6 +4454,7 @@ async function handleX402Batch(
       )
       .run();
   } catch {
+    await setX402CapacityLeaseStatus(db, batchId, "released");
     const raced = await x402BatchByIdempotency(db, idempotencyHash);
     if (!raced || raced.request_hash !== requestHash) {
       throw new PlatformError(
@@ -3934,6 +4535,7 @@ async function continueX402Batch(
       )
       .bind(stored.id)
       .run();
+    await setX402CapacityLeaseStatus(db, stored.id, "expired");
     throw new PlatformError(
       410,
       "x402_quote_expired",
@@ -4245,14 +4847,19 @@ async function executeSettledX402Batch(
   let execution: {
     success: boolean;
     results: Array<Record<string, unknown>>;
+    actualUpstreamAttempts: number;
+    returnedItemCount: number | null;
     error?: string;
   };
+  await setX402CapacityLeaseStatus(db, stored.id, "consuming");
   try {
     execution = await executeX402Targets(env, ctx, db, stored, batch);
   } catch (error) {
     execution = {
       success: false,
       results: [],
+      actualUpstreamAttempts: 0,
+      returnedItemCount: null,
       error:
         error instanceof Error
           ? error.message.slice(0, 1_000)
@@ -4276,9 +4883,14 @@ async function executeSettledX402Batch(
       settledAt: stored.settled_at,
       revenueStatus: "recognized",
       revenueRecognizedAt: stored.revenue_recognized_at,
+      executionMode: stored.execution_mode,
+      plannedUpstreamRequests: stored.planned_upstream_requests,
+      actualUpstreamAttempts: execution.actualUpstreamAttempts,
+      returnedItemCount: execution.returnedItemCount,
     },
     execution: {
       mode: "synchronous",
+      dispatch: stored.execution_mode,
       chargedAs: "one_batch_one_payment",
       completedAt,
       error: execution.error ?? null,
@@ -4293,18 +4905,22 @@ async function executeSettledX402Batch(
     .prepare(
       `UPDATE x402_batches
        SET status = ?, execution_response_json = ?,
+           actual_upstream_attempts = ?, returned_item_count = ?,
            failure_code = ?, completed_at = ?, updated_at = ?
        WHERE id = ? AND status = 'executing'`,
     )
     .bind(
       status,
       serialized,
+      execution.actualUpstreamAttempts,
+      execution.returnedItemCount,
       execution.success ? null : "batch_execution_failed",
       completedAt,
       completedAt,
       stored.id,
     )
     .run();
+  await setX402CapacityLeaseStatus(db, stored.id, "released");
   const receipt = safeStoredJson(stored.facilitator_receipt_json);
   return jsonResponse(
     responsePayload,
@@ -4330,6 +4946,8 @@ async function executeX402Targets(
 ): Promise<{
   success: boolean;
   results: Array<Record<string, unknown>>;
+  actualUpstreamAttempts: number;
+  returnedItemCount: number | null;
   error?: string;
 }> {
   const catalog = await x402CatalogForQuote(db, stored.endpoint_path);
@@ -4345,81 +4963,172 @@ async function executeX402Targets(
       "The data route became unavailable after settlement; no alternate route was used.",
     );
   }
+  const executionPlan = buildX402ExecutionPlanForStored(
+    batch,
+    catalog,
+    stored,
+  );
+  if (
+    executionPlan.mode !== stored.execution_mode ||
+    executionPlan.capability.revision !== stored.capability_revision ||
+    executionPlan.verifiedQuantity !== stored.verified_quantity ||
+    executionPlan.plannedUpstreamRequests !==
+      stored.planned_upstream_requests
+  ) {
+    throw new Error(
+      "The quoted capability revision or native batch chunk plan changed after settlement.",
+    );
+  }
   const sourceConfig = await loadUpstreamSourceConfig(db, env, true);
-  const credential = await resolveUpstreamProviderCredential(
+  const credentials = await resolveUpstreamProviderCredentialsForPath(
     env,
     db,
     sourceConfig,
+    stored.endpoint_path,
   );
-  if (
-    !credential ||
-    !upstreamProviderCredentialAllowsPath(
-      credential.scopes,
-      stored.endpoint_path,
-      sourceConfig.apiPathPrefix,
-    )
-  ) {
+  if (credentials.length === 0) {
     throw new Error(
-      "The active upstream credential cannot execute this data route.",
+      "No healthy upstream credential can execute this data route.",
     );
   }
-  if (credential.id) {
-    ctx.waitUntil(
-      db
-        .prepare(
-          `UPDATE upstream_credentials
-           SET last_used_at = CURRENT_TIMESTAMP
-           WHERE id = ? AND revoked_at IS NULL`,
-        )
-        .bind(credential.id)
-        .run(),
+  const groupCapacity = new Map<string, number>();
+  for (const credential of credentials) {
+    groupCapacity.set(
+      credential.capacityGroupId,
+      Math.max(
+        groupCapacity.get(credential.capacityGroupId) ?? 0,
+        credential.effectiveRpsPerEndpoint,
+      ),
     );
   }
   const concurrency = Math.min(
-    8,
-    clampInteger(env.UPSTREAM_RATE_LIMIT_RPS, 8, 1, 100),
+    2,
+    Math.max(
+      1,
+      [...groupCapacity.values()].reduce(
+        (total, capacity) => total + capacity,
+        0,
+      ),
+    ),
   );
+  const workItems =
+    executionPlan.mode === "native_batch"
+      ? executionPlan.chunks.map((chunk) => ({
+          index: chunk.index,
+          inputIndexes: chunk.inputIndexes,
+          targetValues: chunk.targetValues,
+          request: buildNativeBatchUpstreamInput(
+            executionPlan,
+            chunk.targetValues,
+          ),
+        }))
+      : executionPlan.requests.map((request, index) => ({
+          index,
+          inputIndexes: [index],
+          targetValues: null,
+          request,
+        }));
   const results: Array<Record<string, unknown>> = new Array(
-    batch.requests.length,
+    workItems.length,
   );
   let cursor = 0;
   const workers = Array.from(
-    { length: Math.min(concurrency, batch.requests.length) },
+    { length: Math.min(concurrency, workItems.length) },
     async () => {
-      while (cursor < batch.requests.length) {
+      while (cursor < workItems.length) {
         const index = cursor;
         cursor += 1;
+        const work = workItems[index];
         results[index] = await executeX402Target({
           env,
+          db,
           sourceConfig,
-          credential,
           catalog,
-          target: batch.requests[index],
-          index,
+          target: work.request,
+          index: work.index,
+          inputIndexes: work.inputIndexes,
+          targetValues: work.targetValues,
+          contextId: `${stored.id}:${work.index}`,
         });
       }
     },
   );
   await Promise.all(workers);
   const failed = results.filter((result) => result.success !== true).length;
+  const actualUpstreamAttempts = results.reduce(
+    (total, result) =>
+      total +
+      (typeof result.upstreamAttempts === "number"
+        ? result.upstreamAttempts
+        : 0),
+    0,
+  );
+  const returnedCounts = results.map((result) =>
+    typeof result.returnedItemCount === "number"
+      ? result.returnedItemCount
+      : null,
+  );
   return {
     success: failed === 0,
     results,
+    actualUpstreamAttempts,
+    returnedItemCount: returnedCounts.every(
+      (count): count is number => count !== null,
+    )
+      ? returnedCounts.reduce((total, count) => total + count, 0)
+      : null,
     ...(failed > 0
       ? {
-          error: `${failed} of ${results.length} targets failed after the single batch payment settled.`,
+          error: `${failed} of ${results.length} upstream execution units failed after the single batch payment settled.`,
         }
       : {}),
   };
 }
 
+function buildNativeBatchUpstreamInput(
+  plan: Extract<X402ExecutionPlan, { mode: "native_batch" }>,
+  targetValues: Array<string | number>,
+): Record<string, unknown> {
+  const field = plan.capability.targetField;
+  const encoding = plan.capability.targetEncoding;
+  if (!field || !encoding) {
+    throw new Error("Verified native batch metadata is incomplete.");
+  }
+  return {
+    ...plan.baseInput,
+    [field]:
+      encoding === "json_array"
+        ? targetValues
+        : targetValues.map(String).join(","),
+  };
+}
+
+function countReturnedItems(
+  value: unknown,
+  responseItemsPath: string | null,
+): number | null {
+  let current = value;
+  if (responseItemsPath) {
+    for (const segment of responseItemsPath.split(".").filter(Boolean)) {
+      if (!isPlainRecord(current) || !Object.hasOwn(current, segment)) {
+        return null;
+      }
+      current = current[segment];
+    }
+  }
+  return Array.isArray(current) ? current.length : null;
+}
+
 async function executeX402Target(input: {
   env: PlatformEnv;
+  db: D1Database;
   sourceConfig: UpstreamSourceConfig;
-  credential: ResolvedUpstreamProviderCredential;
   catalog: X402CatalogRecord;
   target: Record<string, unknown>;
   index: number;
+  inputIndexes: number[];
+  targetValues: Array<string | number> | null;
+  contextId: string;
 }): Promise<Record<string, unknown>> {
   const upstreamUrl = new URL(
     upstreamConfigUrl(
@@ -4439,30 +5148,39 @@ async function executeX402Target(input: {
   } else {
     body = JSON.stringify(input.target);
   }
-  const headers = new Headers({
-    authorization: `Bearer ${input.credential.secret}`,
-    accept: "application/json",
-    "user-agent": "RelayBase-x402/1.0",
-  });
-  if (body) headers.set("content-type", "application/json");
   const startedAt = Date.now();
   try {
-    const response = await fetch(upstreamUrl, {
+    const routed = await routedUpstreamFetch({
+      env: input.env,
+      db: input.db,
+      sourceConfig: input.sourceConfig,
+      endpointPath: input.catalog.path,
+      endpointDeclaredRps: input.catalog.rate_limit_rps,
       method: input.catalog.http_method,
-      headers,
+      url: upstreamUrl,
       body,
-      redirect: "error",
-      signal: AbortSignal.timeout(
-        clampInteger(input.env.UPSTREAM_TIMEOUT_MS, 45_000, 30_000, 60_000),
-      ),
+      accept: "application/json",
+      userAgent: "RelayBase-x402/1.0",
+      contextType: "x402",
+      contextId: input.contextId,
+      waitBudgetMs: 1_500,
+      targetCount:
+        input.targetValues?.length ?? input.inputIndexes.length,
+      paginationUnitCount: 0,
     });
+    const response = routed.response;
     if (!response.ok) {
       await response.body?.cancel("x402 upstream error");
       return {
         index: input.index,
+        inputIndexes: input.inputIndexes,
         success: false,
         statusCode: response.status,
         latencyMs: Date.now() - startedAt,
+        upstreamAttempts: routed.attemptCount,
+        targetCount:
+          input.targetValues?.length ?? input.inputIndexes.length,
+        ...(input.targetValues ? { targetValues: input.targetValues } : {}),
         error: "upstream_request_failed",
       };
     }
@@ -4487,19 +5205,45 @@ async function executeX402Target(input: {
         Object.hasOwn(payload, "requestId"))
         ? payload.data
         : payload;
+    const returnedItemCount = countReturnedItems(
+      data,
+      endpointCapabilityFor(
+        input.catalog.path,
+        safeStoredJson(input.catalog.parameter_schema_json),
+        "complete",
+        input.catalog.http_method as "GET" | "POST",
+      ).responseItemsPath,
+    );
+    await recordReturnedItemsForLastUpstreamAttempt(
+      input.db,
+      "x402",
+      input.contextId,
+      returnedItemCount,
+    );
     return {
       index: input.index,
+      inputIndexes: input.inputIndexes,
       success: true,
       statusCode: 200,
       latencyMs: Date.now() - startedAt,
+      upstreamAttempts: routed.attemptCount,
+      targetCount:
+        input.targetValues?.length ?? input.inputIndexes.length,
+      ...(input.targetValues ? { targetValues: input.targetValues } : {}),
+      returnedItemCount,
       data,
     };
   } catch (error) {
     return {
       index: input.index,
+      inputIndexes: input.inputIndexes,
       success: false,
       statusCode: 502,
       latencyMs: Date.now() - startedAt,
+      upstreamAttempts: 0,
+      targetCount:
+        input.targetValues?.length ?? input.inputIndexes.length,
+      ...(input.targetValues ? { targetValues: input.targetValues } : {}),
       error:
         error instanceof PlatformError
           ? error.code
@@ -4596,6 +5340,198 @@ function validateX402Targets(
   }
 }
 
+function nativeBatchTargetKeys(targetField: string): string[] {
+  const singular = targetField.endsWith("_ids")
+    ? `${targetField.slice(0, -4)}_id`
+    : targetField.endsWith("s")
+      ? targetField.slice(0, -1)
+      : targetField;
+  return [...new Set([targetField, singular])];
+}
+
+function nativeBatchTargetValues(
+  value: unknown,
+  encoding: NonNullable<EndpointCapability["targetEncoding"]>,
+): Array<string | number> {
+  const source =
+    Array.isArray(value)
+      ? value
+      : typeof value === "string" &&
+          (encoding === "csv_body" || encoding === "csv_query")
+        ? value.split(",").map((item) => item.trim())
+        : [value];
+  if (
+    source.length < 1 ||
+    source.length > 1_000 ||
+    source.some(
+      (item) =>
+        (typeof item !== "string" && typeof item !== "number") ||
+        String(item).trim().length < 1 ||
+        String(item).length > 256,
+    )
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_x402_native_batch_target",
+      "原生批量目标必须是 1–1000 个非空字符串或整数 ID。",
+    );
+  }
+  return source.map((item) =>
+    typeof item === "string" ? item.trim() : item,
+  );
+}
+
+function buildX402ExecutionPlan(
+  batch: NormalizedX402Batch,
+  catalog: X402CatalogRecord,
+): X402ExecutionPlan {
+  const capability = endpointCapabilityFor(
+    catalog.path,
+    safeStoredJson(catalog.parameter_schema_json),
+    "complete",
+    catalog.http_method as "GET" | "POST",
+  );
+  if (
+    capability.executionMode !== "native_batch" ||
+    capability.evidence.status !== "verified" ||
+    !capability.nativeBatchSupported ||
+    capability.nativeBatchMax == null ||
+    capability.targetField == null ||
+    capability.targetEncoding == null
+  ) {
+    return {
+      mode: "fanout",
+      capability,
+      verifiedQuantity: batch.requests.length,
+      plannedUpstreamRequests: batch.requests.length,
+      requests: batch.requests,
+    };
+  }
+
+  const targetKeys = nativeBatchTargetKeys(capability.targetField);
+  const targetValues: Array<string | number> = [];
+  const inputIndexes: number[] = [];
+  let baseInput: Record<string, unknown> | null = null;
+  let baseInputCanonical: string | null = null;
+  for (const [index, request] of batch.requests.entries()) {
+    const presentKeys = targetKeys.filter((key) =>
+      Object.hasOwn(request, key),
+    );
+    if (presentKeys.length !== 1) {
+      throw new PlatformError(
+        400,
+        "invalid_x402_native_batch_target",
+        `原生批量目标 ${index + 1} 必须且只能提供 ${targetKeys.join(" 或 ")}。`,
+      );
+    }
+    const targetKey = presentKeys[0];
+    const values = nativeBatchTargetValues(
+      request[targetKey],
+      capability.targetEncoding,
+    );
+    const requestBase = Object.fromEntries(
+      Object.entries(request).filter(([key]) => !targetKeys.includes(key)),
+    );
+    const requestBaseCanonical = JSON.stringify(sortObjectDeep(requestBase));
+    if (baseInputCanonical == null) {
+      baseInputCanonical = requestBaseCanonical;
+      baseInput = requestBase;
+    } else if (baseInputCanonical !== requestBaseCanonical) {
+      throw new PlatformError(
+        400,
+        "x402_native_batch_semantic_mismatch",
+        "同一原生批量中的非目标参数必须完全一致；RelayBase 不会合并语义不同的请求。",
+      );
+    }
+    for (const value of values) {
+      targetValues.push(value);
+      inputIndexes.push(index);
+    }
+  }
+  const chunks: Extract<
+    X402ExecutionPlan,
+    { mode: "native_batch" }
+  >["chunks"] = [];
+  for (
+    let offset = 0;
+    offset < targetValues.length;
+    offset += capability.nativeBatchMax
+  ) {
+    chunks.push({
+      index: chunks.length,
+      inputIndexes: inputIndexes.slice(
+        offset,
+        offset + capability.nativeBatchMax,
+      ),
+      targetValues: targetValues.slice(
+        offset,
+        offset + capability.nativeBatchMax,
+      ),
+    });
+  }
+  return {
+    mode: "native_batch",
+    capability,
+    verifiedQuantity: targetValues.length,
+    plannedUpstreamRequests: chunks.length,
+    baseInput: baseInput ?? {},
+    targetValues,
+    chunks,
+  };
+}
+
+function storedX402QuoteHasExecutionPlan(value: string): boolean {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!isPlainRecord(parsed)) return false;
+    const extensions = parsed.extensions;
+    if (!isPlainRecord(extensions)) return false;
+    const relaybaseBatch = extensions.relaybaseBatch;
+    if (!isPlainRecord(relaybaseBatch)) return false;
+    const info = relaybaseBatch.info;
+    return (
+      isPlainRecord(info) &&
+      (info.executionMode === "native_batch" ||
+        info.executionMode === "fanout") &&
+      Number.isSafeInteger(info.capabilityRevision) &&
+      Number(info.capabilityRevision) >= 1 &&
+      Number.isSafeInteger(info.plannedUpstreamRequests) &&
+      Number(info.plannedUpstreamRequests) >= 1 &&
+      (info.nativeBatchMax === null ||
+        (Number.isSafeInteger(info.nativeBatchMax) &&
+          Number(info.nativeBatchMax) >= 1))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function buildX402ExecutionPlanForStored(
+  batch: NormalizedX402Batch,
+  catalog: X402CatalogRecord,
+  stored: X402BatchRecord,
+): X402ExecutionPlan {
+  if (storedX402QuoteHasExecutionPlan(stored.payment_requirements_json)) {
+    return buildX402ExecutionPlan(batch, catalog);
+  }
+  const currentCapability = endpointCapabilityFor(
+    catalog.path,
+    safeStoredJson(catalog.parameter_schema_json),
+    "complete",
+    catalog.http_method as "GET" | "POST",
+  );
+  return {
+    mode: "fanout",
+    capability: {
+      ...currentCapability,
+      revision: stored.capability_revision,
+    },
+    verifiedQuantity: batch.requests.length,
+    plannedUpstreamRequests: batch.requests.length,
+    requests: batch.requests,
+  };
+}
+
 async function x402CatalogForQuote(
   db: D1Database,
   path: string,
@@ -4605,9 +5541,11 @@ async function x402CatalogForQuote(
     row = await db
       .prepare(
         `SELECT c.path, c.platform, c.http_method, c.data_type, c.tags_json,
-                c.surface, c.operation_id, c.upstream_price_usd_micros,
+                c.surface, c.operation_id, c.parameter_schema_json,
+                c.upstream_price_usd_micros,
                 c.upstream_price_usd_micros AS upstream_cost_usd_micros,
-                c.customer_price_usd_micros, c.price_verified,
+                c.customer_price_usd_micros, c.rate_limit_rps,
+                c.price_verified,
                 c.enabled, c.read_only, c.safety_classification,
                 c.safety_policy_version, c.sync_generation,
                 x.enabled AS x402_enabled,
@@ -4669,6 +5607,169 @@ function assertX402CatalogCallable(catalog: X402CatalogRecord): void {
       "该数据产品当前不满足目录、价格、安全、上游或对账条件，系统不会发出付款报价。",
     );
   }
+}
+
+async function assertX402UpstreamRouteAvailable(
+  env: PlatformEnv,
+  db: D1Database,
+  endpointPath: string,
+): Promise<void> {
+  const sourceConfig = await loadUpstreamSourceConfig(db, env, true);
+  const availability = await upstreamRouteAvailabilityByPath(
+    env,
+    db,
+    sourceConfig,
+    [endpointPath],
+  );
+  if (availability.get(endpointPath) === true) return;
+  throw new PlatformError(
+    503,
+    "x402_upstream_route_unavailable",
+    "该数据产品当前没有健康且具备授权的上游路由，系统不会发出或接受付款报价。",
+    {
+      "retry-after": "5",
+    },
+  );
+}
+
+async function reserveX402CapacityLease(
+  env: PlatformEnv,
+  db: D1Database,
+  input: {
+    batchId: string;
+    endpointPath: string;
+    plannedRequests: number;
+  },
+): Promise<string> {
+  const sourceConfig = await loadUpstreamSourceConfig(db, env, true);
+  const credentials = await resolveUpstreamProviderCredentialsForPath(
+    env,
+    db,
+    sourceConfig,
+    input.endpointPath,
+  );
+  const groups = new Map<
+    string,
+    ResolvedUpstreamProviderCredential
+  >();
+  for (const credential of credentials) {
+    const existing = groups.get(credential.capacityGroupId);
+    if (
+      !existing ||
+      credential.effectiveRpsPerEndpoint >
+        existing.effectiveRpsPerEndpoint
+    ) {
+      groups.set(credential.capacityGroupId, credential);
+    }
+  }
+  const existingLease = await db
+    .prepare(
+      `SELECT capacity_group_id, endpoint_path, planned_requests
+       FROM upstream_capacity_leases
+       WHERE context_type = 'x402' AND context_id = ?
+         AND status IN ('reserved', 'consuming')
+         AND datetime(expires_at) > datetime('now')`,
+    )
+    .bind(input.batchId)
+    .first<{
+      capacity_group_id: string;
+      endpoint_path: string;
+      planned_requests: number;
+    }>();
+  if (
+    existingLease &&
+    existingLease.endpoint_path === input.endpointPath &&
+    Number(existingLease.planned_requests) === input.plannedRequests &&
+    groups.has(existingLease.capacity_group_id)
+  ) {
+    return existingLease.capacity_group_id;
+  }
+  const windowSeconds = clampInteger(
+    env.X402_CAPACITY_WINDOW_SECONDS,
+    5,
+    1,
+    30,
+  );
+  const expiresAt = new Date(
+    Date.now() + Math.max(15, windowSeconds * 3) * 1_000,
+  ).toISOString();
+  for (const group of [...groups.values()].sort(
+    (left, right) =>
+      right.effectiveRpsPerEndpoint -
+        left.effectiveRpsPerEndpoint ||
+      left.capacityGroupId.localeCompare(right.capacityGroupId),
+  )) {
+    const capacity = Math.max(
+      1,
+      group.effectiveRpsPerEndpoint * windowSeconds,
+    );
+    if (input.plannedRequests > capacity) continue;
+    const reserved = await db
+      .prepare(
+        `INSERT INTO upstream_capacity_leases
+         (id, context_type, context_id, capacity_group_id, endpoint_path,
+          planned_requests, status, expires_at, created_at, updated_at)
+         SELECT ?, 'x402', ?, ?, ?, ?, 'reserved', ?,
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+         WHERE COALESCE((
+           SELECT SUM(planned_requests)
+           FROM upstream_capacity_leases
+           WHERE capacity_group_id = ? AND endpoint_path = ?
+             AND status IN ('reserved', 'consuming')
+             AND datetime(expires_at) > datetime('now')
+         ), 0) + ? <= ?
+         ON CONFLICT(context_type, context_id) DO UPDATE SET
+           capacity_group_id = excluded.capacity_group_id,
+           endpoint_path = excluded.endpoint_path,
+           planned_requests = excluded.planned_requests,
+           status = 'reserved',
+           expires_at = excluded.expires_at,
+           updated_at = CURRENT_TIMESTAMP
+         WHERE upstream_capacity_leases.status IN ('released', 'expired')
+            OR datetime(upstream_capacity_leases.expires_at) <= datetime('now')
+         RETURNING capacity_group_id`,
+      )
+      .bind(
+        `upl_${randomBase64Url(18)}`,
+        input.batchId,
+        group.capacityGroupId,
+        input.endpointPath,
+        input.plannedRequests,
+        expiresAt,
+        group.capacityGroupId,
+        input.endpointPath,
+        input.plannedRequests,
+        capacity,
+      )
+      .first<{ capacity_group_id: string }>();
+    if (reserved?.capacity_group_id) {
+      return reserved.capacity_group_id;
+    }
+  }
+  throw new PlatformError(
+    429,
+    "x402_capacity_unavailable",
+    "当前共享上游容量无法在同步执行窗口内接纳该批次；未生成或接受付款。",
+    {
+      "retry-after": "1",
+      "x-ratelimit-scope": "upstream-x402",
+    },
+  );
+}
+
+async function setX402CapacityLeaseStatus(
+  db: D1Database,
+  batchId: string,
+  status: "consuming" | "released" | "expired",
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE upstream_capacity_leases
+       SET status = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE context_type = 'x402' AND context_id = ?`,
+    )
+    .bind(status, batchId)
+    .run();
 }
 
 async function x402BatchByIdempotency(
@@ -5581,6 +6682,813 @@ function safeEvidenceScalar(value: unknown): string | null {
   return text;
 }
 
+type RateLimitDecision = {
+  allowed: boolean;
+  limit: number;
+  burst: number;
+  remaining: number;
+  retryAfterSeconds: number;
+};
+
+async function consumeGcraRateLimit(
+  db: D1Database,
+  scope: "api_key" | "account",
+  subjectId: string,
+  rps: number,
+  burst: number,
+): Promise<RateLimitDecision> {
+  const normalizedRps = Math.max(1, Math.min(1000, Math.trunc(rps)));
+  const normalizedBurst = Math.max(
+    normalizedRps,
+    Math.min(2000, Math.trunc(burst)),
+  );
+  const intervalMs = Math.max(1, Math.ceil(1000 / normalizedRps));
+  const toleranceMs = intervalMs * Math.max(0, normalizedBurst - 1);
+  const nowMs = Date.now();
+  const nextTat = nowMs + intervalMs;
+  const reserved = await db
+    .prepare(
+      `INSERT INTO request_rate_limit_state
+       (scope, subject_id, theoretical_arrival_ms, updated_at)
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(scope, subject_id) DO UPDATE SET
+         theoretical_arrival_ms =
+           MAX(request_rate_limit_state.theoretical_arrival_ms, ?) + ?,
+         updated_at = CURRENT_TIMESTAMP
+       WHERE MAX(request_rate_limit_state.theoretical_arrival_ms, ?) - ? <= ?
+       RETURNING theoretical_arrival_ms`,
+    )
+    .bind(
+      scope,
+      subjectId,
+      nextTat,
+      nowMs,
+      intervalMs,
+      nowMs,
+      toleranceMs,
+      nowMs,
+    )
+    .first<{ theoretical_arrival_ms: number }>();
+  const currentTat =
+    reserved?.theoretical_arrival_ms ??
+    (
+      await db
+        .prepare(
+          `SELECT theoretical_arrival_ms
+           FROM request_rate_limit_state
+           WHERE scope = ? AND subject_id = ?`,
+        )
+        .bind(scope, subjectId)
+        .first<{ theoretical_arrival_ms: number }>()
+    )?.theoretical_arrival_ms ??
+    nowMs;
+  const queued = Math.max(0, currentTat - nowMs);
+  const remaining = reserved
+    ? Math.max(0, normalizedBurst - Math.ceil(queued / intervalMs))
+    : 0;
+  const retryAfterMs = Math.max(
+    0,
+    currentTat - toleranceMs - nowMs,
+  );
+  return {
+    allowed: Boolean(reserved),
+    limit: normalizedRps,
+    burst: normalizedBurst,
+    remaining,
+    retryAfterSeconds: Math.max(1, Math.ceil(retryAfterMs / 1000)),
+  };
+}
+
+function rateLimitHeaders(
+  decision: RateLimitDecision,
+  scope: "api-key" | "account",
+): Headers {
+  return new Headers({
+    "x-ratelimit-limit": String(decision.limit),
+    "x-ratelimit-remaining": String(decision.remaining),
+    "x-ratelimit-reset": String(
+      Math.floor(Date.now() / 1000) + decision.retryAfterSeconds,
+    ),
+    "x-ratelimit-scope": scope,
+    "retry-after": String(decision.retryAfterSeconds),
+  });
+}
+
+type RoutedUpstreamResult = {
+  response: Response;
+  credential: ResolvedUpstreamProviderCredential;
+  attemptCount: number;
+};
+
+function stableRoutingUnit(value: string): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return (hash + 1) / 0x1_0000_0001;
+}
+
+function selectWeightedCredential(
+  credentials: ResolvedUpstreamProviderCredential[],
+  requestId: string,
+): ResolvedUpstreamProviderCredential {
+  return [...credentials].sort((left, right) => {
+    const healthPenalty = (credential: ResolvedUpstreamProviderCredential) =>
+      credential.healthState === "healthy" ? 0 : 1_000_000;
+    const leftScore =
+      left.priority * 10_000_000 +
+      healthPenalty(left) +
+      (left.ewmaLatencyMs ?? 0) -
+      Math.log(
+        stableRoutingUnit(`${requestId}:${left.fingerprint}`),
+      ) /
+        Math.max(1, left.weight);
+    const rightScore =
+      right.priority * 10_000_000 +
+      healthPenalty(right) +
+      (right.ewmaLatencyMs ?? 0) -
+      Math.log(
+        stableRoutingUnit(`${requestId}:${right.fingerprint}`),
+      ) /
+        Math.max(1, right.weight);
+    return leftScore - rightScore;
+  })[0];
+}
+
+async function consumeUpstreamCapacity(
+  db: D1Database,
+  credential: ResolvedUpstreamProviderCredential,
+  endpointPath: string,
+  endpointDeclaredRps: number | null,
+  burst: number,
+  contextType: "api_key" | "x402",
+  x402RateShareBps: number,
+): Promise<RateLimitDecision> {
+  const routeHealth = await db
+    .prepare(
+      `SELECT state, cooldown_until
+       FROM upstream_route_health
+       WHERE capacity_group_id = ? AND endpoint_path = ?`,
+    )
+    .bind(credential.capacityGroupId, endpointPath)
+    .first<{
+      state: string;
+      cooldown_until: string | null;
+    }>();
+  const nowMs = Date.now();
+  if (
+    routeHealth?.cooldown_until &&
+    Date.parse(routeHealth.cooldown_until) > nowMs
+  ) {
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil(
+        (Date.parse(routeHealth.cooldown_until) - nowMs) / 1000,
+      ),
+    );
+    return {
+      allowed: false,
+      limit: credential.effectiveRpsPerEndpoint,
+      burst,
+      remaining: 0,
+      retryAfterSeconds,
+    };
+  }
+  const groupEffectiveRps = Math.max(
+    1,
+    Math.floor(
+      (credential.configuredRpsPerEndpoint *
+        credential.headroomBps) /
+        10_000,
+    ),
+  );
+  if (contextType === "x402") {
+    const x402Rps = Math.max(
+      1,
+      Math.floor((groupEffectiveRps * x402RateShareBps) / 10_000),
+    );
+    const x402Decision = await consumeUpstreamRateBucket(
+      db,
+      credential.capacityGroupId,
+      "__x402__",
+      x402Rps,
+      Math.min(burst, Math.max(1, x402Rps)),
+    );
+    if (!x402Decision.allowed) return x402Decision;
+  }
+  const groupDecision = await consumeUpstreamRateBucket(
+    db,
+    credential.capacityGroupId,
+    "__all__",
+    groupEffectiveRps,
+    burst,
+  );
+  if (!groupDecision.allowed) return groupDecision;
+
+  if (
+    endpointDeclaredRps == null ||
+    endpointDeclaredRps < 1 ||
+    endpointDeclaredRps >= credential.configuredRpsPerEndpoint
+  ) {
+    return groupDecision;
+  }
+  const endpointEffectiveRps = Math.max(
+    1,
+    Math.floor(
+      (endpointDeclaredRps * credential.headroomBps) / 10_000,
+    ),
+  );
+  const endpointDecision = await consumeUpstreamRateBucket(
+    db,
+    credential.capacityGroupId,
+    endpointPath,
+    endpointEffectiveRps,
+    burst,
+  );
+  return endpointDecision.allowed
+    ? {
+        ...endpointDecision,
+        remaining: Math.min(
+          endpointDecision.remaining,
+          groupDecision.remaining,
+        ),
+      }
+    : endpointDecision;
+}
+
+async function consumeUpstreamRateBucket(
+  db: D1Database,
+  capacityGroupId: string,
+  bucketPath: string,
+  effectiveRps: number,
+  burst: number,
+): Promise<RateLimitDecision> {
+  const nowMs = Date.now();
+  const normalizedBurst = Math.max(
+    1,
+    Math.min(Math.max(1, burst), effectiveRps * 2),
+  );
+  const intervalMs = Math.max(1, Math.ceil(1000 / effectiveRps));
+  const toleranceMs = intervalMs * Math.max(0, normalizedBurst - 1);
+  const nextTat = nowMs + intervalMs;
+  const reserved = await db
+    .prepare(
+      `INSERT INTO upstream_rate_limit_state
+       (capacity_group_id, endpoint_path, theoretical_arrival_ms, updated_at)
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(capacity_group_id, endpoint_path) DO UPDATE SET
+         theoretical_arrival_ms =
+           MAX(upstream_rate_limit_state.theoretical_arrival_ms, ?) + ?,
+         updated_at = CURRENT_TIMESTAMP
+       WHERE MAX(upstream_rate_limit_state.theoretical_arrival_ms, ?) - ? <= ?
+       RETURNING theoretical_arrival_ms`,
+    )
+    .bind(
+      capacityGroupId,
+      bucketPath,
+      nextTat,
+      nowMs,
+      intervalMs,
+      nowMs,
+      toleranceMs,
+      nowMs,
+    )
+    .first<{ theoretical_arrival_ms: number }>();
+  const currentTat =
+    reserved?.theoretical_arrival_ms ??
+    (
+      await db
+        .prepare(
+          `SELECT theoretical_arrival_ms
+           FROM upstream_rate_limit_state
+           WHERE capacity_group_id = ? AND endpoint_path = ?`,
+        )
+        .bind(capacityGroupId, bucketPath)
+        .first<{ theoretical_arrival_ms: number }>()
+    )?.theoretical_arrival_ms ??
+    nowMs;
+  return {
+    allowed: Boolean(reserved),
+    limit: effectiveRps,
+    burst: normalizedBurst,
+    remaining: reserved
+      ? Math.max(
+          0,
+          normalizedBurst -
+            Math.ceil(Math.max(0, currentTat - nowMs) / intervalMs),
+        )
+      : 0,
+    retryAfterSeconds: Math.max(
+      1,
+      Math.ceil(
+        Math.max(0, currentTat - toleranceMs - nowMs) / 1000,
+      ),
+    ),
+  };
+}
+
+async function recordUpstreamAttemptHealth(
+  db: D1Database,
+  credential: ResolvedUpstreamProviderCredential,
+  endpointPath: string,
+  statusCode: number | null,
+  errorCode: string | null,
+  latencyMs: number,
+  retryAfterSeconds: number,
+): Promise<void> {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const credentialState =
+    statusCode === 401 || statusCode === 403
+      ? "auth_failed"
+      : statusCode === 402
+        ? "balance_low"
+        : "healthy";
+  const credentialCooldown =
+    credentialState === "auth_failed"
+      ? new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString()
+      : credentialState === "balance_low"
+        ? new Date(now.getTime() + 5 * 60 * 1000).toISOString()
+        : null;
+  const routeState =
+    statusCode === 429
+      ? "rate_limited"
+      : statusCode == null || statusCode === 408 || statusCode >= 500
+        ? "degraded"
+        : "healthy";
+  const routeCooldown =
+    statusCode === 429
+      ? new Date(
+          now.getTime() + Math.max(1, retryAfterSeconds) * 1000,
+        ).toISOString()
+      : statusCode == null || statusCode === 408 || statusCode >= 500
+        ? new Date(now.getTime() + 1000).toISOString()
+        : null;
+  if (credential.id) {
+    await db
+      .prepare(
+        `INSERT INTO upstream_credential_health
+         (credential_id, state, consecutive_failures, ewma_latency_ms,
+          cooldown_until, last_status_code, last_error_code,
+          last_success_at, last_failure_at, updated_at)
+         VALUES (?, ?, CASE WHEN ? = 'healthy' THEN 0 ELSE 1 END, ?, ?, ?, ?,
+                 CASE WHEN ? = 200 THEN ? ELSE NULL END,
+                 CASE WHEN ? = 'healthy' THEN NULL ELSE ? END, ?)
+         ON CONFLICT(credential_id) DO UPDATE SET
+           state = excluded.state,
+           consecutive_failures =
+             CASE WHEN excluded.state = 'healthy' THEN 0
+                  ELSE upstream_credential_health.consecutive_failures + 1
+             END,
+           ewma_latency_ms =
+             CASE WHEN upstream_credential_health.ewma_latency_ms IS NULL
+                    THEN excluded.ewma_latency_ms
+                  ELSE CAST(
+                    upstream_credential_health.ewma_latency_ms * 0.8 +
+                    excluded.ewma_latency_ms * 0.2 AS INTEGER
+                  )
+             END,
+           cooldown_until = excluded.cooldown_until,
+           last_status_code = excluded.last_status_code,
+           last_error_code = excluded.last_error_code,
+           last_success_at =
+             CASE WHEN excluded.last_status_code = 200
+                    THEN excluded.last_success_at
+                  ELSE upstream_credential_health.last_success_at END,
+           last_failure_at =
+             CASE WHEN excluded.state = 'healthy'
+                    THEN upstream_credential_health.last_failure_at
+                  ELSE excluded.last_failure_at END,
+           updated_at = excluded.updated_at`,
+      )
+      .bind(
+        credential.id,
+        credentialState,
+        credentialState,
+        latencyMs,
+        credentialCooldown,
+        credentialState,
+        errorCode,
+        statusCode,
+        nowIso,
+        statusCode,
+        nowIso,
+        nowIso,
+      )
+      .run();
+  }
+  await db
+    .prepare(
+      `INSERT INTO upstream_route_health
+       (capacity_group_id, endpoint_path, state, consecutive_failures,
+        consecutive_rate_limits, cooldown_until, last_status_code,
+        last_failure_at, last_success_at, updated_at)
+       VALUES (?, ?, ?,
+               CASE WHEN ? = 'healthy' THEN 0 ELSE 1 END,
+               CASE WHEN ? = 429 THEN 1 ELSE 0 END,
+               ?, ?,
+               CASE WHEN ? = 'healthy' THEN NULL ELSE ? END,
+               CASE WHEN ? = 200 THEN ? ELSE NULL END, ?)
+       ON CONFLICT(capacity_group_id, endpoint_path) DO UPDATE SET
+         state = excluded.state,
+         consecutive_failures =
+           CASE WHEN excluded.state = 'healthy' THEN 0
+                ELSE upstream_route_health.consecutive_failures + 1 END,
+         consecutive_rate_limits =
+           CASE WHEN excluded.last_status_code = 429
+                  THEN upstream_route_health.consecutive_rate_limits + 1
+                WHEN excluded.last_status_code = 200 THEN 0
+                ELSE upstream_route_health.consecutive_rate_limits END,
+         cooldown_until = excluded.cooldown_until,
+         last_status_code = excluded.last_status_code,
+         last_failure_at =
+           CASE WHEN excluded.state = 'healthy'
+                  THEN upstream_route_health.last_failure_at
+                ELSE excluded.last_failure_at END,
+         last_success_at =
+           CASE WHEN excluded.last_status_code = 200
+                  THEN excluded.last_success_at
+                ELSE upstream_route_health.last_success_at END,
+         updated_at = excluded.updated_at`,
+    )
+    .bind(
+      credential.capacityGroupId,
+      endpointPath,
+      routeState,
+      routeState,
+      routeState,
+      routeCooldown,
+      statusCode,
+      statusCode,
+      nowIso,
+      statusCode,
+      nowIso,
+      nowIso,
+    )
+    .run();
+}
+
+async function logUpstreamAttempt(
+  db: D1Database,
+  input: {
+    contextType: "api_key" | "x402";
+    contextId: string;
+    endpointPath: string;
+    credential: ResolvedUpstreamProviderCredential;
+    attemptNumber: number;
+    outcome: string;
+    statusCode: number | null;
+    latencyMs: number;
+    upstreamRequestId: string | null;
+    targetCount: number;
+    paginationUnitCount: number;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO upstream_request_attempts
+       (id, context_type, context_id, endpoint_path, capacity_group_id,
+        credential_id, credential_fingerprint, attempt_number, outcome,
+        status_code, latency_ms, upstream_request_id, target_count,
+        pagination_unit_count, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+               CURRENT_TIMESTAMP)`,
+    )
+    .bind(
+      `upa_${randomBase64Url(18)}`,
+      input.contextType,
+      input.contextId,
+      input.endpointPath,
+      input.credential.capacityGroupId,
+      input.credential.id,
+      input.credential.fingerprint,
+      input.attemptNumber,
+      input.outcome,
+      input.statusCode,
+      input.latencyMs,
+      input.upstreamRequestId,
+      input.targetCount,
+      input.paginationUnitCount,
+    )
+    .run();
+}
+
+async function upstreamAttemptCountForContext(
+  db: D1Database,
+  contextType: "api_key" | "x402",
+  contextId: string,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS count
+       FROM upstream_request_attempts
+       WHERE context_type = ? AND context_id = ?`,
+    )
+    .bind(contextType, contextId)
+    .first<{ count: number }>();
+  return Number(row?.count ?? 0);
+}
+
+async function recordReturnedItemsForLastUpstreamAttempt(
+  db: D1Database,
+  contextType: "api_key" | "x402",
+  contextId: string,
+  returnedItemCount: number | null,
+): Promise<void> {
+  if (returnedItemCount === null) return;
+  await db
+    .prepare(
+      `UPDATE upstream_request_attempts
+       SET returned_item_count = ?
+       WHERE id = (
+         SELECT id
+         FROM upstream_request_attempts
+         WHERE context_type = ? AND context_id = ?
+         ORDER BY attempt_number DESC
+         LIMIT 1
+       )`,
+    )
+    .bind(returnedItemCount, contextType, contextId)
+    .run();
+}
+
+function requestTargetCountForCapability(
+  url: URL,
+  requestBody: unknown,
+  capability: EndpointCapability,
+): number {
+  if (
+    !capability.nativeBatchSupported ||
+    !capability.targetField ||
+    !capability.targetEncoding
+  ) {
+    return 1;
+  }
+  const raw =
+    capability.targetEncoding === "csv_query"
+      ? url.searchParams.get(capability.targetField)
+      : isPlainRecord(requestBody)
+        ? requestBody[capability.targetField]
+        : null;
+  if (raw == null) return 1;
+  try {
+    return nativeBatchTargetValues(
+      raw,
+      capability.targetEncoding,
+    ).length;
+  } catch {
+    return 1;
+  }
+}
+
+async function routedUpstreamFetch(input: {
+  env: PlatformEnv;
+  db: D1Database;
+  sourceConfig: UpstreamSourceConfig;
+  endpointPath: string;
+  endpointDeclaredRps: number | null;
+  method: string;
+  url: URL;
+  body?: string;
+  accept: string;
+  userAgent: string;
+  contextType: "api_key" | "x402";
+  contextId: string;
+  waitBudgetMs: number;
+  targetCount?: number;
+  paginationUnitCount?: number;
+}): Promise<RoutedUpstreamResult> {
+  const candidates = await resolveUpstreamProviderCredentialsForPath(
+    input.env,
+    input.db,
+    input.sourceConfig,
+    input.endpointPath,
+  );
+  if (candidates.length === 0) {
+    throw new PlatformError(
+      503,
+      "upstream_temporarily_unavailable",
+      "当前接口没有健康且具备授权范围的上游路由。",
+      { "retry-after": "5" },
+    );
+  }
+  const excludedCredentialIds = new Set<string>();
+  const excludedGroupIds = new Set<string>();
+  let lastResponse: Response | null = null;
+  let lastResponseCredential: ResolvedUpstreamProviderCredential | null =
+    null;
+  let lastResponseAttemptCount = 0;
+  let lastNetworkError = false;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const deadline = Date.now() + Math.max(0, input.waitBudgetMs);
+    let selected: ResolvedUpstreamProviderCredential | null = null;
+    let lastCapacityDecision: RateLimitDecision | null = null;
+    while (!selected) {
+      const eligible = candidates.filter(
+        (candidate) =>
+          !excludedGroupIds.has(candidate.capacityGroupId) &&
+          (!candidate.id || !excludedCredentialIds.has(candidate.id)),
+      );
+      const groups = new Map<
+        string,
+        ResolvedUpstreamProviderCredential[]
+      >();
+      for (const candidate of eligible) {
+        const group = groups.get(candidate.capacityGroupId) ?? [];
+        group.push(candidate);
+        groups.set(candidate.capacityGroupId, group);
+      }
+      for (const groupCandidates of groups.values()) {
+        const credential = selectWeightedCredential(
+          groupCandidates,
+          `${input.contextId}:${attempt}`,
+        );
+        const decision = await consumeUpstreamCapacity(
+          input.db,
+          credential,
+          input.endpointPath,
+          input.endpointDeclaredRps,
+          clampInteger(
+            input.env.UPSTREAM_RATE_LIMIT_BURST,
+            2,
+            1,
+            100,
+          ),
+          input.contextType,
+          clampInteger(
+            input.env.UPSTREAM_X402_RATE_SHARE_BPS,
+            2500,
+            1000,
+            5000,
+          ),
+        );
+        if (decision.allowed) {
+          selected = credential;
+          break;
+        }
+        if (
+          !lastCapacityDecision ||
+          decision.retryAfterSeconds <
+            lastCapacityDecision.retryAfterSeconds
+        ) {
+          lastCapacityDecision = decision;
+        }
+      }
+      if (selected) break;
+      if (
+        groups.size === 0 ||
+        Date.now() >= deadline ||
+        !lastCapacityDecision
+      ) {
+        if (lastResponse && lastResponseCredential) {
+          return {
+            response: lastResponse,
+            credential: lastResponseCredential,
+            attemptCount: lastResponseAttemptCount,
+          };
+        }
+        throw new PlatformError(
+          429,
+          "upstream_capacity_exhausted",
+          "当前接口的共享上游容量已满，请稍后重试。本次未扣费。",
+          {
+            "retry-after": String(
+              lastCapacityDecision?.retryAfterSeconds ?? 1,
+            ),
+            "x-ratelimit-scope": "upstream",
+          },
+        );
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(125, deadline - Date.now())),
+      );
+    }
+
+    if (lastResponse) {
+      await lastResponse.body?.cancel("retry alternate upstream route");
+      lastResponse = null;
+      lastResponseCredential = null;
+      lastResponseAttemptCount = 0;
+    }
+    const headers = new Headers({
+      authorization: `Bearer ${selected.secret}`,
+      accept: input.accept,
+      "user-agent": input.userAgent,
+    });
+    if (input.body != null) {
+      headers.set("content-type", "application/json");
+    }
+    const startedAt = Date.now();
+    let response: Response | null = null;
+    let errorCode: string | null = null;
+    try {
+      response = await fetch(input.url, {
+        method: input.method,
+        headers,
+        body: input.body,
+        redirect: "error",
+        signal: AbortSignal.timeout(
+          clampInteger(
+            input.env.UPSTREAM_TIMEOUT_MS,
+            45_000,
+            30_000,
+            60_000,
+          ),
+        ),
+      });
+    } catch {
+      lastNetworkError = true;
+      errorCode = "network_error";
+    }
+    const latencyMs = Date.now() - startedAt;
+    const statusCode = response?.status ?? null;
+    const retryAfterSeconds = Math.max(
+      1,
+      Number(response?.headers.get("retry-after")) || 1,
+    );
+    await recordUpstreamAttemptHealth(
+      input.db,
+      selected,
+      input.endpointPath,
+      statusCode,
+      errorCode,
+      latencyMs,
+      retryAfterSeconds,
+    );
+    await logUpstreamAttempt(input.db, {
+      contextType: input.contextType,
+      contextId: input.contextId,
+      endpointPath: input.endpointPath,
+      credential: selected,
+      attemptNumber: attempt,
+      outcome:
+        statusCode === 200
+          ? "success"
+          : errorCode ??
+            (statusCode === 429 ? "rate_limited" : "upstream_error"),
+      statusCode,
+      latencyMs,
+      upstreamRequestId:
+        response?.headers.get("x-request-id")?.slice(0, 160) ?? null,
+      targetCount: Math.max(1, input.targetCount ?? 1),
+      paginationUnitCount: Math.max(
+        0,
+        input.paginationUnitCount ?? 0,
+      ),
+    });
+    if (selected.id) {
+      await input.db
+        .prepare(
+          `UPDATE upstream_credentials
+           SET last_used_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND revoked_at IS NULL`,
+        )
+        .bind(selected.id)
+        .run();
+    }
+    if (response?.status === 200) {
+      return { response, credential: selected, attemptCount: attempt };
+    }
+    if (response) {
+      lastResponse = response;
+      lastResponseCredential = selected;
+      lastResponseAttemptCount = attempt;
+    }
+    // Only failures that can be attributed to one credential may switch to
+    // another Key inside the same capacity group. Transport/server failures
+    // are treated as account-route failures so duplicate Keys never pretend
+    // to create another upstream account or hide a provider-wide outage.
+    const credentialSpecific = statusCode === 401 || statusCode === 403;
+    const groupSpecific =
+      statusCode === 402 ||
+      statusCode === 408 ||
+      statusCode === 429 ||
+      (statusCode != null && statusCode >= 500) ||
+      statusCode == null;
+    const retryable = credentialSpecific || groupSpecific;
+    if (!retryable || attempt === 2) {
+      if (response) {
+        return { response, credential: selected, attemptCount: attempt };
+      }
+      break;
+    }
+    if (credentialSpecific && selected.id) {
+      excludedCredentialIds.add(selected.id);
+    } else {
+      excludedGroupIds.add(selected.capacityGroupId);
+    }
+  }
+  throw new PlatformError(
+    502,
+    "upstream_temporarily_unavailable",
+    lastNetworkError
+      ? "上游数据服务暂时不可用，本次未扣费。"
+      : "所有健康上游路由均调用失败，本次未扣费。",
+    { "retry-after": "1" },
+  );
+}
+
 async function handleProxyRequest(
   request: Request,
   env: PlatformEnv,
@@ -5672,8 +7580,9 @@ async function handleProxyRequest(
     catalog = await db
       .prepare(
         `SELECT path, platform, http_method, data_type, tags_json, surface,
-                operation_id, upstream_price_usd_micros,
-                customer_price_usd_micros, price_verified,
+                operation_id, parameter_schema_json,
+                upstream_price_usd_micros,
+                customer_price_usd_micros, rate_limit_rps, price_verified,
                 enabled, read_only, safety_classification,
                 safety_policy_version, sync_generation,
                 EXISTS(
@@ -5685,6 +7594,42 @@ async function handleProxyRequest(
                 (SELECT request_count
                  FROM upstream_rate_limit_buckets LIMIT 1)
                   AS _upstream_rate_limit_schema,
+                (SELECT theoretical_arrival_ms
+                 FROM request_rate_limit_state LIMIT 1)
+                  AS _request_rate_limit_state_schema,
+                (SELECT theoretical_arrival_ms
+                 FROM upstream_rate_limit_state LIMIT 1)
+                  AS _upstream_rate_limit_state_schema,
+                (SELECT configured_rps_per_endpoint || headroom_bps
+                 FROM upstream_capacity_groups LIMIT 1)
+                  AS _upstream_capacity_groups_schema,
+                (SELECT routing_enabled || priority || weight
+                 FROM upstream_credentials LIMIT 1)
+                  AS _upstream_routing_credentials_schema,
+                (SELECT state || consecutive_failures
+                 FROM upstream_credential_health LIMIT 1)
+                  AS _upstream_credential_health_schema,
+                (SELECT state || consecutive_rate_limits
+                 FROM upstream_route_health LIMIT 1)
+                  AS _upstream_route_health_schema,
+                (SELECT outcome || attempt_number
+                 FROM upstream_request_attempts LIMIT 1)
+                  AS _upstream_attempts_schema,
+                (SELECT target_count || pagination_unit_count
+                 FROM upstream_request_attempts LIMIT 1)
+                  AS _upstream_attempt_metrics_schema,
+                (SELECT execution_mode || evidence_status
+                 FROM endpoint_capabilities LIMIT 1)
+                  AS _endpoint_capabilities_schema,
+                (SELECT planned_requests || status
+                 FROM upstream_capacity_leases LIMIT 1)
+                  AS _upstream_capacity_leases_schema,
+                (SELECT rate_limit_rps || rate_limit_burst
+                 FROM api_keys LIMIT 1)
+                  AS _api_key_rate_limit_schema,
+                (SELECT rate_limit_rps || rate_limit_burst
+                 FROM users LIMIT 1)
+                  AS _account_rate_limit_schema,
                 (SELECT request_count
                  FROM payment_rate_limit_buckets LIMIT 1)
                   AS _payment_rate_limit_schema,
@@ -5816,6 +7761,19 @@ async function handleProxyRequest(
     }
   }
   validateCatalogProxyInputs(url, parsedUpstreamBody);
+  const catalogCapability = endpointCapabilityFor(
+    catalog.path,
+    safeStoredJson(catalog.parameter_schema_json),
+    "complete",
+    catalog.http_method as "GET" | "POST",
+  );
+  const requestTargetCount = requestTargetCountForCapability(
+    url,
+    parsedUpstreamBody,
+    catalogCapability,
+  );
+  const paginationUnitCount =
+    catalogCapability.executionMode === "paginated" ? 1 : 0;
 
   const secret = bearerToken(request);
   if (!secret || !secret.startsWith("rb_live_")) {
@@ -5828,7 +7786,10 @@ async function handleProxyRequest(
   const keyHash = await sha256Hex(secret);
   const key = await db
     .prepare(
-      `SELECT k.id, k.user_id, k.rate_limit_rpm
+      `SELECT k.id, k.user_id, k.rate_limit_rpm,
+              k.rate_limit_rps, k.rate_limit_burst,
+              u.rate_limit_rps AS account_rate_limit_rps,
+              u.rate_limit_burst AS account_rate_limit_burst
        FROM api_keys k
        JOIN users u ON u.id = k.user_id
        WHERE k.key_hash = ? AND k.revoked_at IS NULL AND u.status = 'active'`,
@@ -5951,27 +7912,41 @@ async function handleProxyRequest(
     );
   }
 
-  const minuteBucket = new Date().toISOString().slice(0, 16);
-  const rateSlot = await db
-    .prepare(
-      `INSERT INTO rate_limit_buckets
-       (api_key_id, minute_bucket, request_count, updated_at)
-       VALUES (?, ?, 1, CURRENT_TIMESTAMP)
-       ON CONFLICT(api_key_id, minute_bucket) DO UPDATE SET
-         request_count = rate_limit_buckets.request_count + 1,
-         updated_at = CURRENT_TIMESTAMP
-       WHERE rate_limit_buckets.request_count < ?
-       RETURNING request_count`,
-    )
-    .bind(key.id, minuteBucket, key.rate_limit_rpm)
-    .first<{ request_count: number }>();
-  if (!rateSlot) {
+  const keyRateDecision = await consumeGcraRateLimit(
+    db,
+    "api_key",
+    key.id,
+    key.rate_limit_rps,
+    key.rate_limit_burst,
+  );
+  if (!keyRateDecision.allowed) {
     throw new PlatformError(
       429,
-      "rate_limit_exceeded",
-      `已达到 ${key.rate_limit_rpm} RPM 限制，请稍后重试。`,
+      "customer_rate_limit_exceeded",
+      `当前 API Key 已达到 ${keyRateDecision.limit} RPS 限制，请稍后重试。`,
+      rateLimitHeaders(keyRateDecision, "api-key"),
     );
   }
+  const accountRateDecision = await consumeGcraRateLimit(
+    db,
+    "account",
+    key.user_id,
+    key.account_rate_limit_rps,
+    key.account_rate_limit_burst,
+  );
+  if (!accountRateDecision.allowed) {
+    throw new PlatformError(
+      429,
+      "customer_rate_limit_exceeded",
+      `当前账户已达到 ${accountRateDecision.limit} RPS 聚合限制，请稍后重试。`,
+      rateLimitHeaders(accountRateDecision, "account"),
+    );
+  }
+  const customerRateHeaders = rateLimitHeaders(
+    accountRateDecision,
+    "account",
+  );
+  customerRateHeaders.delete("retry-after");
 
   const reservation = await db
     .prepare(
@@ -6039,6 +8014,22 @@ async function handleProxyRequest(
         )
         .run(),
     );
+    ctx.waitUntil(
+      db
+        .prepare(
+          `DELETE FROM request_rate_limit_state
+           WHERE datetime(updated_at) < datetime('now', '-2 days')`,
+        )
+        .run(),
+    );
+    ctx.waitUntil(
+      db
+        .prepare(
+          `DELETE FROM upstream_rate_limit_state
+           WHERE datetime(updated_at) < datetime('now', '-10 minutes')`,
+        )
+        .run(),
+    );
   }
 
   const costUsdMicros = catalog.customer_price_usd_micros;
@@ -6076,37 +8067,6 @@ async function handleProxyRequest(
     );
   }
 
-  const upstreamSlot = await db
-    .prepare(
-      `INSERT INTO upstream_rate_limit_buckets
-       (endpoint_path, second_bucket, request_count, updated_at)
-       VALUES (?, ?, 1, CURRENT_TIMESTAMP)
-       ON CONFLICT(endpoint_path, second_bucket) DO UPDATE SET
-         request_count = upstream_rate_limit_buckets.request_count + 1,
-         updated_at = CURRENT_TIMESTAMP
-       WHERE upstream_rate_limit_buckets.request_count < ?
-       RETURNING request_count`,
-    )
-    .bind(
-      "__global__",
-      new Date().toISOString().slice(0, 19),
-      clampInteger(env.UPSTREAM_RATE_LIMIT_RPS, 8, 1, 100),
-    )
-    .first<{ request_count: number }>();
-  if (!upstreamSlot) {
-    await refundRequest(
-      db,
-      key.user_id,
-      ledgerReferenceId,
-      costUsdMicros,
-    );
-    await markProxyRequest(db, requestId, "rate_limited", 429);
-    throw new PlatformError(
-      429,
-      "upstream_rate_limit_exceeded",
-      "共享上游已达到瞬时速率上限，请在 1 秒后重试。本次未扣费。",
-    );
-  }
   await markProxyRequest(db, requestId, "charged", null);
 
   const upstreamUrl = new URL(
@@ -6116,45 +8076,42 @@ async function handleProxyRequest(
     ),
   );
   upstreamUrl.search = url.search;
-  const upstreamHeaders = new Headers({
-    authorization: `Bearer ${upstreamCredential.secret}`,
-    accept: request.headers.get("accept") ?? "application/json",
-    "user-agent": "RelayBase-API/1.0",
-  });
-  if (upstreamBody != null) {
-    upstreamHeaders.set("content-type", "application/json");
-  }
-
   const startedAt = Date.now();
-  if (upstreamCredential.id) {
-    ctx.waitUntil(
-      db
-        .prepare(
-          `UPDATE upstream_credentials
-           SET last_used_at = CURRENT_TIMESTAMP
-           WHERE id = ? AND provider = 'primary' AND revoked_at IS NULL
-             AND EXISTS (
-               SELECT 1 FROM upstream_credential_state
-               WHERE provider = 'primary'
-                 AND active_credential_id = upstream_credentials.id
-             )`,
-        )
-        .bind(upstreamCredential.id)
-        .run(),
-    );
-  }
   let upstreamResponse: Response;
+  let upstreamAttemptCount = 0;
   try {
-    upstreamResponse = await fetch(upstreamUrl, {
+    const routed = await routedUpstreamFetch({
+      env,
+      db,
+      sourceConfig,
+      endpointPath: url.pathname,
+      endpointDeclaredRps: catalog.rate_limit_rps,
       method: request.method,
-      headers: upstreamHeaders,
+      url: upstreamUrl,
       body: upstreamBody,
-      redirect: "error",
-      signal: AbortSignal.timeout(
-        clampInteger(env.UPSTREAM_TIMEOUT_MS, 45_000, 30_000, 60_000),
+      accept: request.headers.get("accept") ?? "application/json",
+      userAgent: "RelayBase-API/1.0",
+      contextType: "api_key",
+      contextId: requestId,
+      waitBudgetMs: clampInteger(
+        env.UPSTREAM_ROUTING_WAIT_MS,
+        250,
+        0,
+        2_000,
       ),
+      targetCount: requestTargetCount,
+      paginationUnitCount,
     });
-  } catch {
+    upstreamResponse = routed.response;
+    upstreamAttemptCount = routed.attemptCount;
+  } catch (error) {
+    upstreamAttemptCount = await upstreamAttemptCountForContext(
+      db,
+      "api_key",
+      requestId,
+    );
+    const upstreamFailureStatus =
+      error instanceof PlatformError ? error.status : 502;
     await refundRequest(
       db,
       key.user_id,
@@ -6167,12 +8124,27 @@ async function handleProxyRequest(
       method: request.method,
       path: url.pathname,
       platform: catalog.platform,
-      statusCode: 502,
+      statusCode: upstreamFailureStatus,
       costUsdMicros,
       upstreamCostUsdMicros: catalog.upstream_price_usd_micros,
       latencyMs: Date.now() - startedAt,
+      upstreamAttemptCount,
+      targetCount: requestTargetCount,
+      returnedItemCount: null,
+      paginationUnitCount,
       refunded: true,
     });
+    if (error instanceof PlatformError) {
+      await markProxyRequest(
+        db,
+        requestId,
+        error.code === "upstream_capacity_exhausted"
+          ? "rate_limited"
+          : "reconciled",
+        upstreamFailureStatus,
+      );
+      throw error;
+    }
     throw new PlatformError(
       502,
       "upstream_unavailable",
@@ -6232,6 +8204,10 @@ async function handleProxyRequest(
           costUsdMicros,
           upstreamCostUsdMicros: catalog.upstream_price_usd_micros,
           latencyMs: Date.now() - startedAt,
+          upstreamAttemptCount,
+          targetCount: requestTargetCount,
+          returnedItemCount: null,
+          paginationUnitCount,
           refunded: true,
         });
       } catch {
@@ -6266,7 +8242,20 @@ async function handleProxyRequest(
     );
   }
 
+  const returnedItemCount =
+    upstreamResponse.status === 200
+      ? countReturnedItems(
+          successfulPayload,
+          catalogCapability.responseItemsPath,
+        )
+      : null;
   try {
+    await recordReturnedItemsForLastUpstreamAttempt(
+      db,
+      "api_key",
+      requestId,
+      returnedItemCount,
+    );
     await logApiCall(db, {
       requestId,
       key,
@@ -6277,6 +8266,10 @@ async function handleProxyRequest(
       costUsdMicros,
       upstreamCostUsdMicros: catalog.upstream_price_usd_micros,
       latencyMs: Date.now() - startedAt,
+      upstreamAttemptCount,
+      targetCount: requestTargetCount,
+      returnedItemCount,
+      paginationUnitCount,
       refunded,
     });
   } catch {
@@ -6296,6 +8289,9 @@ async function handleProxyRequest(
 
   const balance = await currentBalance(db, key.user_id);
   const responseHeaders = sanitizeUpstreamHeaders(upstreamResponse.headers);
+  customerRateHeaders.forEach((value, name) =>
+    responseHeaders.set(name, value),
+  );
   responseHeaders.set("x-request-id", requestId);
   responseHeaders.set(
     "x-relaybase-cost-usd-micros",
@@ -6471,6 +8467,91 @@ function marketplacePublicInputSchema(
   return Object.fromEntries(entries);
 }
 
+async function upstreamRouteAvailabilityByPath(
+  env: PlatformEnv,
+  db: D1Database,
+  sourceConfig: UpstreamSourceConfig,
+  paths: string[],
+): Promise<Map<string, boolean>> {
+  const uniquePaths = [...new Set(paths)];
+  const state = await upstreamCredentialState(db);
+  if (!state.managedEnabled) {
+    const available = hasConfiguredCredential(env.UPSTREAM_API_KEY);
+    return new Map(uniquePaths.map((path) => [path, available]));
+  }
+  const [snapshot, cooldownRows] = await Promise.all([
+    managedUpstreamProviderCredentialsSnapshot(db),
+    db
+      .prepare(
+        `SELECT capacity_group_id, endpoint_path
+         FROM upstream_route_health
+         WHERE cooldown_until IS NOT NULL
+           AND datetime(cooldown_until) > datetime('now')
+         LIMIT 5000`,
+      )
+      .all<{
+        capacity_group_id: string;
+        endpoint_path: string;
+      }>(),
+  ]);
+  const routeCooldowns = new Set(
+    (cooldownRows.results ?? []).map(
+      (row) => `${row.capacity_group_id}:${row.endpoint_path}`,
+    ),
+  );
+  const now = Date.now();
+  const candidates = snapshot.credentials.filter(
+    (credential) =>
+      credential.status !== "revoked" &&
+      credential.routing_enabled === 1 &&
+      credential.group_status === "active" &&
+      credential.capacity_group_id != null &&
+      credential.verified_config_hash === sourceConfig.hash &&
+      credential.verified_at != null &&
+      (credential.expires_at == null ||
+        Date.parse(credential.expires_at) > now) &&
+      (!(
+        credential.health_state === "auth_failed" ||
+        credential.health_state === "balance_low" ||
+        credential.health_state === "circuit_open"
+      ) ||
+        credential.cooldown_until == null ||
+        Date.parse(credential.cooldown_until) <= now),
+  );
+  const scopesByCredential = new Map<string, string[]>();
+  for (const credential of candidates) {
+    try {
+      scopesByCredential.set(
+        credential.id,
+        storedUpstreamProviderCredentialScopes(
+          credential.verified_scopes_json,
+          sourceConfig,
+        ),
+      );
+    } catch {
+      // An invalid credential cannot make a market product appear online.
+    }
+  }
+  return new Map(
+    uniquePaths.map((path) => [
+      path,
+      candidates.some(
+        (credential) =>
+          credential.capacity_group_id != null &&
+          scopesByCredential.has(credential.id) &&
+          !routeCooldowns.has(
+            `${credential.capacity_group_id}:${path}`,
+          ) &&
+          upstreamProviderCredentialAllowsPath(
+            scopesByCredential.get(credential.id) ?? [],
+            path,
+            sourceConfig.apiPathPrefix,
+          ),
+      ),
+    ]),
+  );
+}
+
 async function loadMarketplaceCatalogOverlay(
   env: PlatformEnv,
 ): Promise<MarketplaceOverlay> {
@@ -6511,6 +8592,7 @@ async function loadMarketplaceCatalogOverlay(
               endpoint.summary, endpoint.description,
               endpoint.parameter_schema_json,
               endpoint.customer_price_usd_micros,
+              endpoint.rate_limit_rps,
               endpoint.price_verified, endpoint.enabled,
               endpoint.read_only, endpoint.safety_classification,
               endpoint.safety_policy_version,
@@ -6599,6 +8681,12 @@ async function loadMarketplaceCatalogOverlay(
     const publicUnresolvedRows = unresolvedRows.filter(
       (row) => !excluded(row.path),
     );
+    const routeAvailability = await upstreamRouteAvailabilityByPath(
+      env,
+      env.DB,
+      config,
+      publicCatalogRows.map((row) => row.path),
+    );
     const rows = new Map<string, MarketplaceOverlayRow>();
     for (const row of publicCatalogRows) {
       const method = row.http_method.toUpperCase();
@@ -6611,6 +8699,7 @@ async function loadMarketplaceCatalogOverlay(
         "marketplace_overlay_taxonomy_invalid",
         "实时目录分类元数据无效，API 市场已停止发布。",
       );
+      const parameterSchema = safeStoredJson(row.parameter_schema_json);
       rows.set(`${method}:${row.path}`, {
         path: row.path,
         platform: row.platform,
@@ -6621,7 +8710,7 @@ async function loadMarketplaceCatalogOverlay(
         operationId: taxonomy.operationId,
         summary: row.summary,
         description: row.description,
-        parameterSchema: safeStoredJson(row.parameter_schema_json),
+        parameterSchema,
         customerPriceUsdMicros: Number(row.customer_price_usd_micros),
         priceVerified: Number(row.price_verified) === 1,
         enabled: Number(row.enabled) === 1,
@@ -6638,7 +8727,16 @@ async function loadMarketplaceCatalogOverlay(
             ? null
             : Number(row.x402_max_batch_size),
         x402Revision: Number(row.x402_revision ?? 0),
-        rateLimitRps: null,
+        rateLimitRps:
+          row.rate_limit_rps == null ? null : Number(row.rate_limit_rps),
+        runtimeRouteAvailable:
+          routeAvailability.get(row.path) === true,
+        capability: endpointCapabilityFor(
+          row.path,
+          parameterSchema,
+          "complete",
+          row.http_method as "GET" | "POST",
+        ),
         updatedAt: row.updated_at,
         documentationStatus: "complete",
       });
@@ -6667,6 +8765,8 @@ async function loadMarketplaceCatalogOverlay(
         x402Revision: 0,
         rateLimitRps:
           row.rate_limit_rps == null ? null : Number(row.rate_limit_rps),
+        runtimeRouteAvailable: false,
+        capability: endpointCapabilityFor(row.path, null, "pending", null),
         updatedAt: row.updated_at,
         documentationStatus: "pending",
       });
@@ -6751,6 +8851,7 @@ function mergedMarketplaceEndpoints(
       verified: boolean;
     };
     rateLimitRps: number | null;
+    capability: EndpointCapability;
     x402: {
       enabled: boolean;
       available: boolean;
@@ -6830,6 +8931,7 @@ function mergedMarketplaceEndpoints(
       !restricted &&
       endpoint.method !== null &&
       overlay.catalogReady &&
+      row.runtimeRouteAvailable &&
       row.enabled &&
       row.readOnly &&
       row.priceVerified &&
@@ -6851,6 +8953,7 @@ function mergedMarketplaceEndpoints(
         verified: row.priceVerified,
       },
       rateLimitRps: row.rateLimitRps,
+      capability: row.capability,
       x402: {
         enabled: row.x402Enabled,
         available:
@@ -6997,6 +9100,7 @@ function marketplacePublicEndpoint(
     summary: endpoint.summary,
     pricing: endpoint.pricing,
     rateLimitRps: endpoint.rateLimitRps,
+    capability: endpoint.capability,
     x402: endpoint.x402,
     documentationStatus: endpoint.documentationStatus,
   };
@@ -7747,7 +9851,9 @@ async function handlePublicCatalog(
   const query = db
     .prepare(
       `SELECT path, platform, http_method, data_type, tags_json, surface,
-              operation_id, summary, customer_price_usd_micros, updated_at
+              operation_id, summary, parameter_schema_json,
+              customer_price_usd_micros,
+              rate_limit_rps, updated_at
        FROM endpoint_catalog
        WHERE ${where}
        ORDER BY endpoint_catalog.platform ASC,
@@ -7771,11 +9877,14 @@ async function handlePublicCatalog(
     surface: MarketplaceSurface;
     operation_id: string | null;
     summary: string | null;
+    parameter_schema_json: string | null;
     customer_price_usd_micros: number;
+    rate_limit_rps: number | null;
     updated_at: string;
   }>();
   const endpoints = (rows.results ?? []).map((row) => {
     const taxonomy = strictStoredCatalogTaxonomy(row);
+    const parameterSchema = safeStoredJson(row.parameter_schema_json);
     return {
       id: marketplaceServiceId(
         row.http_method as "GET" | "POST",
@@ -7794,6 +9903,14 @@ async function handlePublicCatalog(
         unit: "request",
         verified: true,
       },
+      rateLimitRps:
+        row.rate_limit_rps == null ? null : Number(row.rate_limit_rps),
+      capability: endpointCapabilityFor(
+        row.path,
+        parameterSchema,
+        "complete",
+        row.http_method as "GET" | "POST",
+      ),
       updatedAt: row.updated_at,
     };
   });
@@ -7903,6 +10020,7 @@ async function handleCatalogList(
               endpoint_catalog.parameter_schema_json,
               endpoint_catalog.upstream_price_usd_micros,
               endpoint_catalog.customer_price_usd_micros,
+              endpoint_catalog.rate_limit_rps,
               endpoint_catalog.price_verified, endpoint_catalog.enabled,
               endpoint_catalog.read_only,
               endpoint_catalog.safety_classification,
@@ -7956,6 +10074,7 @@ async function handleCatalogList(
       parameter_schema_json: string | null;
       upstream_price_usd_micros: number;
       customer_price_usd_micros: number;
+      rate_limit_rps: number | null;
       price_verified: number;
       enabled: number;
       read_only: number;
@@ -8034,6 +10153,7 @@ async function handleCatalogList(
   const total = Number(totalRow?.count ?? 0);
   const endpoints = (rows.results ?? []).map((row) => {
     const taxonomy = strictStoredCatalogTaxonomy(row);
+    const parameterSchema = safeStoredJson(row.parameter_schema_json);
     const marketplaceAvailability =
       marketplaceAvailabilityByKey.get(
         `${row.http_method.toUpperCase()}:${row.path}`,
@@ -8066,6 +10186,13 @@ async function handleCatalogList(
       availabilityReasons.push("runtime_not_ready");
     }
     if (
+      marketplaceAvailability === "pending" &&
+      marketplaceOverlay.catalogReady &&
+      availabilityReasons.length === 0
+    ) {
+      availabilityReasons.push("upstream_route_unavailable");
+    }
+    if (
       marketplaceAvailability === "restricted" &&
       !availabilityReasons.includes("safety_not_approved")
     ) {
@@ -8081,9 +10208,17 @@ async function handleCatalogList(
       method: row.http_method,
       summary: row.summary,
       description: row.description,
-      parameterSchema: safeStoredJson(row.parameter_schema_json),
+      parameterSchema,
       upstreamPriceUsdMicros: row.upstream_price_usd_micros,
       customerPriceUsdMicros: row.customer_price_usd_micros,
+      rateLimitRps:
+        row.rate_limit_rps == null ? null : Number(row.rate_limit_rps),
+      capability: endpointCapabilityFor(
+        row.path,
+        parameterSchema,
+        "complete",
+        row.http_method as "GET" | "POST",
+      ),
       priceVerified: row.price_verified === 1,
       enabled: row.enabled === 1,
       readOnly: row.read_only === 1,
@@ -8312,6 +10447,7 @@ async function handlePendingCatalogList(
     rateLimit: row.rate_limit_raw,
     rateLimitRps:
       row.rate_limit_rps == null ? null : Number(row.rate_limit_rps),
+    capability: endpointCapabilityFor(row.path, null, "pending", null),
     documentationStatus: "pending" as const,
     callable: false,
     updatedAt: row.updated_at,
@@ -11507,7 +13643,7 @@ async function handleUpstreamConfigPut(
     db.prepare(
       `UPDATE upstream_credentials
        SET verified_scopes_json = NULL, verified_config_hash = NULL,
-           verified_at = NULL, expires_at = NULL
+           verified_at = NULL, expires_at = NULL, routing_enabled = 0
        WHERE revoked_at IS NULL
          AND EXISTS (
            SELECT 1 FROM upstream_source_config
@@ -11575,6 +13711,86 @@ async function handleUpstreamCredentialsList(
   requireAdminSecret(request, env, "platform");
   const db = requireDb(env);
   const snapshot = await managedUpstreamProviderCredentialsSnapshot(db);
+  const groupsResult = await db
+    .prepare(
+      `SELECT g.id, g.label, g.configured_rps_per_endpoint,
+              g.headroom_bps, g.status, g.created_at, g.updated_at,
+              COUNT(c.id) AS credential_count,
+              COALESCE(SUM(
+                CASE
+                  WHEN c.routing_enabled = 1 AND c.revoked_at IS NULL
+                  THEN 1 ELSE 0
+                END
+              ), 0) AS routing_credential_count,
+              (
+                SELECT COUNT(*)
+                FROM upstream_request_attempts a
+                WHERE a.capacity_group_id = g.id
+                  AND datetime(a.created_at) >= datetime('now', '-15 minutes')
+              ) AS attempts_15m,
+              (
+                SELECT COUNT(*)
+                FROM upstream_request_attempts a
+                WHERE a.capacity_group_id = g.id
+                  AND a.status_code = 200
+                  AND datetime(a.created_at) >= datetime('now', '-15 minutes')
+              ) AS successes_15m,
+              (
+                SELECT COUNT(*)
+                FROM upstream_request_attempts a
+                WHERE a.capacity_group_id = g.id
+                  AND a.status_code IN (401, 403)
+                  AND datetime(a.created_at) >= datetime('now', '-15 minutes')
+              ) AS auth_failures_15m,
+              (
+                SELECT COUNT(*)
+                FROM upstream_request_attempts a
+                WHERE a.capacity_group_id = g.id
+                  AND a.status_code = 429
+                  AND datetime(a.created_at) >= datetime('now', '-15 minutes')
+              ) AS rate_limits_15m,
+              (
+                SELECT CAST(ROUND(AVG(a.latency_ms)) AS INTEGER)
+                FROM upstream_request_attempts a
+                WHERE a.capacity_group_id = g.id
+                  AND datetime(a.created_at) >= datetime('now', '-15 minutes')
+              ) AS avg_latency_15m,
+              (
+                SELECT COALESCE(SUM(l.planned_requests), 0)
+                FROM upstream_capacity_leases l
+                WHERE l.capacity_group_id = g.id
+                  AND l.status IN ('reserved', 'consuming')
+                  AND datetime(l.expires_at) > datetime('now')
+              ) AS leased_requests
+       FROM upstream_capacity_groups g
+       LEFT JOIN upstream_credentials c
+         ON c.capacity_group_id = g.id AND c.provider = g.provider
+       WHERE g.provider = 'primary'
+       GROUP BY g.id
+       ORDER BY CASE g.status
+                  WHEN 'active' THEN 0
+                  WHEN 'draining' THEN 1
+                  ELSE 2
+                END,
+                g.created_at ASC`,
+    )
+    .all<{
+      id: string;
+      label: string;
+      configured_rps_per_endpoint: number;
+      headroom_bps: number;
+      status: "active" | "draining" | "disabled";
+      credential_count: number;
+      routing_credential_count: number;
+      attempts_15m: number;
+      successes_15m: number;
+      auth_failures_15m: number;
+      rate_limits_15m: number;
+      avg_latency_15m: number | null;
+      leased_requests: number;
+      created_at: string;
+      updated_at: string;
+    }>();
   const active =
     snapshot.credentials.find((row) => row.status === "active") ?? null;
   const environmentKey = env.UPSTREAM_API_KEY;
@@ -11586,6 +13802,35 @@ async function handleUpstreamCredentialsList(
   return jsonResponse(
     {
       credentials: snapshot.credentials.map(publicManagedUpstreamProviderCredential),
+      capacityGroups: (groupsResult.results ?? []).map((group) => ({
+        id: group.id,
+        label: group.label,
+        configuredRpsPerEndpoint: group.configured_rps_per_endpoint,
+        headroomPercent: group.headroom_bps / 100,
+        effectiveRpsPerEndpoint: Math.max(
+          1,
+          Math.floor(
+            (group.configured_rps_per_endpoint * group.headroom_bps) /
+              10_000,
+          ),
+        ),
+        status: group.status,
+        credentialCount: Number(group.credential_count),
+        routingCredentialCount: Number(group.routing_credential_count),
+        health15m: {
+          attempts: Number(group.attempts_15m),
+          successes: Number(group.successes_15m),
+          authFailures: Number(group.auth_failures_15m),
+          rateLimits: Number(group.rate_limits_15m),
+          averageLatencyMs:
+            group.avg_latency_15m == null
+              ? null
+              : Number(group.avg_latency_15m),
+        },
+        leasedRequests: Number(group.leased_requests),
+        createdAt: group.created_at,
+        updatedAt: group.updated_at,
+      })),
       activeSource: active
         ? "managed"
         : !snapshot.managedEnabled && environmentConfigured
@@ -11620,6 +13865,12 @@ async function handleUpstreamCredentialCreate(
     apiKey?: unknown;
     activate?: unknown;
     expectedVersion?: unknown;
+    capacityGroupId?: unknown;
+    capacityGroupLabel?: unknown;
+    configuredRpsPerEndpoint?: unknown;
+    headroomPercent?: unknown;
+    priority?: unknown;
+    weight?: unknown;
   }>(request, MAX_DASHBOARD_BODY_BYTES);
   const label = sanitizeUpstreamCredentialLabel(body.label);
   const apiKey =
@@ -11656,6 +13907,125 @@ async function handleUpstreamCredentialCreate(
   }
 
   const db = requireDb(env);
+  const requestedGroupId =
+    typeof body.capacityGroupId === "string"
+      ? body.capacityGroupId.trim()
+      : "";
+  let capacityGroup: {
+    id: string;
+    label: string;
+    configuredRpsPerEndpoint: number;
+    headroomBps: number;
+  };
+  if (requestedGroupId) {
+    if (!/^upg_[A-Za-z0-9_-]{12,80}$/.test(requestedGroupId)) {
+      throw new PlatformError(
+        400,
+        "invalid_upstream_capacity_group",
+        "上游容量组编号无效。",
+      );
+    }
+    const storedGroup = await db
+      .prepare(
+        `SELECT id, label, configured_rps_per_endpoint, headroom_bps
+         FROM upstream_capacity_groups
+         WHERE id = ? AND provider = 'primary' AND status != 'disabled'`,
+      )
+      .bind(requestedGroupId)
+      .first<{
+        id: string;
+        label: string;
+        configured_rps_per_endpoint: number;
+        headroom_bps: number;
+      }>();
+    if (!storedGroup) {
+      throw new PlatformError(
+        404,
+        "upstream_capacity_group_not_found",
+        "没有找到可用的上游容量组。",
+      );
+    }
+    capacityGroup = {
+      id: storedGroup.id,
+      label: storedGroup.label,
+      configuredRpsPerEndpoint:
+        storedGroup.configured_rps_per_endpoint,
+      headroomBps: storedGroup.headroom_bps,
+    };
+  } else {
+    const groupLabel = sanitizeUpstreamCredentialLabel(
+      body.capacityGroupLabel ?? "TikHub primary account",
+    );
+    const configuredRpsPerEndpoint = clampInteger(
+      body.configuredRpsPerEndpoint,
+      clampInteger(env.UPSTREAM_RATE_LIMIT_RPS, 10, 1, 10_000),
+      1,
+      10_000,
+    );
+    const headroomPercent = clampInteger(
+      body.headroomPercent,
+      80,
+      10,
+      100,
+    );
+    const existingGroup = await db
+      .prepare(
+        `SELECT id, label, configured_rps_per_endpoint, headroom_bps
+         FROM upstream_capacity_groups
+         WHERE provider = 'primary' AND label = ?`,
+      )
+      .bind(groupLabel)
+      .first<{
+        id: string;
+        label: string;
+        configured_rps_per_endpoint: number;
+        headroom_bps: number;
+      }>();
+    if (existingGroup) {
+      if (
+        existingGroup.configured_rps_per_endpoint !==
+          configuredRpsPerEndpoint ||
+        existingGroup.headroom_bps !== headroomPercent * 100
+      ) {
+        throw new PlatformError(
+          409,
+          "upstream_capacity_group_conflict",
+          "同名容量组已存在，但 RPS 或安全余量配置不同。",
+        );
+      }
+      capacityGroup = {
+        id: existingGroup.id,
+        label: existingGroup.label,
+        configuredRpsPerEndpoint:
+          existingGroup.configured_rps_per_endpoint,
+        headroomBps: existingGroup.headroom_bps,
+      };
+    } else {
+      capacityGroup = {
+        id: `upg_${randomBase64Url(15)}`,
+        label: groupLabel,
+        configuredRpsPerEndpoint,
+        headroomBps: headroomPercent * 100,
+      };
+      await db
+        .prepare(
+          `INSERT INTO upstream_capacity_groups
+           (id, provider, label, configured_rps_per_endpoint,
+            headroom_bps, status, created_at, updated_at)
+           VALUES (?, 'primary', ?, ?, ?, 'active',
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        )
+        .bind(
+          capacityGroup.id,
+          capacityGroup.label,
+          capacityGroup.configuredRpsPerEndpoint,
+          capacityGroup.headroomBps,
+        )
+        .run();
+    }
+  }
+  const priority = clampInteger(body.priority, 100, 1, 10_000);
+  const weight = clampInteger(body.weight, 100, 1, 10_000);
   const sourceConfig = body.activate
     ? await loadUpstreamSourceConfig(db, env, true)
     : null;
@@ -11687,10 +14057,11 @@ async function handleUpstreamCredentialCreate(
   );
   const createStatement = db.prepare(
       `INSERT INTO upstream_credentials
-       (id, provider, label, encrypted_secret, secret_hash,
+       (id, provider, label, capacity_group_id, routing_enabled,
+        priority, weight, encrypted_secret, secret_hash,
         verified_scopes_json, verified_config_hash, expires_at,
         verified_at, created_at)
-       SELECT ?, 'primary', ?, ?, ?, ?, ?, ?,
+       SELECT ?, 'primary', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
               CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
               CURRENT_TIMESTAMP
        WHERE NOT EXISTS (
@@ -11706,6 +14077,10 @@ async function handleUpstreamCredentialCreate(
     .bind(
       id,
       label,
+      capacityGroup.id,
+      body.activate ? 1 : 0,
+      priority,
+      weight,
       encryptedSecret,
       secretHash,
       verification ? JSON.stringify(verification.scopes) : null,
@@ -11724,6 +14099,13 @@ async function handleUpstreamCredentialCreate(
       label,
       fingerprint,
       activateRequested: body.activate,
+      capacityGroupId: capacityGroup.id,
+      capacityGroupLabel: capacityGroup.label,
+      configuredRpsPerEndpoint:
+        capacityGroup.configuredRpsPerEndpoint,
+      headroomPercent: capacityGroup.headroomBps / 100,
+      priority,
+      weight,
     },
   });
   const created = await db.batch([createStatement, createAudit]);
@@ -11916,7 +14298,8 @@ async function handleUpstreamCredentialUpdate(
             `UPDATE upstream_credentials
              SET revoked_at = ?,
                  encrypted_secret = 'revoked',
-                 secret_hash = ?
+                 secret_hash = ?,
+                 routing_enabled = 0
              WHERE id = ? AND provider = 'primary' AND revoked_at IS NULL
                AND EXISTS (
                  SELECT 1 FROM upstream_credential_state
@@ -11961,7 +14344,8 @@ async function handleUpstreamCredentialUpdate(
           `UPDATE upstream_credentials
            SET revoked_at = ?,
                encrypted_secret = 'revoked',
-               secret_hash = ?
+               secret_hash = ?,
+               routing_enabled = 0
            WHERE id = ? AND provider = 'primary' AND revoked_at IS NULL
              AND EXISTS (
                SELECT 1 FROM upstream_credential_state
@@ -12399,10 +14783,11 @@ async function handleCatalogSync(
                 description, parameter_schema_json,
                 upstream_price_usd_micros,
                 suggested_customer_price_usd_micros,
-                price_verified, looks_read_only, safety_classification,
+                rate_limit_raw, rate_limit_rps, price_verified,
+                looks_read_only, safety_classification,
                 safety_reasons_json, safety_policy_version, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?, CURRENT_TIMESTAMP)`,
+                       ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
             )
             .bind(
               `${syncGeneration}:${offset + batchIndex}`,
@@ -12419,6 +14804,8 @@ async function handleCatalogSync(
               entry.parameterSchemaJson,
               entry.upstreamPriceUsdMicros,
               customerPrice,
+              entry.rateLimitRaw,
+              entry.rateLimitRps,
               entry.priceVerified ? 1 : 0,
               entry.looksReadOnly ? 1 : 0,
               entry.safetyClassification,
@@ -12658,7 +15045,8 @@ async function handleCatalogSync(
            (path, platform, http_method, data_type, tags_json, surface,
             operation_id, summary, description, parameter_schema_json,
             upstream_price_usd_micros,
-            customer_price_usd_micros, price_verified, enabled, read_only,
+            customer_price_usd_micros, rate_limit_raw, rate_limit_rps,
+            price_verified, enabled, read_only,
             safety_classification, safety_reasons_json,
             safety_policy_version, revision, source_updated_at,
             sync_generation, created_at, updated_at)
@@ -12667,6 +15055,7 @@ async function handleCatalogSync(
                   s.description, s.parameter_schema_json,
                   s.upstream_price_usd_micros,
                   s.suggested_customer_price_usd_micros,
+                  s.rate_limit_raw, s.rate_limit_rps,
                   s.price_verified, 0, 0, s.safety_classification,
                   s.safety_reasons_json, s.safety_policy_version, 0,
                   CURRENT_TIMESTAMP, s.generation,
@@ -12699,6 +15088,8 @@ async function handleCatalogSync(
              description = excluded.description,
              parameter_schema_json = excluded.parameter_schema_json,
              upstream_price_usd_micros = excluded.upstream_price_usd_micros,
+             rate_limit_raw = excluded.rate_limit_raw,
+             rate_limit_rps = excluded.rate_limit_rps,
              price_verified = excluded.price_verified,
              safety_classification = excluded.safety_classification,
              safety_reasons_json = excluded.safety_reasons_json,
@@ -14005,6 +16396,27 @@ async function handleReconciliation(
       ),
     db
       .prepare(
+        `DELETE FROM request_rate_limit_state
+         WHERE datetime(updated_at) < datetime('now', '-2 days')`,
+      ),
+    db
+      .prepare(
+        `DELETE FROM upstream_rate_limit_state
+         WHERE datetime(updated_at) < datetime('now', '-10 minutes')`,
+      ),
+    db
+      .prepare(
+        `DELETE FROM upstream_route_health
+         WHERE cooldown_until IS NULL
+           AND datetime(updated_at) < datetime('now', '-30 days')`,
+      ),
+    db
+      .prepare(
+        `DELETE FROM upstream_request_attempts
+         WHERE datetime(created_at) < datetime('now', '-30 days')`,
+      ),
+    db
+      .prepare(
         `DELETE FROM payment_events
          WHERE processed_at IS NOT NULL
            AND datetime(processed_at) < datetime('now', '-90 days')`,
@@ -14251,7 +16663,12 @@ async function managedUpstreamProviderCredentialsSnapshot(
   try {
     rows = await db
       .prepare(
-        `SELECT c.id, c.label, c.encrypted_secret, c.secret_hash,
+        `SELECT c.id, c.label, c.capacity_group_id,
+                g.label AS capacity_group_label,
+                g.configured_rps_per_endpoint, g.headroom_bps,
+                g.status AS group_status,
+                c.routing_enabled, c.priority, c.weight,
+                c.encrypted_secret, c.secret_hash,
                 c.verified_scopes_json, c.verified_config_hash,
                 c.expires_at,
                 CASE
@@ -14259,10 +16676,18 @@ async function managedUpstreamProviderCredentialsSnapshot(
                   WHEN s.active_credential_id = c.id THEN 'active'
                   ELSE 'standby'
                 END AS status,
-                c.verified_at, c.created_at, c.last_used_at, c.revoked_at
+                c.verified_at, c.created_at, c.last_used_at, c.revoked_at,
+                COALESCE(h.state, 'healthy') AS health_state,
+                COALESCE(h.consecutive_failures, 0) AS consecutive_failures,
+                h.ewma_latency_ms, h.cooldown_until, h.last_status_code,
+                h.last_error_code, h.last_success_at, h.last_failure_at
          FROM upstream_credentials c
          JOIN upstream_credential_state s
            ON s.provider = c.provider
+         LEFT JOIN upstream_capacity_groups g
+           ON g.id = c.capacity_group_id
+         LEFT JOIN upstream_credential_health h
+           ON h.credential_id = c.id
          WHERE c.provider = 'primary'
          ORDER BY CASE
                     WHEN s.active_credential_id = c.id THEN 0
@@ -14339,7 +16764,12 @@ async function managedUpstreamProviderCredentialById(
   try {
     return await db
       .prepare(
-        `SELECT c.id, c.label, c.encrypted_secret, c.secret_hash,
+        `SELECT c.id, c.label, c.capacity_group_id,
+                g.label AS capacity_group_label,
+                g.configured_rps_per_endpoint, g.headroom_bps,
+                g.status AS group_status,
+                c.routing_enabled, c.priority, c.weight,
+                c.encrypted_secret, c.secret_hash,
                 c.verified_scopes_json, c.verified_config_hash,
                 c.expires_at,
                 CASE
@@ -14347,10 +16777,18 @@ async function managedUpstreamProviderCredentialById(
                   WHEN s.active_credential_id = c.id THEN 'active'
                   ELSE 'standby'
                 END AS status,
-                c.verified_at, c.created_at, c.last_used_at, c.revoked_at
+                c.verified_at, c.created_at, c.last_used_at, c.revoked_at,
+                COALESCE(h.state, 'healthy') AS health_state,
+                COALESCE(h.consecutive_failures, 0) AS consecutive_failures,
+                h.ewma_latency_ms, h.cooldown_until, h.last_status_code,
+                h.last_error_code, h.last_success_at, h.last_failure_at
          FROM upstream_credentials c
          JOIN upstream_credential_state s
            ON s.provider = c.provider
+         LEFT JOIN upstream_capacity_groups g
+           ON g.id = c.capacity_group_id
+         LEFT JOIN upstream_credential_health h
+           ON h.credential_id = c.id
          WHERE c.provider = 'primary' AND c.id = ?`,
       )
       .bind(id)
@@ -14383,6 +16821,37 @@ function publicManagedUpstreamProviderCredential(
     label: credential.label,
     fingerprint: credential.secret_hash.slice(0, 16),
     status: credential.status,
+    routingEnabled:
+      credential.routing_enabled === 1 &&
+      credential.status !== "revoked",
+    capacityGroupId: credential.capacity_group_id,
+    capacityGroupLabel: credential.capacity_group_label,
+    configuredRpsPerEndpoint:
+      credential.configured_rps_per_endpoint,
+    effectiveRpsPerEndpoint:
+      credential.configured_rps_per_endpoint != null &&
+      credential.headroom_bps != null
+        ? Math.max(
+            1,
+            Math.floor(
+              (credential.configured_rps_per_endpoint *
+                credential.headroom_bps) /
+                10_000,
+            ),
+          )
+        : null,
+    priority: credential.priority,
+    weight: credential.weight,
+    health: {
+      state: credential.health_state,
+      consecutiveFailures: credential.consecutive_failures,
+      ewmaLatencyMs: credential.ewma_latency_ms,
+      cooldownUntil: credential.cooldown_until,
+      lastStatusCode: credential.last_status_code,
+      lastErrorCode: credential.last_error_code,
+      lastSuccessAt: credential.last_success_at,
+      lastFailureAt: credential.last_failure_at,
+    },
     scopeCount,
     expiresAt: credential.expires_at,
     verifiedAt: credential.verified_at,
@@ -14443,7 +16912,7 @@ async function activateManagedUpstreamProviderCredential(
       .prepare(
         `UPDATE upstream_credentials
          SET verified_scopes_json = ?, verified_config_hash = ?,
-             expires_at = ?, verified_at = ?
+             expires_at = ?, verified_at = ?, routing_enabled = 1
          WHERE id = ? AND provider = 'primary' AND revoked_at IS NULL
            AND secret_hash = ?
            AND EXISTS (
@@ -14497,12 +16966,27 @@ async function activateManagedUpstreamProviderCredential(
            )`,
       )
       .bind(id, nextVersion, activatedAt),
+    db
+      .prepare(
+        `INSERT INTO upstream_credential_health
+         (credential_id, state, consecutive_failures, cooldown_until,
+          last_error_code, updated_at)
+         VALUES (?, 'healthy', 0, NULL, NULL, ?)
+         ON CONFLICT(credential_id) DO UPDATE SET
+           state = 'healthy',
+           consecutive_failures = 0,
+           cooldown_until = NULL,
+           last_error_code = NULL,
+           updated_at = excluded.updated_at`,
+      )
+      .bind(id, activatedAt),
     activationAudit,
   ]);
   if (
     Number(activated[0]?.meta?.changes ?? 0) !== 1 ||
     Number(activated[1]?.meta?.changes ?? 0) !== 1 ||
-    Number(activated[3]?.meta?.changes ?? 0) !== 1
+    Number(activated[3]?.meta?.changes ?? 0) !== 1 ||
+    Number(activated[4]?.meta?.changes ?? 0) !== 1
   ) {
     throw new PlatformError(
       409,
@@ -15237,6 +17721,29 @@ async function resolveUpstreamProviderCredential(
       expiresAt: managed.expires_at,
       stateVersion: state.version,
       configHash: sourceConfig.hash,
+      capacityGroupId:
+        managed.capacity_group_id ?? "legacy-primary",
+      capacityGroupLabel:
+        managed.capacity_group_label ?? "Legacy primary account",
+      configuredRpsPerEndpoint:
+        managed.configured_rps_per_endpoint ??
+        clampInteger(env.UPSTREAM_RATE_LIMIT_RPS, 10, 1, 10_000),
+      headroomBps: managed.headroom_bps ?? 8000,
+      effectiveRpsPerEndpoint: Math.max(
+        1,
+        Math.floor(
+          ((managed.configured_rps_per_endpoint ??
+            clampInteger(env.UPSTREAM_RATE_LIMIT_RPS, 10, 1, 10_000)) *
+            (managed.headroom_bps ?? 8000)) /
+            10_000,
+        ),
+      ),
+      routingEnabled: managed.routing_enabled === 1,
+      priority: managed.priority,
+      weight: managed.weight,
+      healthState: managed.health_state,
+      ewmaLatencyMs: managed.ewma_latency_ms,
+      cooldownUntil: managed.cooldown_until,
     };
   }
   if (!hasConfiguredCredential(env.UPSTREAM_API_KEY)) return null;
@@ -15249,7 +17756,135 @@ async function resolveUpstreamProviderCredential(
     expiresAt: null,
     stateVersion: state.version,
     configHash: sourceConfig.hash,
+    capacityGroupId: "environment-primary",
+    capacityGroupLabel: "Environment primary account",
+    configuredRpsPerEndpoint: clampInteger(
+      env.UPSTREAM_RATE_LIMIT_RPS,
+      10,
+      1,
+      10_000,
+    ),
+    headroomBps: 8000,
+    effectiveRpsPerEndpoint: Math.max(
+      1,
+      Math.floor(
+        (clampInteger(env.UPSTREAM_RATE_LIMIT_RPS, 10, 1, 10_000) *
+          8000) /
+          10_000,
+      ),
+    ),
+    routingEnabled: true,
+    priority: 100,
+    weight: 100,
+    healthState: "healthy",
+    ewmaLatencyMs: null,
+    cooldownUntil: null,
   };
+}
+
+async function resolveUpstreamProviderCredentialsForPath(
+  env: PlatformEnv,
+  db: D1Database,
+  sourceConfig: UpstreamSourceConfig,
+  catalogPath: string,
+): Promise<ResolvedUpstreamProviderCredential[]> {
+  const state = await upstreamCredentialState(db);
+  if (!state.managedEnabled) {
+    const environment = await resolveUpstreamProviderCredential(
+      env,
+      db,
+      sourceConfig,
+    );
+    return environment &&
+      upstreamProviderCredentialAllowsPath(
+        environment.scopes,
+        catalogPath,
+        sourceConfig.apiPathPrefix,
+      )
+      ? [environment]
+      : [];
+  }
+  const snapshot = await managedUpstreamProviderCredentialsSnapshot(db);
+  const encryptionKey =
+    requireUpstreamProviderCredentialsEncryptionKey(env);
+  const now = Date.now();
+  const candidates: ResolvedUpstreamProviderCredential[] = [];
+  for (const managed of snapshot.credentials) {
+    if (
+      managed.status === "revoked" ||
+      managed.routing_enabled !== 1 ||
+      managed.group_status !== "active" ||
+      !managed.capacity_group_id ||
+      !managed.capacity_group_label ||
+      managed.configured_rps_per_endpoint == null ||
+      managed.headroom_bps == null ||
+      managed.verified_config_hash !== sourceConfig.hash ||
+      !managed.verified_at ||
+      (managed.expires_at != null &&
+        Date.parse(managed.expires_at) <= now) ||
+      ((managed.health_state === "auth_failed" ||
+        managed.health_state === "balance_low" ||
+        managed.health_state === "circuit_open") &&
+        managed.cooldown_until != null &&
+        Date.parse(managed.cooldown_until) > now)
+    ) {
+      continue;
+    }
+    const scopes = storedUpstreamProviderCredentialScopes(
+      managed.verified_scopes_json,
+      sourceConfig,
+    );
+    if (
+      !upstreamProviderCredentialAllowsPath(
+        scopes,
+        catalogPath,
+        sourceConfig.apiPathPrefix,
+      )
+    ) {
+      continue;
+    }
+    candidates.push({
+      secret: await decryptUpstreamProviderApiKey(
+        managed.encrypted_secret,
+        encryptionKey,
+        managed.id,
+      ),
+      fingerprint: managed.secret_hash.slice(0, 16),
+      source: "managed",
+      id: managed.id,
+      scopes,
+      expiresAt: managed.expires_at,
+      stateVersion: state.version,
+      configHash: sourceConfig.hash,
+      capacityGroupId: managed.capacity_group_id,
+      capacityGroupLabel: managed.capacity_group_label,
+      configuredRpsPerEndpoint:
+        managed.configured_rps_per_endpoint,
+      headroomBps: managed.headroom_bps,
+      effectiveRpsPerEndpoint: Math.max(
+        1,
+        Math.floor(
+          (managed.configured_rps_per_endpoint *
+            managed.headroom_bps) /
+            10_000,
+        ),
+      ),
+      routingEnabled: true,
+      priority: managed.priority,
+      weight: managed.weight,
+      healthState: managed.health_state,
+      ewmaLatencyMs: managed.ewma_latency_ms,
+      cooldownUntil: managed.cooldown_until,
+    });
+  }
+  return candidates.sort(
+    (left, right) =>
+      left.priority - right.priority ||
+      (left.healthState === "healthy" ? 0 : 1) -
+        (right.healthState === "healthy" ? 0 : 1) ||
+      (left.ewmaLatencyMs ?? 0) - (right.ewmaLatencyMs ?? 0) ||
+      left.fingerprint.localeCompare(right.fingerprint),
+  );
 }
 
 function bytesToBase64Url(bytes: Uint8Array): string {
@@ -15455,6 +18090,8 @@ async function hasX402Schema(db: D1Database): Promise<boolean> {
             FROM endpoint_x402_config LIMIT 1)
              AS endpoint_x402_config_schema,
            (SELECT upstream_cost_usd_micros || status ||
+                   execution_mode || planned_upstream_requests ||
+                   actual_upstream_attempts ||
                    COALESCE(transaction_hash, '')
             FROM x402_batches LIMIT 1)
              AS x402_batches_schema,
@@ -15507,6 +18144,42 @@ async function operationalReadiness(env: PlatformEnv) {
              (SELECT request_count
               FROM upstream_rate_limit_buckets LIMIT 1)
                AS upstream_rate_limit_schema,
+             (SELECT theoretical_arrival_ms
+              FROM request_rate_limit_state LIMIT 1)
+               AS request_rate_limit_state_schema,
+             (SELECT theoretical_arrival_ms
+              FROM upstream_rate_limit_state LIMIT 1)
+               AS upstream_rate_limit_state_schema,
+             (SELECT configured_rps_per_endpoint || headroom_bps
+              FROM upstream_capacity_groups LIMIT 1)
+               AS upstream_capacity_groups_schema,
+             (SELECT routing_enabled || priority || weight
+              FROM upstream_credentials LIMIT 1)
+               AS upstream_routing_credentials_schema,
+             (SELECT state || consecutive_failures
+              FROM upstream_credential_health LIMIT 1)
+               AS upstream_credential_health_schema,
+             (SELECT state || consecutive_rate_limits
+              FROM upstream_route_health LIMIT 1)
+               AS upstream_route_health_schema,
+             (SELECT outcome || attempt_number
+              FROM upstream_request_attempts LIMIT 1)
+               AS upstream_attempts_schema,
+             (SELECT target_count || pagination_unit_count
+              FROM upstream_request_attempts LIMIT 1)
+               AS upstream_attempt_metrics_schema,
+             (SELECT execution_mode || evidence_status
+              FROM endpoint_capabilities LIMIT 1)
+               AS endpoint_capabilities_schema,
+             (SELECT planned_requests || status
+              FROM upstream_capacity_leases LIMIT 1)
+               AS upstream_capacity_leases_schema,
+             (SELECT rate_limit_rps || rate_limit_burst
+              FROM api_keys LIMIT 1)
+               AS api_key_rate_limit_schema,
+             (SELECT rate_limit_rps || rate_limit_burst
+              FROM users LIMIT 1)
+               AS account_rate_limit_schema,
              (SELECT request_count
               FROM payment_rate_limit_buckets LIMIT 1)
                AS payment_rate_limit_schema,
@@ -15558,7 +18231,10 @@ async function operationalReadiness(env: PlatformEnv) {
                AS catalog_unresolved_staging_schema,
              (SELECT idempotency_hash FROM payment_orders LIMIT 1)
                AS payment_idempotency_schema,
-             (SELECT upstream_cost_usd_micros FROM api_calls LIMIT 1)
+             (SELECT upstream_cost_usd_micros ||
+                     upstream_attempt_count || target_count ||
+                     pagination_unit_count
+              FROM api_calls LIMIT 1)
                AS upstream_cost_schema,
              (SELECT sync_generation FROM endpoint_catalog LIMIT 1)
                AS sync_generation_schema,
@@ -15566,6 +18242,12 @@ async function operationalReadiness(env: PlatformEnv) {
                AS http_method_schema,
              (SELECT price_verified FROM endpoint_catalog LIMIT 1)
                AS price_verified_schema,
+             (SELECT rate_limit_rps
+              FROM endpoint_catalog LIMIT 1)
+               AS catalog_rate_limit_schema,
+             (SELECT rate_limit_rps
+              FROM catalog_sync_staging LIMIT 1)
+               AS catalog_staging_rate_limit_schema,
              (SELECT safety_classification FROM endpoint_catalog LIMIT 1)
                AS catalog_safety_schema,
              (SELECT revision FROM endpoint_catalog LIMIT 1)
@@ -16165,6 +18847,18 @@ async function requireAuthenticatedUser(
       ? safeDecodeURIComponent(encodedName) ?? email
       : email;
   const id = `usr_${(await sha256Hex(email)).slice(0, 24)}`;
+  const accountRateLimitRps = clampInteger(
+    env.ACCOUNT_RATE_LIMIT_RPS,
+    3,
+    1,
+    1_000,
+  );
+  const accountRateLimitBurst = clampInteger(
+    env.ACCOUNT_RATE_LIMIT_BURST,
+    6,
+    accountRateLimitRps,
+    2_000,
+  );
 
   let stored = await db
     .prepare(
@@ -16178,10 +18872,18 @@ async function requireAuthenticatedUser(
     await db
       .prepare(
         `INSERT OR IGNORE INTO users
-         (id, email, display_name, status, created_at, updated_at)
-         VALUES (?, ?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+         (id, email, display_name, status, rate_limit_rps,
+          rate_limit_burst, created_at, updated_at)
+         VALUES (?, ?, ?, 'active', ?, ?,
+                 CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
       )
-      .bind(id, email, displayName)
+      .bind(
+        id,
+        email,
+        displayName,
+        accountRateLimitRps,
+        accountRateLimitBurst,
+      )
       .run();
     stored = await db
       .prepare(
@@ -16270,6 +18972,10 @@ async function logApiCall(
     costUsdMicros: number;
     upstreamCostUsdMicros: number;
     latencyMs: number;
+    upstreamAttemptCount: number;
+    targetCount: number;
+    returnedItemCount: number | null;
+    paginationUnitCount: number;
     refunded: boolean;
   },
 ): Promise<void> {
@@ -16279,8 +18985,11 @@ async function logApiCall(
         `INSERT INTO api_calls
          (id, user_id, api_key_id, method, upstream_path, platform,
           status_code, cost_usd_micros, upstream_cost_usd_micros,
-          latency_ms, refunded, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+          latency_ms, customer_request_count, upstream_attempt_count,
+          target_count, returned_item_count, pagination_unit_count,
+          refunded, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?,
+                 CURRENT_TIMESTAMP)`,
       )
       .bind(
         input.requestId,
@@ -16293,6 +19002,10 @@ async function logApiCall(
         input.costUsdMicros,
         input.upstreamCostUsdMicros,
         input.latencyMs,
+        input.upstreamAttemptCount,
+        input.targetCount,
+        input.returnedItemCount,
+        input.paginationUnitCount,
         input.refunded ? 1 : 0,
       ),
     db
@@ -16343,6 +19056,8 @@ type CatalogSyncEntry = {
   description: string | null;
   parameterSchemaJson: string | null;
   upstreamPriceUsdMicros: number;
+  rateLimitRaw: string | null;
+  rateLimitRps: number | null;
   priceVerified: boolean;
   looksReadOnly: boolean;
   safetyClassification: CatalogSafetyClassification;
@@ -17233,7 +19948,13 @@ function extractOpenApiCatalog(
   apiPathPrefix = "/api",
 ): Map<
   string,
-  Omit<CatalogSyncEntry, "upstreamPriceUsdMicros" | "priceVerified">
+  Omit<
+    CatalogSyncEntry,
+    | "upstreamPriceUsdMicros"
+    | "rateLimitRaw"
+    | "rateLimitRps"
+    | "priceVerified"
+  >
 > {
   if (!isPlainRecord(payload) || !isPlainRecord(payload.paths)) {
     throw new PlatformError(
@@ -17244,7 +19965,13 @@ function extractOpenApiCatalog(
   }
   const byPath = new Map<
     string,
-    Omit<CatalogSyncEntry, "upstreamPriceUsdMicros" | "priceVerified">
+    Omit<
+      CatalogSyncEntry,
+      | "upstreamPriceUsdMicros"
+      | "rateLimitRaw"
+      | "rateLimitRps"
+      | "priceVerified"
+    >
   >();
   const configuredV1Prefix = `${apiPathPrefix}/v1/`;
   for (const [rawPath, pathItem] of Object.entries(payload.paths)) {
@@ -17314,7 +20041,10 @@ function extractOpenApiCatalog(
     let selected:
       | Omit<
           CatalogSyncEntry,
-          "upstreamPriceUsdMicros" | "priceVerified"
+          | "upstreamPriceUsdMicros"
+          | "rateLimitRaw"
+          | "rateLimitRps"
+          | "priceVerified"
         >
       | null = null;
     for (const method of ["get", "post"] as const) {
@@ -17473,6 +20203,8 @@ function mergeCatalogEntries(
       upstreamPriceUsdMicros: methodMatches
         ? price.upstreamPriceUsdMicros
         : 0,
+      rateLimitRaw: methodMatches ? price.rateLimitRaw : null,
+      rateLimitRps: methodMatches ? price.rateLimitRps : null,
       priceVerified: methodMatches,
     };
   });
@@ -18865,6 +21597,7 @@ function errorResponse(
   code: string,
   message: string,
   requestId: string,
+  headers?: HeadersInit,
 ): Response {
   return jsonResponse(
     {
@@ -18876,6 +21609,7 @@ function errorResponse(
     },
     status,
     requestId,
+    headers,
   );
 }
 
@@ -18888,7 +21622,7 @@ function firstResult<T>(result: D1Result<unknown>): T | null {
 }
 
 function clampInteger(
-  value: string | undefined,
+  value: unknown,
   fallback: number,
   min: number,
   max: number,

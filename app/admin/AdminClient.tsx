@@ -145,6 +145,36 @@ type CatalogBatchBlockerCode =
   | "unsafe_operation"
   | "price_out_of_range";
 
+type EndpointCapability = {
+  executionMode:
+    | "direct"
+    | "native_batch"
+    | "paginated"
+    | "async_job"
+    | "fanout";
+  nativeBatchSupported: boolean;
+  nativeBatchMax: number | null;
+  targetField: string | null;
+  targetEncoding: "json_array" | "csv_query" | "csv_body" | null;
+  pagination: {
+    style: "cursor" | "page" | "offset" | "mixed";
+    requestField: string | null;
+    responseField: string | null;
+    pageSizeField: string | null;
+    pageSizeMax: number | null;
+    autoFollow: false;
+  } | null;
+  typicalItemsPerResponse: number | null;
+  responseItemsPath: string | null;
+  evidence: {
+    status: "verified" | "openapi_inferred" | "pending";
+    url: string | null;
+    note: string;
+    verifiedAt: string | null;
+  };
+  revision: number;
+};
+
 type CatalogEndpoint = {
   path: string;
   platform: string;
@@ -158,6 +188,8 @@ type CatalogEndpoint = {
   parameterSchema: JsonValue | null;
   upstreamPriceUsdMicros: number;
   customerPriceUsdMicros: number;
+  rateLimitRps: number | null;
+  capability: EndpointCapability;
   priceVerified: boolean;
   enabled: boolean;
   readOnly: boolean;
@@ -207,6 +239,7 @@ type PendingCatalogEndpoint = {
   priceVerified: boolean;
   rateLimit: string | null;
   rateLimitRps: number | null;
+  capability: EndpointCapability;
   documentationStatus: "pending";
   callable: false;
   updatedAt: string;
@@ -338,6 +371,28 @@ type UpstreamCredential = {
   label: string;
   fingerprint: string;
   status: "active" | "standby" | "revoked";
+  routingEnabled: boolean;
+  capacityGroupId: string | null;
+  capacityGroupLabel: string | null;
+  configuredRpsPerEndpoint: number | null;
+  effectiveRpsPerEndpoint: number | null;
+  priority: number;
+  weight: number;
+  health: {
+    state:
+      | "healthy"
+      | "degraded"
+      | "auth_failed"
+      | "balance_low"
+      | "circuit_open";
+    consecutiveFailures: number;
+    ewmaLatencyMs: number | null;
+    cooldownUntil: string | null;
+    lastStatusCode: number | null;
+    lastErrorCode: string | null;
+    lastSuccessAt: string | null;
+    lastFailureAt: string | null;
+  };
   scopeCount: number;
   expiresAt: string | null;
   verifiedAt: string | null;
@@ -346,8 +401,30 @@ type UpstreamCredential = {
   revokedAt: string | null;
 };
 
+type UpstreamCapacityGroup = {
+  id: string;
+  label: string;
+  configuredRpsPerEndpoint: number;
+  headroomPercent: number;
+  effectiveRpsPerEndpoint: number;
+  status: "active" | "draining" | "disabled";
+  credentialCount: number;
+  routingCredentialCount: number;
+  health15m: {
+    attempts: number;
+    successes: number;
+    authFailures: number;
+    rateLimits: number;
+    averageLatencyMs: number | null;
+  };
+  leasedRequests: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type UpstreamCredentialsResponse = {
   credentials: UpstreamCredential[];
+  capacityGroups: UpstreamCapacityGroup[];
   activeSource: "managed" | "environment" | "none";
   activeCredentialId: string | null;
   activeFingerprint: string | null;
@@ -1034,6 +1111,57 @@ function isCatalogBatchSelection(
   );
 }
 
+function isEndpointCapability(
+  value: unknown,
+): value is EndpointCapability {
+  if (!isObject(value) || !isObject(value.evidence)) return false;
+  const pagination = value.pagination;
+  return (
+    (value.executionMode === "direct" ||
+      value.executionMode === "native_batch" ||
+      value.executionMode === "paginated" ||
+      value.executionMode === "async_job" ||
+      value.executionMode === "fanout") &&
+    typeof value.nativeBatchSupported === "boolean" &&
+    (value.nativeBatchMax === null ||
+      (isSafeNonNegativeInteger(value.nativeBatchMax) &&
+        value.nativeBatchMax >= 1 &&
+        value.nativeBatchMax <= 1_000)) &&
+    isNullableString(value.targetField, 120) &&
+    (value.targetEncoding === null ||
+      value.targetEncoding === "json_array" ||
+      value.targetEncoding === "csv_query" ||
+      value.targetEncoding === "csv_body") &&
+    (pagination === null ||
+      (isObject(pagination) &&
+        (pagination.style === "cursor" ||
+          pagination.style === "page" ||
+          pagination.style === "offset" ||
+          pagination.style === "mixed") &&
+        isNullableString(pagination.requestField, 120) &&
+        isNullableString(pagination.responseField, 120) &&
+        isNullableString(pagination.pageSizeField, 120) &&
+        (pagination.pageSizeMax === null ||
+          (isSafeNonNegativeInteger(pagination.pageSizeMax) &&
+            pagination.pageSizeMax >= 1 &&
+            pagination.pageSizeMax <= 100_000)) &&
+        pagination.autoFollow === false)) &&
+    (value.typicalItemsPerResponse === null ||
+      (isSafeNonNegativeInteger(value.typicalItemsPerResponse) &&
+        value.typicalItemsPerResponse >= 1 &&
+        value.typicalItemsPerResponse <= 100_000)) &&
+    isNullableString(value.responseItemsPath, 240) &&
+    (value.evidence.status === "verified" ||
+      value.evidence.status === "openapi_inferred" ||
+      value.evidence.status === "pending") &&
+    isNullableString(value.evidence.url, 1_000) &&
+    isNonEmptyString(value.evidence.note, 2_000) &&
+    isNullableString(value.evidence.verifiedAt, 40) &&
+    isSafeNonNegativeInteger(value.revision) &&
+    value.revision >= 1
+  );
+}
+
 function isCatalogEndpoint(value: unknown): value is CatalogEndpoint {
   if (!isObject(value)) return false;
   const x402 = value.x402;
@@ -1051,6 +1179,11 @@ function isCatalogEndpoint(value: unknown): value is CatalogEndpoint {
     (value.parameterSchema === null || isJsonValue(value.parameterSchema)) &&
     isSafeNonNegativeInteger(value.upstreamPriceUsdMicros) &&
     isSafeNonNegativeInteger(value.customerPriceUsdMicros) &&
+    (value.rateLimitRps === null ||
+      (isSafeNonNegativeInteger(value.rateLimitRps) &&
+        value.rateLimitRps >= 1 &&
+        value.rateLimitRps <= 1_000_000)) &&
+    isEndpointCapability(value.capability) &&
     typeof value.priceVerified === "boolean" &&
     typeof value.enabled === "boolean" &&
     typeof value.readOnly === "boolean" &&
@@ -1181,6 +1314,7 @@ function isPendingCatalogEndpoint(
         Number.isFinite(value.rateLimitRps) &&
         value.rateLimitRps >= 0 &&
         value.rateLimitRps <= 1_000_000)) &&
+    isEndpointCapability(value.capability) &&
     value.documentationStatus === "pending" &&
     value.callable === false &&
     isDateString(value.updatedAt)
@@ -1379,6 +1513,7 @@ function isCatalogBatchResponse(
 
 function isUpstreamCredential(value: unknown): value is UpstreamCredential {
   if (!isObject(value)) return false;
+  const health = value.health;
   return (
     isNonEmptyString(value.id, 100) &&
     /^upc_[A-Za-z0-9_-]{16,80}$/.test(value.id) &&
@@ -1388,6 +1523,41 @@ function isUpstreamCredential(value: unknown): value is UpstreamCredential {
     (value.status === "active" ||
       value.status === "standby" ||
       value.status === "revoked") &&
+    typeof value.routingEnabled === "boolean" &&
+    (value.capacityGroupId === null ||
+      (isNonEmptyString(value.capacityGroupId, 100) &&
+        /^upg_[A-Za-z0-9_-]{12,80}$/.test(value.capacityGroupId))) &&
+    isNullableString(value.capacityGroupLabel, 80) &&
+    (value.configuredRpsPerEndpoint === null ||
+      (isSafeNonNegativeInteger(value.configuredRpsPerEndpoint) &&
+        value.configuredRpsPerEndpoint >= 1 &&
+        value.configuredRpsPerEndpoint <= 10_000)) &&
+    (value.effectiveRpsPerEndpoint === null ||
+      (isSafeNonNegativeInteger(value.effectiveRpsPerEndpoint) &&
+        value.effectiveRpsPerEndpoint >= 1 &&
+        value.effectiveRpsPerEndpoint <= 10_000)) &&
+    isSafeNonNegativeInteger(value.priority) &&
+    value.priority >= 1 &&
+    value.priority <= 10_000 &&
+    isSafeNonNegativeInteger(value.weight) &&
+    value.weight >= 1 &&
+    value.weight <= 10_000 &&
+    isObject(health) &&
+    (health.state === "healthy" ||
+      health.state === "degraded" ||
+      health.state === "auth_failed" ||
+      health.state === "balance_low" ||
+      health.state === "circuit_open") &&
+    isSafeNonNegativeInteger(health.consecutiveFailures) &&
+    (health.ewmaLatencyMs === null ||
+      isSafeNonNegativeInteger(health.ewmaLatencyMs)) &&
+    isNullableDateString(health.cooldownUntil) &&
+    (health.lastStatusCode === null ||
+      (isSafeNonNegativeInteger(health.lastStatusCode) &&
+        health.lastStatusCode <= 599)) &&
+    isNullableString(health.lastErrorCode, 100) &&
+    isNullableDateString(health.lastSuccessAt) &&
+    isNullableDateString(health.lastFailureAt) &&
     isSafeNonNegativeInteger(value.scopeCount) &&
     value.scopeCount <= 500 &&
     isNullableDateString(value.expiresAt) &&
@@ -1398,10 +1568,56 @@ function isUpstreamCredential(value: unknown): value is UpstreamCredential {
   );
 }
 
+function isUpstreamCapacityGroup(
+  value: unknown,
+): value is UpstreamCapacityGroup {
+  return (
+    isObject(value) &&
+    isNonEmptyString(value.id, 100) &&
+    /^upg_[A-Za-z0-9_-]{12,80}$/.test(value.id) &&
+    isNonEmptyString(value.label, 80) &&
+    isSafeNonNegativeInteger(value.configuredRpsPerEndpoint) &&
+    value.configuredRpsPerEndpoint >= 1 &&
+    value.configuredRpsPerEndpoint <= 10_000 &&
+    typeof value.headroomPercent === "number" &&
+    Number.isFinite(value.headroomPercent) &&
+    value.headroomPercent >= 10 &&
+    value.headroomPercent <= 100 &&
+    isSafeNonNegativeInteger(value.effectiveRpsPerEndpoint) &&
+    value.effectiveRpsPerEndpoint >= 1 &&
+    value.effectiveRpsPerEndpoint <= value.configuredRpsPerEndpoint &&
+    (value.status === "active" ||
+      value.status === "draining" ||
+      value.status === "disabled") &&
+    isSafeNonNegativeInteger(value.credentialCount) &&
+    isSafeNonNegativeInteger(value.routingCredentialCount) &&
+    value.routingCredentialCount <= value.credentialCount &&
+    isObject(value.health15m) &&
+    isSafeNonNegativeInteger(value.health15m.attempts) &&
+    isSafeNonNegativeInteger(value.health15m.successes) &&
+    value.health15m.successes <= value.health15m.attempts &&
+    isSafeNonNegativeInteger(value.health15m.authFailures) &&
+    value.health15m.authFailures <= value.health15m.attempts &&
+    isSafeNonNegativeInteger(value.health15m.rateLimits) &&
+    value.health15m.rateLimits <= value.health15m.attempts &&
+    (value.health15m.averageLatencyMs === null ||
+      isSafeNonNegativeInteger(value.health15m.averageLatencyMs)) &&
+    isSafeNonNegativeInteger(value.leasedRequests) &&
+    isDateString(value.createdAt) &&
+    isDateString(value.updatedAt)
+  );
+}
+
 function isUpstreamCredentialsResponse(
   value: unknown,
 ): value is UpstreamCredentialsResponse {
-  if (!isObject(value) || !Array.isArray(value.credentials)) return false;
+  if (
+    !isObject(value) ||
+    !Array.isArray(value.credentials) ||
+    !Array.isArray(value.capacityGroups)
+  ) {
+    return false;
+  }
   const activeCredentials = value.credentials.filter(
     (credential) =>
       isObject(credential) && credential.status === "active",
@@ -1422,6 +1638,8 @@ function isUpstreamCredentialsResponse(
   return (
     value.credentials.length <= 100 &&
     value.credentials.every(isUpstreamCredential) &&
+    value.capacityGroups.length <= 100 &&
+    value.capacityGroups.every(isUpstreamCapacityGroup) &&
     (value.activeSource === "managed" ||
       value.activeSource === "environment" ||
       value.activeSource === "none") &&
@@ -1992,6 +2210,7 @@ function catalogAvailabilityReasonLabel(reason: string) {
     not_in_latest_sync: "最新上游目录中已缺失",
     safety_not_approved: "安全策略未通过",
     runtime_not_ready: "上游数据源或运行目录未就绪",
+    upstream_route_unavailable: "当前没有健康且具备授权的上游路由",
     safety_restricted: "安全策略限制调用",
   };
   return labels[reason] ?? reason;
@@ -2824,6 +3043,16 @@ export function AdminClient() {
   const [savingUpstreamConfig, setSavingUpstreamConfig] = useState(false);
   const [upstreamLabel, setUpstreamLabel] = useState("主数据源");
   const [upstreamApiKey, setUpstreamApiKey] = useState("");
+  const [upstreamCapacityGroupId, setUpstreamCapacityGroupId] =
+    useState("new");
+  const [upstreamCapacityGroupLabel, setUpstreamCapacityGroupLabel] =
+    useState("TikHub 主账号");
+  const [upstreamConfiguredRps, setUpstreamConfiguredRps] =
+    useState("10");
+  const [upstreamHeadroomPercent, setUpstreamHeadroomPercent] =
+    useState("80");
+  const [upstreamPriority, setUpstreamPriority] = useState("100");
+  const [upstreamWeight, setUpstreamWeight] = useState("100");
   const [activateUpstreamAfterSave, setActivateUpstreamAfterSave] =
     useState(true);
   const [savingUpstreamCredential, setSavingUpstreamCredential] =
@@ -3813,6 +4042,41 @@ export function AdminClient() {
       );
       return;
     }
+    const priority = Number(upstreamPriority);
+    const weight = Number(upstreamWeight);
+    if (
+      !Number.isSafeInteger(priority) ||
+      priority < 1 ||
+      priority > 10_000 ||
+      !Number.isSafeInteger(weight) ||
+      weight < 1 ||
+      weight > 10_000
+    ) {
+      setNotice("优先级和权重必须是 1–10,000 的整数。");
+      return;
+    }
+    const creatingCapacityGroup = upstreamCapacityGroupId === "new";
+    const capacityGroupLabel = upstreamCapacityGroupLabel
+      .replace(/\s+/g, " ")
+      .trim();
+    const configuredRpsPerEndpoint = Number(upstreamConfiguredRps);
+    const headroomPercent = Number(upstreamHeadroomPercent);
+    if (
+      creatingCapacityGroup &&
+      (capacityGroupLabel.length < 2 ||
+        capacityGroupLabel.length > 80 ||
+        !Number.isSafeInteger(configuredRpsPerEndpoint) ||
+        configuredRpsPerEndpoint < 1 ||
+        configuredRpsPerEndpoint > 10_000 ||
+        !Number.isSafeInteger(headroomPercent) ||
+        headroomPercent < 10 ||
+        headroomPercent > 100)
+    ) {
+      setNotice(
+        "新容量组名称需为 2–80 字符，接口 RPS 为 1–10,000，安全使用比例为 10%–100%。",
+      );
+      return;
+    }
 
     setSavingUpstreamCredential(true);
     setNotice("");
@@ -3829,6 +4093,20 @@ export function AdminClient() {
             apiKey,
             activate: activateUpstreamAfterSave,
             expectedVersion: upstreamCredentials.data.stateVersion,
+            capacityGroupId: creatingCapacityGroup
+              ? undefined
+              : upstreamCapacityGroupId,
+            capacityGroupLabel: creatingCapacityGroup
+              ? capacityGroupLabel
+              : undefined,
+            configuredRpsPerEndpoint: creatingCapacityGroup
+              ? configuredRpsPerEndpoint
+              : undefined,
+            headroomPercent: creatingCapacityGroup
+              ? headroomPercent
+              : undefined,
+            priority,
+            weight,
           }),
         },
       );
@@ -5641,8 +5919,8 @@ export function AdminClient() {
                         <p className="section-kicker">CURRENT SOURCES</p>
                         <h3>当前数据源清单</h3>
                         <p>
-                          这里展示运行时实际选择的来源和全部托管凭据。活动凭据变更会触发目录重新验证，
-                          不会静默沿用旧的发布结果。
+                          “活动”凭据负责目录同步证明；所有已验证且开启路由的健康 Key
+                          都可承接真实请求。相同 TikHub 账号共享容量组，只有独立账号容量才可叠加。
                         </p>
                       </div>
                       <button
@@ -5715,6 +5993,7 @@ export function AdminClient() {
                     </>
                   )}
                   {upstreamView === "current" ? (
+                    <>
                     <div className="admin-upstream-source-grid">
                     <article>
                       <span>当前来源</span>
@@ -5750,7 +6029,101 @@ export function AdminClient() {
                         明文不会从服务端返回
                       </small>
                     </article>
+                    <article>
+                      <span>独立容量组</span>
+                      <strong>
+                        {upstreamCredentials.data.capacityGroups.filter(
+                          (group) => group.status === "active",
+                        ).length}
+                      </strong>
+                      <small>
+                        有效容量{" "}
+                        {upstreamCredentials.data.capacityGroups
+                          .filter((group) => group.status === "active")
+                          .reduce(
+                            (total, group) =>
+                              total +
+                              (group.routingCredentialCount > 0
+                                ? group.effectiveRpsPerEndpoint
+                                : 0),
+                            0,
+                          )}{" "}
+                        账号有效 RPS
+                      </small>
+                    </article>
                     </div>
+                    {upstreamCredentials.data.capacityGroups.length ? (
+                      <div className="admin-table-wrap admin-saas-table-wrap">
+                        <table className="admin-table admin-saas-table">
+                          <thead>
+                            <tr>
+                              <th>账号容量组</th>
+                              <th>稳定容量</th>
+                              <th>凭据冗余</th>
+                              <th>最近 15 分钟</th>
+                              <th>异常信号</th>
+                              <th>x402 准入占用</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {upstreamCredentials.data.capacityGroups.map(
+                              (group) => (
+                                <tr key={group.id}>
+                                  <td>
+                                    <strong>{group.label}</strong>
+                                    <small>{group.status}</small>
+                                  </td>
+                                  <td>
+                                    <strong>
+                                      {group.effectiveRpsPerEndpoint} RPS
+                                    </strong>
+                                    <small>
+                                      套餐 {group.configuredRpsPerEndpoint} ·
+                                      使用 {group.headroomPercent}%
+                                    </small>
+                                  </td>
+                                  <td>
+                                    <strong>
+                                      {group.routingCredentialCount}/
+                                      {group.credentialCount} 可路由
+                                    </strong>
+                                    <small>共享同一账号 RPS 与余额</small>
+                                  </td>
+                                  <td>
+                                    <strong>
+                                      {group.health15m.successes}/
+                                      {group.health15m.attempts} 成功
+                                    </strong>
+                                    <small>
+                                      平均{" "}
+                                      {group.health15m.averageLatencyMs ??
+                                        "—"}{" "}
+                                      ms
+                                    </small>
+                                  </td>
+                                  <td>
+                                    <strong>
+                                      {group.health15m.authFailures} 鉴权 ·{" "}
+                                      {group.health15m.rateLimits} 限流
+                                    </strong>
+                                    <small>
+                                      鉴权归 Key；429 归账号组
+                                    </small>
+                                  </td>
+                                  <td>
+                                    <strong>
+                                      {group.leasedRequests} Hu
+                                    </strong>
+                                    <small>活跃批次计划上游请求</small>
+                                  </td>
+                                </tr>
+                              ),
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : null}
+                    </>
                   ) : null}
 
                   {upstreamView === "add" ? (
@@ -5796,6 +6169,108 @@ export function AdminClient() {
                         placeholder="只在本次提交中使用"
                       />
                     </label>
+                    <label>
+                      <span>容量组 / TikHub 账号</span>
+                      <select
+                        value={upstreamCapacityGroupId}
+                        onChange={(event) =>
+                          setUpstreamCapacityGroupId(event.target.value)
+                        }
+                      >
+                        <option value="new">新建独立容量组</option>
+                        {upstreamCredentials.data.capacityGroups
+                          .filter((group) => group.status !== "disabled")
+                          .map((group) => (
+                            <option key={group.id} value={group.id}>
+                              {group.label} ·{" "}
+                              {group.effectiveRpsPerEndpoint} 账号有效 RPS
+                            </option>
+                          ))}
+                      </select>
+                      <small>
+                        同一 TikHub 账号下的多个 Key 必须放在同一容量组，不能叠加 RPS。
+                      </small>
+                    </label>
+                    {upstreamCapacityGroupId === "new" ? (
+                      <>
+                        <label>
+                          <span>容量组名称</span>
+                          <input
+                            value={upstreamCapacityGroupLabel}
+                            minLength={2}
+                            maxLength={80}
+                            required
+                            onChange={(event) =>
+                              setUpstreamCapacityGroupLabel(
+                                event.target.value,
+                              )
+                            }
+                            placeholder="例如：TikHub 主账号"
+                          />
+                        </label>
+                        <label>
+                          <span>账号套餐总上限（RPS）</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={10_000}
+                            step={1}
+                            required
+                            value={upstreamConfiguredRps}
+                            onChange={(event) =>
+                              setUpstreamConfiguredRps(event.target.value)
+                            }
+                          />
+                          <small>
+                            TikHub 当前默认套餐通常为账号 10 RPS；按实际购买套餐填写。
+                          </small>
+                        </label>
+                        <label>
+                          <span>安全使用比例（%）</span>
+                          <input
+                            type="number"
+                            min={10}
+                            max={100}
+                            step={1}
+                            required
+                            value={upstreamHeadroomPercent}
+                            onChange={(event) =>
+                              setUpstreamHeadroomPercent(event.target.value)
+                            }
+                          />
+                          <small>默认只使用 80%，预留上游抖动和人工请求余量。</small>
+                        </label>
+                      </>
+                    ) : null}
+                    <label>
+                      <span>路由优先级</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={10_000}
+                        step={1}
+                        required
+                        value={upstreamPriority}
+                        onChange={(event) =>
+                          setUpstreamPriority(event.target.value)
+                        }
+                      />
+                      <small>数值越小越优先；同级再按权重和健康状态选择。</small>
+                    </label>
+                    <label>
+                      <span>同级权重</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={10_000}
+                        step={1}
+                        required
+                        value={upstreamWeight}
+                        onChange={(event) =>
+                          setUpstreamWeight(event.target.value)
+                        }
+                      />
+                    </label>
                     <label className="admin-memory-option">
                       <input
                         type="checkbox"
@@ -5830,16 +6305,29 @@ export function AdminClient() {
 
                   {upstreamView === "current" &&
                   upstreamCredentials.data.credentials.length ? (
+                    <>
+                    <div className="admin-source-truth">
+                      <div>
+                        <span className="admin-source-truth-mark" aria-hidden="true">HA</span>
+                        <div>
+                          <strong>多 Key 是凭据容灾，不是账号扩容</strong>
+                          <p>
+                            同账号 Key 在 401/403、过期或单凭据异常时自动切换；
+                            账号级 429、402 余额不足及 TikHub 整体故障会暂停整个容量组。
+                            后台分别记录 Key 健康与容量组/端点健康，组内 Key 始终共享同一 RPS 和余额。
+                          </p>
+                        </div>
+                      </div>
+                    </div>
                     <div className="admin-table-wrap admin-saas-table-wrap">
                       <table className="admin-table admin-saas-table">
                         <thead>
                           <tr>
                             <th>数据源凭据</th>
-                            <th>状态</th>
-                            <th>授权范围</th>
-                            <th>最近验证</th>
-                            <th>最近调用</th>
-                            <th>到期时间</th>
+                            <th>容量 / 路由</th>
+                            <th>运行健康</th>
+                            <th>授权</th>
+                            <th>最近活动</th>
                             <th>操作</th>
                           </tr>
                         </thead>
@@ -5855,15 +6343,65 @@ export function AdminClient() {
                                   </small>
                                 </td>
                                 <td>
+                                  <strong>
+                                    {credential.capacityGroupLabel ??
+                                      "未分配容量组"}
+                                  </strong>
+                                  <small>
+                                    {credential.effectiveRpsPerEndpoint ??
+                                      "—"}{" "}
+                                    账号有效 RPS
+                                  </small>
+                                  <small>
+                                    P{credential.priority} · W
+                                    {credential.weight} ·{" "}
+                                    {credential.routingEnabled
+                                      ? "参与路由"
+                                      : "不参与路由"}
+                                  </small>
+                                </td>
+                                <td>
                                   <span
-                                    className={`admin-account-status is-${credential.status}`}
+                                    className={`admin-account-status is-${
+                                      credential.routingEnabled &&
+                                      credential.health.state === "healthy"
+                                        ? "active"
+                                        : credential.status === "revoked"
+                                          ? "revoked"
+                                          : "standby"
+                                    }`}
                                   >
-                                    {credential.status === "active"
-                                      ? "活动"
-                                      : credential.status === "standby"
-                                        ? "备用"
-                                        : "已撤销"}
+                                    {credential.status === "revoked"
+                                      ? "已撤销"
+                                      : !credential.routingEnabled
+                                        ? "未启用"
+                                        : credential.health.state ===
+                                            "healthy"
+                                          ? "健康"
+                                          : credential.health.state ===
+                                              "auth_failed"
+                                            ? "鉴权失败"
+                                            : credential.health.state ===
+                                                "balance_low"
+                                              ? "余额不足"
+                                              : credential.health.state ===
+                                                  "circuit_open"
+                                                ? "熔断"
+                                                : "降级"}
                                   </span>
+                                  <small>
+                                    {credential.status === "active"
+                                      ? "目录权威 · "
+                                      : ""}
+                                    {credential.health.ewmaLatencyMs == null
+                                      ? "暂无延迟样本"
+                                      : `${credential.health.ewmaLatencyMs} ms`}
+                                  </small>
+                                  <small>
+                                    {credential.health.lastStatusCode == null
+                                      ? "尚无状态码"
+                                      : `HTTP ${credential.health.lastStatusCode}`}
+                                  </small>
                                 </td>
                                 <td>
                                   <strong>
@@ -5875,12 +6413,19 @@ export function AdminClient() {
                                       : "尚未验证"}
                                   </small>
                                 </td>
-                                <td>{formatDate(credential.verifiedAt)}</td>
-                                <td>{formatDate(credential.lastUsedAt)}</td>
                                 <td>
-                                  {credential.expiresAt
-                                    ? formatDate(credential.expiresAt)
-                                    : "不设到期"}
+                                  <strong>
+                                    {formatDate(credential.lastUsedAt)}
+                                  </strong>
+                                  <small>
+                                    验证 {formatDate(credential.verifiedAt)}
+                                  </small>
+                                  <small>
+                                    到期{" "}
+                                    {credential.expiresAt
+                                      ? formatDate(credential.expiresAt)
+                                      : "不设到期"}
+                                  </small>
                                 </td>
                                 <td>
                                   <div className="admin-inline-actions">
@@ -5930,6 +6475,7 @@ export function AdminClient() {
                         </tbody>
                       </table>
                     </div>
+                    </>
                   ) : upstreamView === "current" ? (
                     <div className="admin-empty">
                       <strong>尚未保存上游凭据</strong>
@@ -6185,6 +6731,7 @@ export function AdminClient() {
                             <tr>
                               <th>待同步服务</th>
                               <th>平台 / 分类</th>
+                              <th>能力状态</th>
                               <th>成本</th>
                               <th>客户价</th>
                               <th>状态</th>
@@ -6242,6 +6789,15 @@ export function AdminClient() {
                                       )}{" · "}
                                       {catalogSurfaceLabel(endpoint.surface)}
                                     </small>
+                                  </td>
+                                  <td>
+                                    <strong>
+                                      {endpoint.capability.executionMode}
+                                    </strong>
+                                    <small>
+                                      {endpoint.capability.evidence.status}
+                                    </small>
+                                    <small>方法与承载量待官方确认</small>
                                   </td>
                                   <td>
                                     <strong>
@@ -6751,6 +7307,7 @@ export function AdminClient() {
                                 <th>路由</th>
                                 <th>平台 / 分类</th>
                                 <th>标准路由</th>
+                                <th>执行能力</th>
                                 <th className="admin-money-head">
                                   x402 单目标价
                                 </th>
@@ -6821,6 +7378,19 @@ export function AdminClient() {
                                       >
                                         {eligible ? "当前可用" : "当前不可用"}
                                       </span>
+                                    </td>
+                                    <td>
+                                      <strong>
+                                        {endpoint.capability.executionMode}
+                                      </strong>
+                                      <small>
+                                        {endpoint.capability.nativeBatchSupported
+                                          ? `原生分片 ≤ ${endpoint.capability.nativeBatchMax ?? "—"}`
+                                          : "x402 逐目标 fanout"}
+                                      </small>
+                                      <small>
+                                        {endpoint.capability.evidence.status}
+                                      </small>
                                     </td>
                                     <td className="admin-money-cell">
                                       <div className="admin-route-price-control">
@@ -7469,6 +8039,7 @@ export function AdminClient() {
                             ) : null}
                             <th>路由</th>
                             <th>平台 / 分类</th>
+                            <th>请求能力</th>
                             <th className="admin-money-head">成本</th>
                             <th className="admin-money-head">客户价</th>
                             <th className="admin-money-head">毛利</th>
@@ -7584,7 +8155,25 @@ export function AdminClient() {
                                         <span>Revision</span>
                                         <strong>{endpoint.revision}</strong>
                                       </p>
+                                      <p>
+                                        <span>来源接口上限</span>
+                                        <strong>
+                                          {endpoint.rateLimitRps == null
+                                            ? "未声明"
+                                            : `${endpoint.rateLimitRps.toLocaleString()} RPS`}
+                                        </strong>
+                                      </p>
+                                      <p>
+                                        <span>能力证据</span>
+                                        <strong>
+                                          {endpoint.capability.evidence.status}
+                                          {" · "}v{endpoint.capability.revision}
+                                        </strong>
+                                      </p>
                                     </div>
+                                    <p className="admin-route-description">
+                                      {endpoint.capability.evidence.note}
+                                    </p>
                                     {endpoint.description ? (
                                       <p className="admin-route-description">
                                         {endpoint.description}
@@ -7612,6 +8201,23 @@ export function AdminClient() {
                                   <small>
                                     {catalogDataTypeLabel(endpoint.dataType)} ·{" "}
                                     {catalogSurfaceLabel(endpoint.surface)}
+                                  </small>
+                                </td>
+                                <td>
+                                  <strong>
+                                    {endpoint.capability.executionMode}
+                                  </strong>
+                                  <small>
+                                    {endpoint.capability.nativeBatchSupported
+                                      ? `原生批量 ≤ ${endpoint.capability.nativeBatchMax ?? "—"} · ${endpoint.capability.targetField ?? "目标"}`
+                                      : endpoint.capability.pagination
+                                        ? `${endpoint.capability.pagination.style} · ${endpoint.capability.pagination.requestField ?? "分页字段待确认"}`
+                                        : "当前 1:1 上游请求"}
+                                  </small>
+                                  <small>
+                                    {endpoint.capability.pagination?.pageSizeMax
+                                      ? `单页上限 ${endpoint.capability.pagination.pageSizeMax}`
+                                      : "返回规模待确认"}
                                   </small>
                                 </td>
                                 <td className="admin-money-cell">

@@ -184,6 +184,8 @@ const migrationFiles = [
   "drizzle/0015_tan_lila_cheney.sql",
   "drizzle/0016_windy_lord_tyger.sql",
   "drizzle/0017_omniscient_zarda.sql",
+  "drizzle/0018_previous_jackpot.sql",
+  "drizzle/0019_previous_patriot.sql",
 ];
 
 async function migrate(db, names = migrationFiles) {
@@ -577,6 +579,14 @@ test("publishes only the runtime catalog with provider-neutral public metadata",
   assert.equal(marketplaceData.stats.available, 1);
   assert.equal(marketplaceData.endpoints[0].documentationStatus, "complete");
   assert.equal(
+    marketplaceData.endpoints[0].capability.executionMode,
+    "direct",
+  );
+  assert.equal(
+    marketplaceData.endpoints[0].capability.evidence.status,
+    "pending",
+  );
+  assert.equal(
     marketplaceData.endpoints[0].pricing.amountUsdMicros,
     2000,
   );
@@ -599,6 +609,11 @@ test("publishes only the runtime catalog with provider-neutral public metadata",
     "web",
   ]);
   assert.equal(available.endpoint.documentationStatus, "complete");
+  assert.equal(available.endpoint.capability.executionMode, "direct");
+  assert.equal(
+    available.endpoint.capability.evidence.status,
+    "pending",
+  );
   assert.deepEqual(available.endpoint.input.parameters, []);
   assert.equal(available.endpoint.input.requestBody, null);
   assert.equal(available.endpoint.response.mode, "relaybase_envelope");
@@ -816,11 +831,30 @@ test("fails readiness and payment creation when database migrations are stale", 
     },
     env,
   );
-  assert.equal(keyResponse.status, 201);
-  const key = (await keyResponse.json()).key;
-  const user = db.raw
-    .prepare("SELECT id FROM users WHERE email = ?")
-    .get("owner@example.com");
+  assert.equal(keyResponse.status, 503);
+  assert.equal(
+    (await keyResponse.json()).error.code,
+    "database_migrations_required",
+  );
+  const staleSecret = "rb_live_stale_schema_test_key";
+  const staleKeyHash = createHash("sha256")
+    .update(staleSecret)
+    .digest("hex");
+  db.raw
+    .prepare(
+      `INSERT INTO users (id, email, display_name, status)
+       VALUES ('usr_stale', 'owner@example.com', 'Relay Owner', 'active')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO api_keys
+       (id, user_id, label, key_prefix, key_hash, rate_limit_rpm)
+       VALUES ('key_stale', 'usr_stale', 'Stale schema',
+               'rb_live_stale…', ?, 60)`,
+    )
+    .run(staleKeyHash);
+  const user = { id: "usr_stale" };
   db.raw
     .prepare(
       `INSERT INTO balance_ledger
@@ -833,7 +867,7 @@ test("fails readiness and payment creation when database migrations are stale", 
     "/v1/tiktok/web/fetch_user_profile?uniqueId=schema",
     {
       headers: {
-        authorization: `Bearer ${key.secret}`,
+        authorization: `Bearer ${staleSecret}`,
         "idempotency-key": "stale-schema-proxy",
       },
     },
@@ -1704,6 +1738,21 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
   );
   assert.equal(synced.status, 200);
   assert.equal((await synced.json()).priced, 1);
+  assert.deepEqual(
+    {
+      ...db.raw
+        .prepare(
+          `SELECT rate_limit_raw, rate_limit_rps
+           FROM endpoint_catalog
+           WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+        )
+        .get(),
+    },
+    {
+      rate_limit_raw: "10/second",
+      rate_limit_rps: 10,
+    },
+  );
   assert.deepEqual(upstreamAuthorizations.slice(-2), [
     `Bearer ${managedApiKey}`,
     `Bearer ${managedApiKey}`,
@@ -1721,6 +1770,18 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
   assert.equal(managedData.activeSource, "managed");
   assert.equal(managedData.stateVersion, 2);
   assert.equal(managedData.credentials[0].status, "active");
+  assert.equal(managedData.credentials[0].routingEnabled, true);
+  assert.equal(managedData.credentials[0].health.state, "healthy");
+  assert.equal(managedData.capacityGroups.length, 1);
+  assert.equal(
+    managedData.credentials[0].capacityGroupId,
+    managedData.capacityGroups[0].id,
+  );
+  assert.equal(
+    managedData.capacityGroups[0].configuredRpsPerEndpoint,
+    10,
+  );
+  assert.equal(managedData.capacityGroups[0].effectiveRpsPerEndpoint, 8);
   const managedListText = JSON.stringify(managedData);
   assert.doesNotMatch(managedListText, new RegExp(managedApiKey));
   assert.doesNotMatch(managedListText, /encrypted_secret|secret_hash/);
@@ -1857,6 +1918,329 @@ test("encrypts, verifies, rotates and fail-closes managed Synthetic Provider cre
   assert.equal(
     (await failClosedReadiness.json()).capabilities.upstreamConfigured,
     false,
+  );
+});
+
+test("fails over once across independent upstream capacity groups", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const adminSecret = "routing-admin-secret-32-characters-minimum";
+  const firstUpstreamKey = "managed-routing-source-key-account-a";
+  const firstUpstreamBackupKey =
+    "managed-routing-source-key-account-a-backup";
+  const secondUpstreamKey = "managed-routing-source-key-account-b";
+  const env = baseEnv({
+    DB: db,
+    ADMIN_MASTER_SECRET: adminSecret,
+    UPSTREAM_CREDENTIALS_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString(
+      "base64url",
+    ),
+    LEGAL_REVIEW_CONFIRMED: "true",
+    RESELLER_AUTHORIZED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
+    RECONCILIATION_SECRET: "routing-reconcile-secret-32-characters",
+  });
+  const adminHeaders = {
+    authorization: `Bearer ${adminSecret}`,
+    origin: "http://localhost",
+    "content-type": "application/json",
+  };
+  const dataRouteAuthorizations = [];
+  let routingScenario = "group-rate-limit";
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(
+      typeof input === "string" || input instanceof URL ? input : input.url,
+    );
+    const authorization = new Headers(init?.headers).get("authorization");
+    if (url.pathname === "/api/v1/control/credential") {
+      return Response.json({
+        code: 200,
+        api_key_data: {
+          api_key_scopes: ["/api/v1/tiktok/"],
+          expires_at: "2030-07-01T00:00:00Z",
+          api_key_status: 1,
+        },
+        user_data: {
+          account_disabled: false,
+          is_active: true,
+        },
+      });
+    }
+    if (url.pathname === "/api/v1/control/catalog") {
+      return Response.json({
+        data: [
+          {
+            endpoint_uri: "/api/v1/tiktok/web/fetch_user_profile",
+            endpoint_cost: 0.001,
+            rate_limit: "100/second",
+          },
+        ],
+      });
+    }
+    if (url.pathname === "/openapi.json") {
+      return Response.json({
+        openapi: "3.1.0",
+        info: { title: "Synthetic data API", version: "1.0.0" },
+        paths: {
+          "/api/v1/tiktok/web/fetch_user_profile": {
+            get: {
+              summary: "Fetch a public profile",
+              parameters: [],
+            },
+          },
+        },
+      });
+    }
+    if (url.pathname === "/api/v1/tiktok/web/fetch_user_profile") {
+      dataRouteAuthorizations.push(authorization);
+      if (authorization === `Bearer ${firstUpstreamKey}`) {
+        if (routingScenario === "credential-auth-failure") {
+          return Response.json(
+            { code: 401, message: "credential rejected" },
+            { status: 401 },
+          );
+        }
+        return Response.json(
+          { code: 429, message: "capacity reached" },
+          { status: 429, headers: { "retry-after": "1" } },
+        );
+      }
+      if (authorization === `Bearer ${firstUpstreamBackupKey}`) {
+        assert.equal(routingScenario, "credential-auth-failure");
+        return Response.json({
+          code: 200,
+          data: { servedBy: "account-a-backup" },
+        });
+      }
+      assert.equal(authorization, `Bearer ${secondUpstreamKey}`);
+      return Response.json({
+        code: 200,
+        data: { servedBy: "account-b" },
+      });
+    }
+    throw new Error(`Unexpected upstream URL ${url.href}`);
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const createUpstream = async ({
+    label,
+    apiKey,
+    expectedVersion,
+    capacityGroupLabel,
+    capacityGroupId,
+    priority,
+  }) =>
+    fetchWorker(
+      "/api/admin/upstream-credentials",
+      {
+        method: "POST",
+        headers: adminHeaders,
+        body: JSON.stringify({
+          label,
+          apiKey,
+          activate: true,
+          expectedVersion,
+          capacityGroupLabel,
+          ...(capacityGroupId ? { capacityGroupId } : {}),
+          configuredRpsPerEndpoint: 100,
+          headroomPercent: 100,
+          priority,
+          weight: 100,
+        }),
+      },
+      env,
+    );
+
+  const first = await createUpstream({
+    label: "Account A primary",
+    apiKey: firstUpstreamKey,
+    expectedVersion: 1,
+    capacityGroupLabel: "TikHub account A",
+    priority: 1,
+  });
+  assert.equal(first.status, 201);
+  const firstData = await first.json();
+  const firstCapacityGroupId = firstData.credential.capacityGroupId;
+  const firstBackup = await createUpstream({
+    label: "Account A credential backup",
+    apiKey: firstUpstreamBackupKey,
+    expectedVersion: 2,
+    capacityGroupLabel: "TikHub account A",
+    capacityGroupId: firstCapacityGroupId,
+    priority: 2,
+  });
+  assert.equal(firstBackup.status, 201);
+  const second = await createUpstream({
+    label: "Account B failover",
+    apiKey: secondUpstreamKey,
+    expectedVersion: 3,
+    capacityGroupLabel: "TikHub account B",
+    priority: 100,
+  });
+  assert.equal(second.status, 201);
+
+  const synced = await fetchWorker(
+    "/api/admin/catalog/sync",
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${adminSecret}` },
+    },
+    env,
+  );
+  assert.equal(synced.status, 200);
+  db.raw
+    .prepare(
+      `UPDATE endpoint_catalog
+       SET enabled = 1, read_only = 1,
+           reviewed_at = CURRENT_TIMESTAMP
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO operation_heartbeats
+       (name, last_success_at, details_json)
+       VALUES ('reconciliation', CURRENT_TIMESTAMP, '{}')
+       ON CONFLICT(name) DO UPDATE SET
+         last_success_at = CURRENT_TIMESTAMP`,
+    )
+    .run();
+
+  const customerKeyResponse = await fetchWorker(
+    "/api/keys",
+    {
+      method: "POST",
+      headers: signedInHeaders(),
+      body: JSON.stringify({ label: "Routing test" }),
+    },
+    env,
+  );
+  assert.equal(customerKeyResponse.status, 201);
+  const customerKey = (await customerKeyResponse.json()).key;
+  const user = db.raw
+    .prepare("SELECT id FROM users WHERE email = 'owner@example.com'")
+    .get();
+  db.raw
+    .prepare(
+      `INSERT INTO balance_ledger
+       (id, user_id, entry_type, delta_usd_micros, reference_id)
+       VALUES ('routing-seed', ?, 'test_credit', 1000000,
+               'test:routing-seed')`,
+    )
+    .run(user.id);
+
+  const response = await fetchWorker(
+    "/v1/tiktok/web/fetch_user_profile?uniqueId=relaybase",
+    {
+      headers: {
+        authorization: `Bearer ${customerKey.secret}`,
+        "idempotency-key": "routing-failover-0001",
+      },
+    },
+    env,
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    success: true,
+    data: { servedBy: "account-b" },
+  });
+  assert.deepEqual(dataRouteAuthorizations, [
+    `Bearer ${firstUpstreamKey}`,
+    `Bearer ${secondUpstreamKey}`,
+  ]);
+
+  const attempts = db.raw
+    .prepare(
+      `SELECT attempt_number, outcome, status_code, capacity_group_id
+       FROM upstream_request_attempts
+       WHERE context_type = 'api_key'
+       ORDER BY attempt_number`,
+    )
+    .all();
+  assert.equal(attempts.length, 2);
+  assert.deepEqual(
+    attempts.map((attempt) => [
+      attempt.attempt_number,
+      attempt.outcome,
+      attempt.status_code,
+    ]),
+    [
+      [1, "rate_limited", 429],
+      [2, "success", 200],
+    ],
+  );
+  assert.notEqual(
+    attempts[0].capacity_group_id,
+    attempts[1].capacity_group_id,
+  );
+  assert.equal(
+    db.raw
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM upstream_rate_limit_state
+         WHERE endpoint_path = '__all__'`,
+      )
+      .get().count,
+    2,
+  );
+
+  db.raw.prepare("DELETE FROM upstream_route_health").run();
+  db.raw.prepare("DELETE FROM upstream_rate_limit_state").run();
+  db.raw
+    .prepare(
+      `UPDATE upstream_credential_health
+       SET state = 'healthy', consecutive_failures = 0,
+           cooldown_until = NULL, last_status_code = NULL,
+           last_error_code = NULL`,
+    )
+    .run();
+  routingScenario = "credential-auth-failure";
+  const credentialFailover = await fetchWorker(
+    "/v1/tiktok/web/fetch_user_profile?uniqueId=relaybase",
+    {
+      headers: {
+        authorization: `Bearer ${customerKey.secret}`,
+        "idempotency-key": "routing-credential-failover-0002",
+      },
+    },
+    env,
+  );
+  assert.equal(credentialFailover.status, 200);
+  assert.deepEqual(await credentialFailover.json(), {
+    success: true,
+    data: { servedBy: "account-a-backup" },
+  });
+  assert.deepEqual(dataRouteAuthorizations.slice(-2), [
+    `Bearer ${firstUpstreamKey}`,
+    `Bearer ${firstUpstreamBackupKey}`,
+  ]);
+  const credentialAttempts = db.raw
+    .prepare(
+      `SELECT capacity_group_id, status_code
+       FROM upstream_request_attempts
+       WHERE context_type = 'api_key'
+         AND context_id = (
+           SELECT context_id
+           FROM upstream_request_attempts
+           WHERE status_code = 401
+             AND context_type = 'api_key'
+           LIMIT 1
+         )
+       ORDER BY attempt_number`,
+    )
+    .all();
+  assert.equal(credentialAttempts.length, 2);
+  assert.deepEqual(
+    credentialAttempts.map((attempt) => attempt.status_code),
+    [401, 200],
+  );
+  assert.equal(
+    credentialAttempts[0].capacity_group_id,
+    credentialAttempts[1].capacity_group_id,
   );
 });
 
@@ -2865,7 +3249,10 @@ test("creates hashed customer keys and proxies with idempotent billing", async (
     LEGAL_REVIEW_CONFIRMED: "true",
     UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
     UPSTREAM_API_KEY: "upstream-secret",
-    API_RATE_LIMIT_RPM: "4",
+    API_RATE_LIMIT_RPS: "1",
+    API_RATE_LIMIT_BURST: "4",
+    ACCOUNT_RATE_LIMIT_RPS: "1",
+    ACCOUNT_RATE_LIMIT_BURST: "4",
     RECONCILIATION_SECRET: "reconcile-secret-32-characters-minimum",
   });
 
@@ -3062,6 +3449,8 @@ test("creates hashed customer keys and proxies with idempotent billing", async (
   );
   assert.equal(success.status, 200);
   assert.equal(success.headers.get("x-relaybase-cost-usd-micros"), "2000");
+  assert.equal(success.headers.get("x-ratelimit-scope"), "account");
+  assert.equal(success.headers.get("x-ratelimit-limit"), "1");
   assert.equal(
     success.headers.get("x-relaybase-balance-usd-micros"),
     "998000",
@@ -3151,7 +3540,13 @@ test("creates hashed customer keys and proxies with idempotent billing", async (
     env,
   );
   assert.equal(limited.status, 429);
-  assert.equal((await limited.json()).error.code, "rate_limit_exceeded");
+  assert.equal(
+    (await limited.json()).error.code,
+    "customer_rate_limit_exceeded",
+  );
+  assert.equal(limited.headers.get("x-ratelimit-scope"), "api-key");
+  assert.equal(limited.headers.get("x-ratelimit-limit"), "1");
+  assert.equal(limited.headers.get("retry-after"), "1");
   assert.equal(upstreamCalls, 3);
 
   const post = await fetchWorker(
@@ -5880,6 +6275,7 @@ test("syncs the real Synthetic Provider price shape, verifies zero cost and dedu
       verified: true,
     },
     rateLimitRps: 5,
+    capability: marketplaceData.endpoints[0].capability,
     x402: {
       enabled: false,
       available: false,
@@ -5894,6 +6290,10 @@ test("syncs the real Synthetic Provider price shape, verifies zero cost and dedu
     },
     documentationStatus: "pending",
   });
+  assert.equal(
+    marketplaceData.endpoints[0].capability.evidence.status,
+    "pending",
+  );
   assert.doesNotMatch(
     JSON.stringify(marketplaceData),
     /source\.example|\/api\/v1\/control\//i,
@@ -7498,8 +7898,14 @@ test("publishes reviewed catalog prices and creates idempotent recoverable payme
       unit: "request",
       verified: true,
     },
+    rateLimitRps: null,
+    capability: catalogData.endpoints[0].capability,
     updatedAt: catalogData.endpoints[0].updatedAt,
   });
+  assert.equal(
+    catalogData.endpoints[0].capability.executionMode,
+    "direct",
+  );
 
   const excludedCatalog = await fetchWorker(
     "/api/catalog?dataType=content&tag=TikTok-Web-API&surface=web",
@@ -8924,6 +9330,22 @@ test("quotes, settles and executes one x402 wallet-paid batch without touching b
     paymentRequired.extensions.relaybaseBatch.info.verifiedQuantity,
     2,
   );
+  assert.equal(
+    paymentRequired.extensions.relaybaseBatch.info.executionMode,
+    "fanout",
+  );
+  assert.equal(
+    paymentRequired.extensions.relaybaseBatch.info.plannedUpstreamRequests,
+    2,
+  );
+  assert.equal(
+    paymentRequired.extensions.relaybaseBatch.info.capabilityRevision,
+    1,
+  );
+  assert.equal(
+    paymentRequired.extensions.relaybaseBatch.info.nativeBatchMax,
+    null,
+  );
   const configWhileQuoteOpen = await fetchWorker(
     "/api/admin/x402/runtime-config",
     {
@@ -9211,6 +9633,22 @@ test("quotes, settles and executes one x402 wallet-paid batch without touching b
     dashboardData.x402.historyScope.walletAddress,
     walletAddress,
   );
+  assert.deepEqual(
+    {
+      customerRequests: dashboardData.calls[0].customerRequestCount,
+      upstreamAttempts: dashboardData.calls[0].upstreamAttemptCount,
+      targets: dashboardData.calls[0].targetCount,
+      returnedItems: dashboardData.calls[0].returnedItemCount,
+      pages: dashboardData.calls[0].paginationUnitCount,
+    },
+    {
+      customerRequests: 1,
+      upstreamAttempts: 1,
+      targets: 1,
+      returnedItems: null,
+      pages: 0,
+    },
+  );
 
   const unlinkedHistory = await fetchWorker(
     "/api/x402/batches?page=1&limit=20&view=all",
@@ -9221,4 +9659,235 @@ test("quotes, settles and executes one x402 wallet-paid batch without touching b
   const unlinkedHistoryData = await unlinkedHistory.json();
   assert.equal(unlinkedHistoryData.scope.kind, "wallet_not_linked");
   assert.equal(unlinkedHistoryData.total, 0);
+});
+
+test("quotes verified native batches by logical targets and planned upstream chunks", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  enableCatalogEndpoint(db);
+  const endpoint = "/v1/tiktok/app/v3/fetch_multi_video_v2";
+  db.raw
+    .prepare(
+      `DELETE FROM endpoint_catalog
+       WHERE path = '/v1/tiktok/web/fetch_user_profile'`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO endpoint_catalog
+       (path, platform, http_method, data_type, tags_json, surface,
+        operation_id, summary, description, parameter_schema_json,
+        upstream_price_usd_micros, customer_price_usd_micros,
+        price_verified, enabled, read_only, safety_classification,
+        safety_reasons_json, safety_policy_version, revision,
+        sync_generation, reviewed_at)
+       VALUES (?, 'tiktok', 'POST', 'other', '["app","other"]', 'app',
+               'relaybase_tiktok_app_v3_fetch_multi_video_v2',
+               'Fetch multiple videos', 'Test verified native batch',
+               NULL, 1000, 2000, 1, 1, 1, 'safe_data_read',
+               '["test_fixture"]', 1, 1, ?, CURRENT_TIMESTAMP)`,
+    )
+    .run(endpoint, TEST_CATALOG_GENERATION);
+  db.raw
+    .prepare(
+      `INSERT INTO endpoint_x402_config
+       (path, enabled, unit_price_usd_micros, max_batch_size, revision)
+       VALUES (?, 1, 3000, 30, 1)`,
+    )
+    .run(endpoint);
+
+  const env = baseEnv({
+    DB: db,
+    UPSTREAM_API_KEY: "upstream-key",
+    RESELLER_AUTHORIZED: "true",
+    LEGAL_REVIEW_CONFIRMED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
+    RECONCILIATION_SECRET: "native-batch-reconcile-secret-32-characters",
+    X402_ENABLED: "true",
+    X402_PAY_TO_ADDRESS: `0x${"1".repeat(40)}`,
+    X402_FACILITATOR_URL: "https://facilitator.example/x402",
+    X402_FACILITATOR_BEARER_TOKEN: "native-batch-facilitator-token",
+  });
+  const requests = Array.from({ length: 26 }, (_, index) => ({
+    aweme_id: `video-${index + 1}`,
+  }));
+  const quote = await fetchWorker(
+    "/v1/x402/batch",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "verified-native-batch-0001",
+      },
+      body: JSON.stringify({ endpoint, requests }),
+    },
+    env,
+  );
+  assert.equal(quote.status, 402);
+  const paymentRequired = JSON.parse(
+    Buffer.from(
+      quote.headers.get("payment-required"),
+      "base64",
+    ).toString("utf8"),
+  );
+  assert.deepEqual(
+    {
+      quantity:
+        paymentRequired.extensions.relaybaseBatch.info.verifiedQuantity,
+      executionMode:
+        paymentRequired.extensions.relaybaseBatch.info.executionMode,
+      planned:
+        paymentRequired.extensions.relaybaseBatch.info
+          .plannedUpstreamRequests,
+      nativeBatchMax:
+        paymentRequired.extensions.relaybaseBatch.info.nativeBatchMax,
+      amount: paymentRequired.accepts[0].amount,
+    },
+    {
+      quantity: 26,
+      executionMode: "native_batch",
+      planned: 2,
+      nativeBatchMax: 25,
+      amount: "78000",
+    },
+  );
+  const stored = db.raw
+    .prepare(
+      `SELECT execution_mode, capability_revision,
+              planned_upstream_requests, verified_quantity
+       FROM x402_batches
+       WHERE id = ?`,
+    )
+    .get(quote.headers.get("x-relaybase-x402-batch-id"));
+  assert.deepEqual(
+    {
+      executionMode: stored.execution_mode,
+      revision: stored.capability_revision,
+      planned: stored.planned_upstream_requests,
+      quantity: stored.verified_quantity,
+    },
+    {
+      executionMode: "native_batch",
+      revision: 1,
+      planned: 2,
+      quantity: 26,
+    },
+  );
+  const lease = db.raw
+    .prepare(
+      `SELECT planned_requests, status
+       FROM upstream_capacity_leases
+       WHERE context_type = 'x402' AND context_id = ?`,
+    )
+    .get(quote.headers.get("x-relaybase-x402-batch-id"));
+  assert.equal(lease.planned_requests, 2);
+  assert.equal(lease.status, "reserved");
+  const paymentPayload = {
+    x402Version: 2,
+    accepted: paymentRequired.accepts[0],
+    payload: {
+      signature: `0x${"2".repeat(130)}`,
+      authorization: { from: `0x${"3".repeat(40)}` },
+    },
+    extensions: paymentRequired.extensions,
+  };
+  const nativeFetch = globalThis.fetch;
+  const upstreamChunkSizes = [];
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(
+      typeof input === "string" || input instanceof URL
+        ? input
+        : input.url,
+    );
+    if (url.origin === "https://facilitator.example") {
+      if (url.pathname.endsWith("/verify")) {
+        return Response.json({
+          isValid: true,
+          payer: `0x${"3".repeat(40)}`,
+        });
+      }
+      return Response.json({
+        success: true,
+        payer: `0x${"3".repeat(40)}`,
+        transaction: `0x${"4".repeat(64)}`,
+        network: "eip155:8453",
+      });
+    }
+    assert.equal(url.origin, TEST_UPSTREAM_ORIGIN);
+    assert.equal(url.pathname, `/api${endpoint}`);
+    const upstreamBody = JSON.parse(init.body);
+    assert.deepEqual(
+      Object.keys(upstreamBody),
+      ["aweme_ids"],
+    );
+    upstreamChunkSizes.push(upstreamBody.aweme_ids.length);
+    return Response.json({
+      code: 200,
+      data: upstreamBody.aweme_ids.map((awemeId) => ({ awemeId })),
+    });
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+  const executed = await fetchWorker(
+    "/v1/x402/batch",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "verified-native-batch-0001",
+        "payment-signature": Buffer.from(
+          JSON.stringify(paymentPayload),
+        ).toString("base64"),
+      },
+      body: JSON.stringify({ endpoint, requests }),
+    },
+    env,
+  );
+  assert.equal(executed.status, 200);
+  const executedData = await executed.json();
+  assert.deepEqual(upstreamChunkSizes.sort((left, right) => right - left), [
+    25,
+    1,
+  ]);
+  assert.equal(executedData.batch.executionMode, "native_batch");
+  assert.equal(executedData.batch.actualUpstreamAttempts, 2);
+  assert.equal(executedData.batch.returnedItemCount, 26);
+  assert.equal(executedData.results.length, 2);
+  assert.equal(executedData.results[0].targetCount, 25);
+  assert.equal(executedData.results[1].targetCount, 1);
+  assert.deepEqual(
+    db.raw
+      .prepare(
+        `SELECT target_count, returned_item_count
+         FROM upstream_request_attempts
+         WHERE context_type = 'x402'
+         ORDER BY target_count DESC`,
+      )
+      .all()
+      .map((attempt) => [
+        attempt.target_count,
+        attempt.returned_item_count,
+      ]),
+    [
+      [25, 25],
+      [1, 1],
+    ],
+  );
+  const market = await fetchWorker(
+    `/api/marketplace/detail?path=${encodeURIComponent(endpoint)}&method=POST`,
+    {},
+    env,
+  );
+  assert.equal(market.status, 200);
+  const marketData = await market.json();
+  assert.equal(
+    marketData.endpoint.capability.evidence.status,
+    "verified",
+  );
+  assert.equal(
+    marketData.endpoint.capability.nativeBatchMax,
+    25,
+  );
 });
