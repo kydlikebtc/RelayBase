@@ -62,6 +62,10 @@ npm run check
 `npm run check` 会验证版本一致性、公共文档敏感信息门禁、类型、代码规范、生产构建
 和集成测试。
 
+CI 在 `npm run check` 之后还会执行 `npm audit --omit=dev --audit-level=high`。生产依赖
+出现高危通告时，在 `package.json` 的 `overrides` 中固定修复版本并同步 lockfile，同时在
+`CHANGELOG.md` 记录；不要用忽略通告的方式让门禁通过。
+
 ## 环境变量
 
 复制 `.env.example` 的键名，在本地或托管 Secret 中填入真实值。不要提交任何真实
