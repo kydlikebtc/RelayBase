@@ -22139,7 +22139,7 @@ async function prepareAdminAuditStatement(
 
 function assertSameOrigin(request: Request, env: PlatformEnv): void {
   const origin = request.headers.get("origin");
-  const allowed = new Set([new URL(request.url).origin]);
+  const allowed = new Set<string>();
   if (env.PUBLIC_APP_URL) {
     try {
       allowed.add(new URL(env.PUBLIC_APP_URL).origin);
@@ -22150,6 +22150,8 @@ function assertSameOrigin(request: Request, env: PlatformEnv): void {
         "公开站点地址配置无效。",
       );
     }
+  } else {
+    allowed.add(new URL(request.url).origin);
   }
   if (!origin || !allowed.has(origin)) {
     throw new PlatformError(
