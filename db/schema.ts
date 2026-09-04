@@ -167,6 +167,19 @@ export const balanceLedger = sqliteTable(
   ],
 );
 
+export const balanceSnapshots = sqliteTable(
+  "balance_snapshots",
+  {
+    userId: text("user_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    balanceUsdMicros: integer("balance_usd_micros").notNull().default(0),
+    throughCreatedAt: text("through_created_at").notNull(),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [index("balance_snapshots_updated_idx").on(table.updatedAt)],
+);
+
 export const paymentOrders = sqliteTable(
   "payment_orders",
   {
@@ -831,6 +844,7 @@ export const catalogSyncState = sqliteTable("catalog_sync_state", {
   awaitingPriceCount: integer("awaiting_price_count"),
   openApiSnapshotHash: text("openapi_snapshot_hash"),
   priceSnapshotHash: text("price_snapshot_hash"),
+  taxonomyVerifiedGeneration: text("taxonomy_verified_generation"),
   syncedAt: text("synced_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
