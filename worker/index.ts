@@ -6,6 +6,10 @@ import {
   type PlatformEnv,
   type WorkerExecutionContext,
 } from "./platform";
+import {
+  trustedIdentityHeadersActive,
+  withoutIdentityHeaders,
+} from "./lib/identity-headers";
 
 interface Env extends PlatformEnv {
   ASSETS: Fetcher;
@@ -47,10 +51,15 @@ function withSecurityHeaders(response: Response): Response {
 
 const worker = {
   async fetch(
-    request: Request,
+    rawRequest: Request,
     env: Env,
     ctx: ExecutionContext,
   ): Promise<Response> {
+    // 生产登录配置齐全后，Sites 身份头一律剥离，
+    // 让下游没有任何机会把它们当作已认证身份。
+    const request = trustedIdentityHeadersActive(env ?? {})
+      ? rawRequest
+      : withoutIdentityHeaders(rawRequest);
     const runtimeEnv = env ?? ({} as Env);
     const runtimeContext =
       ctx ??

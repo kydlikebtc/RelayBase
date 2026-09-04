@@ -381,6 +381,52 @@ function signedInHeaders(extra = {}) {
   };
 }
 
+async function walletSessionHeaders(env, extra = {}) {
+  const account = privateKeyToAccount(
+    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+  );
+  const challengeResponse = await fetchWorker(
+    "/api/auth/wallet/challenge",
+    {
+      method: "POST",
+      headers: {
+        origin: "http://localhost",
+        "content-type": "application/json",
+        "cf-connecting-ip": "203.0.113.77",
+      },
+      body: JSON.stringify({ address: account.address, chainId: "0x1" }),
+    },
+    env,
+  );
+  assert.equal(challengeResponse.status, 200);
+  const challenge = await challengeResponse.json();
+  const verified = await fetchWorker(
+    "/api/auth/wallet/verify",
+    {
+      method: "POST",
+      headers: {
+        origin: "http://localhost",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        challengeId: challenge.challengeId,
+        address: account.address,
+        signature: await account.signMessage({ message: challenge.message }),
+      }),
+    },
+    env,
+  );
+  assert.equal(verified.status, 200);
+  const sessionCookie = responseCookie(verified, "rb_session");
+  assert.ok(sessionCookie);
+  return {
+    origin: "http://localhost",
+    "content-type": "application/json",
+    cookie: sessionCookie,
+    ...extra,
+  };
+}
+
 function sortForSignature(value) {
   if (Array.isArray(value)) return value.map(sortForSignature);
   if (!value || typeof value !== "object") return value;
@@ -7949,11 +7995,13 @@ test("publishes reviewed catalog prices and creates idempotent recoverable payme
     globalThis.fetch = nativeFetch;
   });
 
+  const sessionHeaders = await walletSessionHeaders(env);
   const paymentInit = {
     method: "POST",
-    headers: signedInHeaders({
+    headers: {
+      ...sessionHeaders,
       "idempotency-key": "checkout-20260723-001",
-    }),
+    },
     body: JSON.stringify({ amountUsd: 25, payCurrency: "usdttrc20" }),
   };
   const created = await fetchWorker("/api/payments", paymentInit, env);
@@ -7983,7 +8031,7 @@ test("publishes reviewed catalog prices and creates idempotent recoverable payme
 
   const dashboard = await fetchWorker(
     "/api/dashboard",
-    { headers: signedInHeaders() },
+    { headers: sessionHeaders },
     env,
   );
   const dashboardData = await dashboard.json();
@@ -7994,7 +8042,6 @@ test("publishes reviewed catalog prices and creates idempotent recoverable payme
   assert.equal(dashboardData.payments[0].reviewReason, null);
   assert.equal(dashboardData.payments[0].reviewStatus, null);
 });
-
 test("uses one backend availability result for admin and Data Market", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
@@ -10642,4 +10689,42 @@ test("rate limits anonymous x402 batch lookups per client address", async (t) =>
   assert.equal(limited.status, 429);
   assert.equal((await limited.json()).error.code, "x402_lookup_rate_limited");
   assert.ok(limited.headers.get("retry-after"));
+});
+
+test("ignores trusted identity headers once production login is configured", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const env = baseEnv({
+    DB: db,
+    GOOGLE_CLIENT_ID: "google-client-id",
+    GOOGLE_CLIENT_SECRET: "google-client-secret",
+    WALLET_LOGIN_ENABLED: "true",
+  });
+  const me = await fetchWorker(
+    "/api/auth/me",
+    { headers: signedInHeaders() },
+    env,
+  );
+  assert.equal(me.status, 401);
+  const keys = await fetchWorker(
+    "/api/keys",
+    {
+      method: "POST",
+      headers: signedInHeaders(),
+      body: JSON.stringify({ label: "spoof" }),
+    },
+    env,
+  );
+  assert.equal(keys.status, 401);
+  const health = await fetchWorker("/api/health", {}, env);
+  assert.equal(
+    (await health.json()).capabilities.trustedIdentityHeadersActive,
+    false,
+  );
+  assert.equal(
+    db.raw.prepare("SELECT COUNT(*) AS c FROM users").get().c,
+    0,
+    "no user may be auto-provisioned from a spoofed header",
+  );
 });

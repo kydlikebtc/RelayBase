@@ -38,6 +38,7 @@ import {
   REFRESH_BALANCE_SNAPSHOTS_SQL,
   availableBalanceBindings,
 } from "./lib/balance-sql";
+import { trustedIdentityHeadersActive } from "./lib/identity-headers";
 import { TtlCache, parseTtlMs } from "./lib/ttl-cache";
 
 const JSON_HEADERS = {
@@ -1443,7 +1444,7 @@ function handleAuthProviders(
       },
       wallet: { enabled: env.WALLET_LOGIN_ENABLED === "true" },
       chatgpt: {
-        enabled: env.TRUST_SITES_IDENTITY_HEADERS === "true",
+        enabled: trustedIdentityHeadersActive(env),
       },
     },
     200,
@@ -1464,7 +1465,7 @@ async function handleConsolePageGate(
     ?.trim()
     .toLowerCase();
   const hasTrustedIdentity = Boolean(
-    env.TRUST_SITES_IDENTITY_HEADERS === "true" &&
+    trustedIdentityHeadersActive(env) &&
       identityEmail &&
       /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(identityEmail),
   );
@@ -18484,6 +18485,7 @@ function platformReadiness(env: PlatformEnv) {
     env.WALLET_LOGIN_ENABLED === "true";
   const trustedSitesIdentityConfigured =
     env.TRUST_SITES_IDENTITY_HEADERS === "true";
+  const trustedIdentityHeadersActiveNow = trustedIdentityHeadersActive(env);
   const authenticationConfigured =
     googleAuthenticationConfigured ||
     walletAuthenticationConfigured ||
@@ -18557,6 +18559,7 @@ function platformReadiness(env: PlatformEnv) {
       googleAuthenticationConfigured,
       walletAuthenticationConfigured,
       trustedSitesIdentityConfigured,
+      trustedIdentityHeadersActive: trustedIdentityHeadersActiveNow,
       x402Enabled: x402.enabled,
       x402Configured: x402.configured,
       x402Mode: x402.mode,
@@ -19406,7 +19409,7 @@ async function requireAuthenticatedUser(
     }
   }
 
-  if (env.TRUST_SITES_IDENTITY_HEADERS !== "true") {
+  if (!trustedIdentityHeadersActive(env)) {
     throw new PlatformError(
       401,
       "authentication_required",
