@@ -10336,3 +10336,77 @@ test("debits against balance snapshots plus incremental ledger rows", async (t) 
   assert.equal(third.status, 402);
   assert.equal((await third.json()).error.code, "insufficient_balance");
 });
+
+test("marks reserved-but-never-debited requests abandoned so the reconciliation window cannot starve", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const env = baseEnv({
+    DB: db,
+    RECONCILIATION_SECRET: "reconcile-secret-32-characters-minimum",
+  });
+  const createKey = await fetchWorker(
+    "/api/keys",
+    {
+      method: "POST",
+      headers: signedInHeaders(),
+      body: JSON.stringify({ label: "stale key" }),
+    },
+    env,
+  );
+  const created = (await createKey.json()).key;
+  const user = db.raw
+    .prepare("SELECT id FROM users WHERE email = ?")
+    .get("owner@example.com");
+  const insertRequest = (id, status, hasDebit) => {
+    db.raw
+      .prepare(
+        `INSERT INTO proxy_requests
+         (id, api_key_id, user_id, idempotency_hash, ledger_reference_id,
+          path, status, cost_usd_micros, created_at)
+         VALUES (?, ?, ?, ?, ?, '/v1/tiktok/web/fetch_user_profile', ?, 2000,
+                 datetime('now', '-3 minutes'))`,
+      )
+      .run(id, created.id, user.id, `hash-${id}`, `api:${id}:debit`, status);
+    if (hasDebit) {
+      db.raw
+        .prepare(
+          `INSERT INTO balance_ledger
+           (id, user_id, entry_type, delta_usd_micros, reference_id)
+           VALUES (?, ?, 'api_debit', -2000, ?)`,
+        )
+        .run(`led-${id}`, user.id, `api:${id}:debit`);
+    }
+  };
+  insertRequest("req-orphan", "processing", false);
+  insertRequest("req-charged", "charged", true);
+
+  const reconcile = await fetchWorker(
+    "/api/admin/reconcile",
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.RECONCILIATION_SECRET}` },
+    },
+    env,
+  );
+  assert.equal(reconcile.status, 200);
+  const body = await reconcile.json();
+  assert.equal(body.proxy.abandoned, 1);
+  assert.equal(body.proxy.refunded, 1);
+  const statuses = Object.fromEntries(
+    db.raw
+      .prepare("SELECT id, status FROM proxy_requests")
+      .all()
+      .map((row) => [row.id, row.status]),
+  );
+  assert.equal(statuses["req-orphan"], "abandoned");
+  assert.equal(statuses["req-charged"], "reconciled");
+  assert.equal(
+    db.raw
+      .prepare(
+        "SELECT COUNT(*) AS c FROM balance_ledger WHERE reference_id = 'api:req-orphan:debit:refund'",
+      )
+      .get().c,
+    0,
+  );
+});

@@ -30,6 +30,10 @@ import {
   type X402PaymentRequired,
 } from "./x402";
 import {
+  type ProxyRequestStatus,
+  terminalProxyRequestStatusSql,
+} from "./lib/proxy-request-status";
+import {
   AVAILABLE_BALANCE_SQL,
   REFRESH_BALANCE_SNAPSHOTS_SQL,
   availableBalanceBindings,
@@ -16255,6 +16259,21 @@ async function handleReconciliation(
 ): Promise<Response> {
   requireAdminSecret(request, env, "reconciliation");
   const db = requireDb(env);
+  const abandoned = await db
+    .prepare(
+      `UPDATE proxy_requests
+         SET status = 'abandoned', response_status = 500,
+             completed_at = CURRENT_TIMESTAMP
+         WHERE status = 'processing'
+           AND datetime(created_at) < datetime('now', '-2 minutes')
+           AND NOT EXISTS (
+             SELECT 1 FROM balance_ledger
+             WHERE balance_ledger.reference_id =
+                   proxy_requests.ledger_reference_id
+           )`,
+    )
+    .run();
+  const abandonedCount = Number(abandoned.meta?.changes ?? 0);
   const stale = await db
     .prepare(
       `SELECT id, user_id, ledger_reference_id, cost_usd_micros
@@ -16805,6 +16824,7 @@ async function handleReconciliation(
       proxy: {
         inspected: stale.results?.length ?? 0,
         refunded,
+        abandoned: abandonedCount,
       },
       catalog: { taxonomyVerified },
       payments: {
@@ -19326,7 +19346,7 @@ async function refundRequest(
 async function markProxyRequest(
   db: D1Database,
   requestId: string,
-  status: string,
+  status: ProxyRequestStatus,
   responseStatus: number | null,
 ): Promise<void> {
   await db
@@ -19334,7 +19354,7 @@ async function markProxyRequest(
       `UPDATE proxy_requests
        SET status = ?, response_status = ?,
            completed_at = CASE
-             WHEN ? IN ('completed', 'refunded', 'reconciled', 'rate_limited', 'insufficient_balance')
+             WHEN ? IN (${terminalProxyRequestStatusSql()})
              THEN CURRENT_TIMESTAMP
              ELSE completed_at
            END
