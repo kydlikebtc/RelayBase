@@ -5114,13 +5114,21 @@ async function executeSettledX402Batch(
   const status: X402BatchStatus = execution.success
     ? "succeeded"
     : "execution_failed";
-  await db
+  const persisted = await db
     .prepare(
       `UPDATE x402_batches
        SET status = ?, execution_response_json = ?,
            actual_upstream_attempts = ?, returned_item_count = ?,
            failure_code = ?, completed_at = ?, updated_at = ?
-       WHERE id = ? AND status = 'executing'`,
+       WHERE id = ?
+         AND (
+           status = 'executing'
+           OR (
+             status = 'execution_failed'
+             AND failure_code = 'stale_executing'
+             AND execution_response_json IS NULL
+           )
+         )`,
     )
     .bind(
       status,
@@ -5133,6 +5141,14 @@ async function executeSettledX402Batch(
       stored.id,
     )
     .run();
+  if (Number(persisted.meta?.changes ?? 0) !== 1) {
+    // 客户已链上付款且收入已确认，回执却没能落库：必须可诊断。
+    console.error("x402 execution receipt was not persisted", {
+      batchId: stored.id,
+      attemptedStatus: status,
+      returnedItemCount: execution.returnedItemCount,
+    });
+  }
   await setX402CapacityLeaseStatus(db, stored.id, "released");
   const receipt = safeStoredJson(stored.facilitator_receipt_json);
   return jsonResponse(
@@ -15813,7 +15829,9 @@ async function handleCatalogSync(
           awaitingPriceEntries,
           openApiSnapshotHash,
           priceSnapshotHash,
-          syncGeneration,
+          // taxonomy_verified_generation：发布时一律置空，
+          // 由下面的全量扫描通过后再盖章。
+          null,
           syncGeneration,
           sourceConfig.version,
           sourceConfig.hash,
@@ -15844,6 +15862,25 @@ async function handleCatalogSync(
         "catalog_sync_lease_lost",
         "目录同步发布或审计未能原子确认，本次快照不可用。",
       );
+    }
+    // 发布之后才做目录完整性全量校验：存量行也必须通过，
+    // 否则热路径信任的那一列不能盖章。
+    let publishedTaxonomyVerified = false;
+    try {
+      await assertStoredCatalogTaxonomyIntegrity(db);
+      publishedTaxonomyVerified = true;
+    } catch {
+      publishedTaxonomyVerified = false;
+    }
+    if (publishedTaxonomyVerified) {
+      await db
+        .prepare(
+          `UPDATE catalog_sync_state
+           SET taxonomy_verified_generation = last_success_generation
+           WHERE id = 1 AND last_success_generation = ?`,
+        )
+        .bind(syncGeneration)
+        .run();
     }
     const published = await db
       .prepare(
@@ -16838,7 +16875,6 @@ async function handleReconciliation(
     status: providerObservationFailed ? "provider_failed" : "healthy",
   });
   const maintenanceStatements = [
-    db.prepare(REFRESH_BALANCE_SNAPSHOTS_SQL),
     db.prepare(
       `DELETE FROM upstream_capacity_leases
        WHERE datetime(expires_at) < datetime('now', '-1 day')`,
@@ -16958,7 +16994,7 @@ async function handleReconciliation(
              completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
          WHERE status = 'executing'
            AND datetime(COALESCE(execution_started_at, updated_at)) <
-               datetime('now', '-5 minutes')`,
+               datetime('now', '-30 minutes')`,
     ),
     db.prepare(
       `UPDATE upstream_capacity_leases
@@ -16998,6 +17034,15 @@ async function handleReconciliation(
     ),
   );
   await db.batch(maintenanceStatements);
+  // 余额快照重算是全表规模的，单独执行：让它超时或失败时不会
+  // 连带回滚对账心跳，那会直接关停真实代理与充值。
+  try {
+    await db.prepare(REFRESH_BALANCE_SNAPSHOTS_SQL).run();
+  } catch (error) {
+    console.error("balance snapshot refresh failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
   invalidateRuntimeCaches(env);
 
   return jsonResponse(
@@ -18651,9 +18696,11 @@ async function operationalReadiness(
   if (options.verifyTaxonomy || ttlMs === 0 || !env.DB) {
     return await computeOperationalReadiness(env, options);
   }
-  return await readinessCache.remember(env as object, ttlMs, () =>
+  const readiness = await readinessCache.remember(env as object, ttlMs, () =>
     computeOperationalReadiness(env, options),
   );
+  if (readiness.degraded) readinessCache.delete(env as object);
+  return readiness;
 }
 
 function invalidateRuntimeCaches(env: PlatformEnv): void {
@@ -18677,6 +18724,9 @@ async function computeOperationalReadiness(
     sourceConfig: UpstreamSourceConfig;
     credential: ResolvedUpstreamProviderCredential;
   } | null = null;
+  // 由数据库异常导致的降级结果不可缓存：否则一次瞬时抖动会让
+  // 整个 isolate 在 TTL 内持续 503。
+  let degraded = false;
   if (env.DB) {
     try {
       const row = await env.DB
@@ -18938,7 +18988,11 @@ async function computeOperationalReadiness(
         upstreamConfigured = false;
         catalogReady = false;
       }
-    } catch {
+    } catch (error) {
+      console.error("operational readiness probe failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      degraded = true;
       schemaReady = false;
       taxonomyReady = false;
       catalogReady = false;
@@ -19016,6 +19070,7 @@ async function computeOperationalReadiness(
     },
     missing,
     upstream,
+    degraded,
   };
 }
 
