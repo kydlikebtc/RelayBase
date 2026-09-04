@@ -10728,3 +10728,26 @@ test("ignores trusted identity headers once production login is configured", asy
     "no user may be auto-provisioned from a spoofed header",
   );
 });
+
+test("rejects state-changing requests from a non-canonical host once PUBLIC_APP_URL is set", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const env = baseEnv({ DB: db });
+  const ctx = context();
+  const response = await worker.fetch(
+    new Request("http://alt.localhost/api/keys", {
+      method: "POST",
+      headers: signedInHeaders({ origin: "http://alt.localhost" }),
+      body: JSON.stringify({ label: "cross host" }),
+    }),
+    env,
+    ctx,
+  );
+  await Promise.allSettled(ctx.pending);
+  assert.equal(response.status, 403);
+  assert.equal(
+    (await response.json()).error.code,
+    "cross_site_request_blocked",
+  );
+});
