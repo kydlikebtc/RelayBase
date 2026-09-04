@@ -29,12 +29,18 @@ import {
   type X402PaymentPayload,
   type X402PaymentRequired,
 } from "./x402";
+import { TtlCache, parseTtlMs } from "./lib/ttl-cache";
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
   "x-content-type-options": "nosniff",
 };
+
+type OperationalReadiness = Awaited<
+  ReturnType<typeof computeOperationalReadiness>
+>;
+const readinessCache = new TtlCache<OperationalReadiness>();
 
 const USER_EMAIL_HEADER = "oai-authenticated-user-email";
 const USER_NAME_HEADER = "oai-authenticated-user-full-name";
@@ -173,6 +179,7 @@ export interface PlatformEnv {
   WALLET_LOGIN_ENABLED?: string;
   AUTH_SESSION_TTL_DAYS?: string;
   TRUST_SITES_IDENTITY_HEADERS?: string;
+  READINESS_CACHE_TTL_MS?: string;
   PRICE_MARKUP_BPS?: string;
   UPSTREAM_RATE_LIMIT_RPS?: string;
   UPSTREAM_RATE_LIMIT_BURST?: string;
@@ -3420,7 +3427,7 @@ async function handleAdminX402Config(
       "x402 配置更新冲突，请刷新后重试。",
     );
   }
-  marketplaceOverlayCache.delete(env as object);
+  invalidateRuntimeCaches(env);
   return jsonResponse(
     {
       config: {
@@ -3715,7 +3722,7 @@ async function handleAdminX402RuntimeConfig(
       "x402 运行配置更新冲突，请刷新后重试。",
     );
   }
-  marketplaceOverlayCache.delete(env as object);
+  invalidateRuntimeCaches(env);
   const resolved = await resolveX402Configuration(env, db);
   return jsonResponse(
     {
@@ -7606,27 +7613,7 @@ async function handleProxyRequest(
 
   const url = new URL(request.url);
   validateProxyPath(url.pathname);
-  let reconciliationRecent = false;
-  try {
-    const heartbeat = await db
-      .prepare(
-        `SELECT EXISTS(
-           SELECT 1 FROM operation_heartbeats
-           WHERE name = 'reconciliation'
-             AND datetime(last_success_at) >
-                 datetime('now', '-5 minutes')
-         ) AS recent`,
-      )
-      .first<{ recent: number }>();
-    reconciliationRecent = Number(heartbeat?.recent ?? 0) === 1;
-  } catch {
-    throw new PlatformError(
-      503,
-      "service_not_ready",
-      "数据库迁移尚未完成，已停止真实调用与扣费。",
-    );
-  }
-  if (!reconciliationRecent) {
+  if (!readiness.capabilities.reconciliationRecent) {
     throw new PlatformError(
       503,
       "reconciliation_stale",
@@ -7913,19 +7900,16 @@ async function handleProxyRequest(
       );
     }
   }
-  const sourceConfig = await loadUpstreamSourceConfig(db, env, true);
-  const upstreamCredential = await resolveUpstreamProviderCredential(
-    env,
-    db,
-    sourceConfig,
-  );
-  if (!upstreamCredential) {
+  const upstream = readiness.upstream;
+  if (!upstream) {
     throw new PlatformError(
       503,
       "upstream_not_configured",
       "UpstreamProvider 服务端密钥尚未配置。",
     );
   }
+  const sourceConfig = upstream.sourceConfig;
+  const upstreamCredential = upstream.credential;
   if (
     !upstreamProviderCredentialAllowsPath(
       upstreamCredential.scopes,
@@ -8052,41 +8036,6 @@ async function handleProxyRequest(
       429,
       "account_concurrency_exceeded",
       "账户并发请求数已达上限，请等待正在处理的请求完成。",
-    );
-  }
-
-  if (crypto.getRandomValues(new Uint8Array(1))[0] === 0) {
-    ctx.waitUntil(
-      db
-        .prepare(
-          `DELETE FROM rate_limit_buckets
-           WHERE datetime(updated_at) < datetime('now', '-2 days')`,
-        )
-        .run(),
-    );
-    ctx.waitUntil(
-      db
-        .prepare(
-          `DELETE FROM upstream_rate_limit_buckets
-           WHERE datetime(updated_at) < datetime('now', '-10 minutes')`,
-        )
-        .run(),
-    );
-    ctx.waitUntil(
-      db
-        .prepare(
-          `DELETE FROM request_rate_limit_state
-           WHERE datetime(updated_at) < datetime('now', '-2 days')`,
-        )
-        .run(),
-    );
-    ctx.waitUntil(
-      db
-        .prepare(
-          `DELETE FROM upstream_rate_limit_state
-           WHERE datetime(updated_at) < datetime('now', '-10 minutes')`,
-        )
-        .run(),
     );
   }
 
@@ -11937,6 +11886,7 @@ async function handleCatalogBatchApply(
       "批量目录应用结果无法确认。",
     );
   }
+  invalidateRuntimeCaches(env);
   return await catalogBatchResponse(db, plan, requestId, false, 100, 0);
 }
 
@@ -13992,6 +13942,7 @@ async function handleUpstreamConfigPut(
       "数据源配置保存后无法读取。",
     );
   }
+  invalidateRuntimeCaches(env);
   return jsonResponse(
     {
       config: {
@@ -14476,6 +14427,7 @@ async function handleUpstreamCredentialCreate(
       "UpstreamProvider 凭据保存失败。",
     );
   }
+  invalidateRuntimeCaches(env);
   return jsonResponse(
     {
       credential: publicManagedUpstreamProviderCredential(stored),
@@ -14697,6 +14649,7 @@ async function handleUpstreamCredentialUpdate(
       "UpstreamProvider 凭据状态更新失败。",
     );
   }
+  invalidateRuntimeCaches(env);
   return jsonResponse(
     { credential: publicManagedUpstreamProviderCredential(updated) },
     200,
@@ -15757,6 +15710,7 @@ async function handleCatalogSync(
         "目录同步租约已失效，本次快照未发布。",
       );
     }
+    invalidateRuntimeCaches(env);
     return jsonResponse(
       {
         synced,
@@ -16025,7 +15979,7 @@ async function handleCatalogUpdate(
       "目录在审核期间发生变化，请刷新后重新确认成本与状态。",
     );
   }
-  marketplaceOverlayCache.delete(env as object);
+  invalidateRuntimeCaches(env);
   return jsonResponse(
     {
       ok: true,
@@ -16252,7 +16206,7 @@ async function handleCatalogConfirm(
       "待确认端点在操作期间发生变化，整批未应用，请刷新后重试。",
     );
   }
-  marketplaceOverlayCache.delete(env as object);
+  invalidateRuntimeCaches(env);
   return jsonResponse(
     {
       ok: true,
@@ -16701,6 +16655,11 @@ async function handleReconciliation(
   const maintenanceStatements = [
     db
       .prepare(
+        `DELETE FROM rate_limit_buckets
+         WHERE datetime(updated_at) < datetime('now', '-2 days')`,
+      ),
+    db
+      .prepare(
         `DELETE FROM payment_rate_limit_buckets
          WHERE datetime(updated_at) < datetime('now', '-2 days')`,
       ),
@@ -16808,6 +16767,7 @@ async function handleReconciliation(
     ),
   );
   await db.batch(maintenanceStatements);
+  invalidateRuntimeCaches(env);
 
   return jsonResponse(
     {
@@ -16988,13 +16948,14 @@ async function getNowPaymentsPayment(
 
 async function managedUpstreamProviderCredentialsSnapshot(
   db: D1Database,
+  preloadedState?: Awaited<ReturnType<typeof upstreamCredentialState>>,
 ): Promise<{
   credentials: ManagedUpstreamCredentialRecord[];
   activeCredentialId: string | null;
   managedEnabled: boolean;
   stateVersion: number;
 }> {
-  const state = await upstreamCredentialState(db);
+  const state = preloadedState ?? (await upstreamCredentialState(db));
   let rows: D1Result<ManagedUpstreamCredentialRecord>;
   try {
     rows = await db
@@ -18140,7 +18101,10 @@ async function resolveUpstreamProviderCredentialsForPath(
       ? [environment]
       : [];
   }
-  const snapshot = await managedUpstreamProviderCredentialsSnapshot(db);
+  const snapshot = await managedUpstreamProviderCredentialsSnapshot(
+    db,
+    state,
+  );
   const encryptionKey =
     requireUpstreamProviderCredentialsEncryptionKey(env);
   const now = Date.now();
@@ -18442,7 +18406,27 @@ async function hasX402Schema(db: D1Database): Promise<boolean> {
   }
 }
 
+// 热路径读缓存；/api/health、/api/readiness 与公开目录传入
+// verifyTaxonomy 强制直读并执行目录完整性全量校验。
 async function operationalReadiness(
+  env: PlatformEnv,
+  options: { verifyTaxonomy?: boolean } = {},
+): Promise<OperationalReadiness> {
+  const ttlMs = parseTtlMs(env.READINESS_CACHE_TTL_MS, 10_000, 60_000);
+  if (options.verifyTaxonomy || ttlMs === 0 || !env.DB) {
+    return await computeOperationalReadiness(env, options);
+  }
+  return await readinessCache.remember(env as object, ttlMs, () =>
+    computeOperationalReadiness(env, options),
+  );
+}
+
+function invalidateRuntimeCaches(env: PlatformEnv): void {
+  readinessCache.delete(env as object);
+  marketplaceOverlayCache.delete(env as object);
+}
+
+async function computeOperationalReadiness(
   env: PlatformEnv,
   options: { verifyTaxonomy?: boolean } = {},
 ) {
@@ -18454,6 +18438,10 @@ async function operationalReadiness(
   let reconciliationRecent = false;
   let x402SchemaReady = false;
   let upstreamConfigured = base.capabilities.upstreamConfigured;
+  let upstream: {
+    sourceConfig: UpstreamSourceConfig;
+    credential: ResolvedUpstreamProviderCredential;
+  } | null = null;
   if (env.DB) {
     try {
       const row = await env.DB
@@ -18695,6 +18683,9 @@ async function operationalReadiness(
             )
           : null;
         upstreamConfigured = Boolean(resolved);
+        if (sourceConfig && resolved) {
+          upstream = { sourceConfig, credential: resolved };
+        }
         catalogReady =
           taxonomyReady &&
           resolved != null &&
@@ -18789,6 +18780,7 @@ async function operationalReadiness(
       x402Missing: x402RuntimeState.missing,
     },
     missing,
+    upstream,
   };
 }
 
