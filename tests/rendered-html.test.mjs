@@ -297,9 +297,10 @@ function enableCatalogEndpoint(
         price_only_count, openapi_only_count, scope_excluded_count,
         matched_price_count,
         positive_price_count, zero_price_count, awaiting_price_count,
-        openapi_snapshot_hash, price_snapshot_hash, synced_at)
+        openapi_snapshot_hash, price_snapshot_hash,
+        taxonomy_verified_generation, synced_at)
        VALUES (1, ?, 'environment', NULL, ?, ?, 1, ?,
-               1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, ?, ?,
+               1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, ?, ?, ?,
                CURRENT_TIMESTAMP)
        ON CONFLICT(id) DO UPDATE SET
          last_success_generation = excluded.last_success_generation,
@@ -323,6 +324,8 @@ function enableCatalogEndpoint(
          awaiting_price_count = excluded.awaiting_price_count,
          openapi_snapshot_hash = excluded.openapi_snapshot_hash,
          price_snapshot_hash = excluded.price_snapshot_hash,
+         taxonomy_verified_generation =
+           excluded.taxonomy_verified_generation,
          synced_at = CURRENT_TIMESTAMP`,
     )
     .run(
@@ -332,6 +335,7 @@ function enableCatalogEndpoint(
       TEST_UPSTREAM_SOURCE_CONFIG_HASH,
       "a".repeat(64),
       "b".repeat(64),
+      generation,
     );
   db.raw
     .prepare(
@@ -365,7 +369,6 @@ function enableCatalogEndpoint(
     )
     .run();
 }
-
 function signedInHeaders(extra = {}) {
   return {
     origin: "http://localhost",
@@ -1395,10 +1398,12 @@ test("never reports live readiness for non-canonical stored taxonomy", async (t)
     env,
   );
   assert.equal(proxy.status, 503);
-  assert.equal((await proxy.json()).error.code, "service_not_ready");
+  // 目录完整性全量扫描移出热路径后，被调用端点自身的损坏由
+  // strictStoredCatalogTaxonomy 的单行校验拦下，错误码因此更精确；
+  // 状态码与"绝不触达上游"的安全保证不变。
+  assert.equal((await proxy.json()).error.code, "catalog_taxonomy_invalid");
   assert.equal(upstreamCalls, 0);
 });
-
 test("keeps financial ledger and payment evidence append-only after migration", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
@@ -10029,4 +10034,115 @@ test("quotes verified native batches by logical targets and planned upstream chu
     marketData.endpoint.capability.nativeBatchMax,
     25,
   );
+});
+
+test("re-verifies stored taxonomy during reconciliation instead of on every proxy call", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const env = baseEnv({
+    DB: db,
+    RESELLER_AUTHORIZED: "true",
+    LEGAL_REVIEW_CONFIRMED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
+    UPSTREAM_API_KEY: "upstream-secret",
+    RECONCILIATION_SECRET: "reconcile-secret-32-characters-minimum",
+  });
+  const createKey = await fetchWorker(
+    "/api/keys",
+    {
+      method: "POST",
+      headers: signedInHeaders(),
+      body: JSON.stringify({ label: "taxonomy key" }),
+    },
+    env,
+  );
+  const created = (await createKey.json()).key;
+  const user = db.raw
+    .prepare("SELECT id FROM users WHERE email = ?")
+    .get("owner@example.com");
+  const path = "/v1/tiktok/web/fetch_user_profile";
+  enableCatalogEndpoint(db, path, 2000, "upstream-secret");
+  db.raw
+    .prepare(
+      `INSERT INTO balance_ledger
+       (id, user_id, entry_type, delta_usd_micros, reference_id)
+       VALUES ('seed-taxonomy', ?, 'test_credit', 100000, 'test:taxonomy')`,
+    )
+    .run(user.id);
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    Response.json({ code: 200, data: { ok: true }, request_id: "r" });
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+  const call = (key) =>
+    fetchWorker(
+      `${path}?uniqueId=taxonomy`,
+      {
+        headers: {
+          authorization: `Bearer ${created.secret}`,
+          "idempotency-key": key,
+        },
+      },
+      env,
+    );
+  const reconcile = () =>
+    fetchWorker(
+      "/api/admin/reconcile",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.RECONCILIATION_SECRET}` },
+      },
+      env,
+    );
+
+  const probePath = "/v1/tiktok/web/zz_taxonomy_probe";
+  db.raw
+    .prepare(
+      `INSERT INTO endpoint_catalog
+       (path, platform, http_method, upstream_price_usd_micros,
+        customer_price_usd_micros, data_type, tags_json, surface)
+       VALUES (?, 'tiktok', 'GET', 0, 0, 'other', '[]', 'other')`,
+    )
+    .run(probePath);
+  const corruptProbe = (tags) =>
+    db.raw
+      .prepare(`UPDATE endpoint_catalog SET tags_json = ? WHERE path = ?`)
+      .run(tags, probePath);
+
+  assert.equal((await call("taxonomy-001")).status, 200);
+
+  corruptProbe('["b-tag","a-tag"]');
+  assert.equal(
+    (await call("taxonomy-002")).status,
+    200,
+    "hot path trusts the verified column",
+  );
+  assert.equal((await reconcile()).status, 200);
+  assert.equal(
+    db.raw
+      .prepare(
+        "SELECT taxonomy_verified_generation AS g FROM catalog_sync_state WHERE id = 1",
+      )
+      .get().g,
+    null,
+  );
+  const blocked = await call("taxonomy-003");
+  assert.equal(blocked.status, 503);
+  assert.equal((await blocked.json()).error.code, "service_not_ready");
+  const readiness = await fetchWorker("/api/readiness", {}, env);
+  assert.ok((await readiness.json()).missing.includes("catalog_taxonomy"));
+
+  corruptProbe("[]");
+  assert.equal((await reconcile()).status, 200);
+  assert.equal(
+    db.raw
+      .prepare(
+        "SELECT taxonomy_verified_generation AS g FROM catalog_sync_state WHERE id = 1",
+      )
+      .get().g,
+    TEST_CATALOG_GENERATION,
+  );
+  assert.equal((await call("taxonomy-004")).status, 200);
 });
