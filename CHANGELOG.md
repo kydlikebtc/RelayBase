@@ -10,6 +10,47 @@
   GHSA-28wg-ghj8-5hjv、GHSA-2v37-7h3g-55p8 与 GHSA-fxqj-rqcc-2cmp；
   `npm audit --omit=dev --audit-level=high` 恢复为零高危生产依赖漏洞。
 
+## [0.4.0-preview.6] - 2026-09-04
+
+### Changed
+
+- 版本升至 `0.4.0-preview.6`。
+- readiness 结果按 Worker 实例缓存 `READINESS_CACHE_TTL_MS`（默认 10 秒）并在管理端
+  写操作后立即失效；目录完整性全量校验改为由同步发布、定时对账、`/api/health`、
+  `/api/readiness` 与公开目录 `/api/catalog` 执行，客户热路径只比较已验证代次。被
+  调用端点自身的分类损坏仍由单行严格校验拦下，错误码由 `service_not_ready` 变为更
+  精确的 `catalog_taxonomy_invalid`（状态码与"绝不触达上游"的保证不变）。
+- 代理热路径去除重复的对账心跳查询、重复的上游来源与凭据解析，以及 1/256 概率触发
+  的随机清理（等价清理已并入定时对账，并补上了此前缺失的 `rate_limit_buckets`）；
+  上游尝试后的健康度、审计日志与 `last_used_at` 写入合并为一个 batch；代次与凭据一
+  致性校验并入目录查询；扣款与 `charged` 标记同批；余额读取并入调用日志 batch。单
+  次成功付费调用的 D1 往返由 26 次降至 14 次，并由集成测试以 15 次预算断言。
+- 余额改为 `balance_snapshots` 快照加快照边界之后的账本增量；快照水位线比当前时间早
+  5 秒以避开并发写入竞态。没有快照的账户自动退化为全量账本求和，正确性不依赖快照。
+
+### Added
+
+- 新表 `balance_snapshots` 与 `catalog_sync_state.taxonomy_verified_generation`
+  （迁移 `0021`）。升级后该列为 `NULL`，首次对账完成前热路径判定为未验证。
+- 对账新增 `abandoned` 终态：预留超过两分钟且从未扣款的代理请求不再反复占满每轮
+  100 条的复核窗口；这类请求没有扣款，因此不产生退款流水。
+- 对账新增 x402 停滞批次清扫、失败分支释放容量租约与过期租约回收。
+- 新增 `POST /api/admin/x402/batches/{id}/resolve`，供 owner 人工确认结算
+  （`mark_settled_manually`，需 Base 交易哈希）或标记过期（`mark_expired`），均需说明
+  并写入管理审计；重复处理与回执冲突返回 `409`。
+- 匿名 x402 批次查询按客户端地址限流
+  （`X402_LOOKUP_RATE_LIMIT_RPS` / `X402_LOOKUP_RATE_LIMIT_BURST`）。
+- 新增 `npm run test:unit` 单元测试运行器与 `worker/lib/` 纯函数模块；测试 harness
+  统计 D1 往返，迁移清单改为读取 `drizzle/meta/_journal.json`。
+
+### Security
+
+- 生产登录（Google 与钱包）配置齐全后自动忽略 Sites 身份头，Worker 入口剥离全部
+  `oai-authenticated-user-*` 请求头。`/api/health` 新增
+  `capabilities.trustedIdentityHeadersActive` 反映当前状态。
+- 同源检查在配置了 `PUBLIC_APP_URL` 时只接受该 origin，不再把请求自身的 Host 视为
+  同源。
+
 ## [0.4.0-preview.5] - 2026-07-26
 
 ### Added
