@@ -18,6 +18,9 @@ declare namespace Cloudflare {
     WALLET_LOGIN_ENABLED?: string;
     AUTH_SESSION_TTL_DAYS?: string;
     TRUST_SITES_IDENTITY_HEADERS?: string;
+    READINESS_CACHE_TTL_MS?: string;
+    X402_LOOKUP_RATE_LIMIT_RPS?: string;
+    X402_LOOKUP_RATE_LIMIT_BURST?: string;
     API_RATE_LIMIT_RPM?: string;
     UPSTREAM_RATE_LIMIT_RPS?: string;
     ACCOUNT_CONCURRENCY_LIMIT?: string;

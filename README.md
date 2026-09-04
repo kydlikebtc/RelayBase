@@ -5,7 +5,7 @@ RelayBase 是面向 AI、产品与研究团队的多平台数据市场。它将�
 访问 Key 消费统一 `/v1/...` 路径，服务端负责供给审核、客户定价、余额预扣、
 上游调用、失败退款、幂等、限流和审计。
 
-当前应用版本：`v0.4.0-preview.5`。默认运行在安全沙盒。未完成书面商业授权、法律审查、
+当前应用版本：`v0.4.0-preview.6`。默认运行在安全沙盒。未完成书面商业授权、法律审查、
 支付商审批、登录配置、目录审核和近期对账之前，真实代理与稳定币充值都会安全关闭。
 
 ## 已实现能力
@@ -124,6 +124,13 @@ TikHub 官方当前公开的默认限制是账户/API Key 维度 `10 RPS`，RPS 
 运营参数见 `.env.example`。后台“上游数据源”可把 Key 加入现有容量组，或创建新的
 独立容量组，并设置 RPS、安全使用比例、优先级和权重。
 
+`READINESS_CACHE_TTL_MS` 默认 `10000`：readiness 结果在单个 Worker 实例内缓存该
+毫秒数，任何管理端写操作（目录同步与批量应用、数据源与凭据变更、对账）后立即
+失效。`/api/health`、`/api/readiness` 与公开目录 `/api/catalog` 始终直读，并执行
+目录完整性全量校验；客户热路径只比较 `catalog_sync_state.taxonomy_verified_generation`
+是否等于 `last_success_generation`，该列由同步发布与定时对账维护，被调用端点自身
+的分类损坏仍由单行严格校验拦下。
+
 ### 接口批量、分页与计量
 
 目录为每个产品公开 `executionMode`、原生批量支持、单次目标上限、目标字段与编码、
@@ -162,6 +169,14 @@ ${PUBLIC_APP_URL}/api/auth/google/callback
 
 Google 登录使用 PKCE、state 与 nonce；钱包登录使用一次性限时签名消息，不会发起
 链上交易。会话 Cookie 为 `HttpOnly`、`SameSite=Lax`，生产 HTTPS 下带 `Secure`。
+
+生产登录（Google 与钱包）配置齐全后，`TRUST_SITES_IDENTITY_HEADERS` 自动失效：
+Worker 入口会剥离全部 `oai-authenticated-user-*` 请求头，下游没有任何机会把它们
+当作已认证身份。`/api/health` 的 `capabilities.trustedIdentityHeadersActive` 反映
+当前是否仍在信任这些头。
+
+配置了 `PUBLIC_APP_URL` 时，改变状态的请求只接受该 origin，其他能解析到本 Worker
+的主机名一律返回 `403 cross_site_request_blocked`。
 
 ### 支付与管理
 
@@ -209,6 +224,11 @@ Token 做 AES-GCM 加密后保存到 D1；接口只返回配置状态与指纹�
 `X402_FACILITATOR_BEARER_TOKEN`。`X402_FACILITATOR_ALLOW_UNAUTHENTICATED=true`
 仅允许在隔离的本地测试环境使用。
 
+匿名的批次查询 `GET /api/x402/batches/{id}` 按客户端地址（`CF-Connecting-IP` 的
+SHA-256 前缀）限流，避免被用来枚举批次编号：`X402_LOOKUP_RATE_LIMIT_RPS=30`、
+`X402_LOOKUP_RATE_LIMIT_BURST=60`。超限返回 `429 x402_lookup_rate_limited` 并带
+`Retry-After`。
+
 x402 与预充值账本严格隔离：充值属于现金流入与递延余额负债；标准 API 成功完成且
 未退款时确认预充值用量收入。x402 只有 facilitator 结算成功、且 Base 交易哈希已
 持久化时确认收入，永远不会充值或扣减用户余额。结算完成后批量执行仍可能失败；
@@ -239,6 +259,17 @@ ${PUBLIC_APP_URL}/admin
 
 凭据使用 AES-256-GCM、随机 96-bit IV 和绑定记录编号的 AAD 加密；数据库只保存
 密文、哈希、已验证 scope 与到期时间，管理页面仅显示截断指纹。
+
+停滞后被清扫为 `settlement_failed` 的 x402 批次可由 owner 人工处理：
+
+```text
+POST /api/admin/x402/batches/{id}/resolve
+```
+
+请求体的 `action` 为 `mark_settled_manually`（必须附带 Base 链上的 `transactionHash`）
+或 `mark_expired`，两者都要求至少 4 个字符的 `note`。仅 `settlement_failed` 状态
+可处理，重复处理返回 `409`；`transaction_hash` 上的唯一索引保证同一笔链上回执不
+会被绑定到两个批次，冲突返回 `409 x402_receipt_conflict`。每次处理都写入管理审计。
 
 ## 数据市场
 
@@ -324,7 +355,9 @@ curl "$APP_URL/v1/example/profile/read?profile_id=demo-123" \
 - `X-RelayBase-Max-Cost-Usd-Micros` 防止调用期间调价。
 - 只有完整、有界、合法的上游 HTTP `200` JSON 响应才扣费。
 - 网络失败、非成功状态、超限、截断、HTML 或畸形 JSON 会自动退款。
-- 返回头包含请求编号、本次实际扣费和调用后余额。
+- 返回头包含请求编号、本次实际扣费和调用后余额。余额由 `balance_snapshots`
+  快照加快照边界之后的账本增量计算，快照由定时对账维护；没有快照的账户自动
+  退化为全量账本求和，正确性不依赖快照存在。
 - `429` 时必须遵循 `Retry-After`；`X-RateLimit-Scope=api-key|account|upstream`
   可用于区分客户端配额与共享上游容量。
 
@@ -352,6 +385,16 @@ POST /api/admin/reconcile
 
 本轮所有支付查询都失败时不会刷新成功心跳；心跳超过五分钟后真实代理与充值自动
 关闭。
+
+定时对账还会：
+
+- 把预留超过两分钟、且从未产生扣款流水的代理请求标记为 `abandoned` 终态，避免
+  它们反复占满每轮 100 条的复核窗口；这类请求没有扣款，因此不产生退款流水。
+- 把停滞的 x402 批次收敛为终态：`payment_verifying` / `payment_verified` 超过十
+  分钟、`settlement_pending` 超过十分钟标记为 `settlement_failed`，`executing`
+  超过五分钟标记为 `execution_failed`。`settlement_pending` 超时使用独立的
+  `stale_settlement_pending_manual_review` 失败码，提示可能已经上链、需要人工核对。
+- 回收失败批次占用的上游容量租约，并删除过期超过一天的租约行。
 
 ## 版本与发布
 
