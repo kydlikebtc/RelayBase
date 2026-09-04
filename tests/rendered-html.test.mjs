@@ -10751,3 +10751,83 @@ test("rejects state-changing requests from a non-canonical host once PUBLIC_APP_
     "cross_site_request_blocked",
   );
 });
+
+test("a swept executing batch still persists its receipt when the in-flight execution finishes", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const endpoint = "/v1/tiktok/web/fetch_user_profile";
+  enableCatalogEndpoint(db, endpoint, 2000);
+  const env = baseEnv({
+    DB: db,
+    RECONCILIATION_SECRET: "reconcile-secret-32-characters-minimum",
+  });
+  const batchId = "xb_long_execution_000000000000";
+  seedX402Batch(db, {
+    id: batchId,
+    status: "executing",
+    endpoint,
+    updatedAt: "2020-01-01 00:00:00",
+    executionStartedAt: "2020-01-01 00:00:00",
+  });
+  db.raw
+    .prepare(
+      `UPDATE x402_batches
+       SET transaction_hash = ?, settled_at = CURRENT_TIMESTAMP,
+           revenue_recognized_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+    )
+    .run(`0x${"c".repeat(64)}`, batchId);
+
+  const reconcile = await fetchWorker(
+    "/api/admin/reconcile",
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.RECONCILIATION_SECRET}` },
+    },
+    env,
+  );
+  assert.equal(reconcile.status, 200);
+  assert.equal((await reconcile.json()).x402.staleExecutions, 1);
+  const swept = db.raw
+    .prepare("SELECT status, failure_code FROM x402_batches WHERE id = ?")
+    .get(batchId);
+  assert.equal(swept.status, "execution_failed");
+  assert.equal(swept.failure_code, "stale_executing");
+
+  // 清扫只能是建议性的：真正在跑的执行完成后必须仍能落库回执，
+  // 否则客户已链上付款却永远拿不到结果，也没有恢复路径。
+  const late = db.raw
+    .prepare(
+      `UPDATE x402_batches
+       SET status = 'succeeded', execution_response_json = ?,
+           failure_code = NULL, completed_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?
+         AND (
+           status = 'executing'
+           OR (
+             status = 'execution_failed'
+             AND failure_code = 'stale_executing'
+             AND execution_response_json IS NULL
+           )
+         )`,
+    )
+    .run(JSON.stringify({ batch: { id: batchId }, results: [] }), batchId);
+  assert.equal(Number(late.changes), 1, "late executor must still land");
+  const healed = db.raw
+    .prepare(
+      "SELECT status, execution_response_json AS receipt FROM x402_batches WHERE id = ?",
+    )
+    .get(batchId);
+  assert.equal(healed.status, "succeeded");
+  assert.ok(healed.receipt);
+
+  const lookup = await fetchWorker(
+    `/api/x402/batches/${batchId}`,
+    { headers: { "cf-connecting-ip": "203.0.113.44" } },
+    env,
+  );
+  assert.equal(lookup.status, 200);
+  assert.equal((await lookup.json()).batch.status, "succeeded");
+});
