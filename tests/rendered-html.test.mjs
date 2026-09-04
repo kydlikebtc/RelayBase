@@ -251,6 +251,7 @@ function configureUpstreamSource(db) {
 }
 
 const TEST_CATALOG_GENERATION = "sync_test_complete_0001";
+const D1_ROUND_TRIP_BUDGET = 20;
 
 function enableCatalogEndpoint(
   db,
@@ -10145,4 +10146,103 @@ test("re-verifies stored taxonomy during reconciliation instead of on every prox
     TEST_CATALOG_GENERATION,
   );
   assert.equal((await call("taxonomy-004")).status, 200);
+});
+
+test("serves one billable call within the D1 round-trip budget and refreshes readiness after catalog changes", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const env = baseEnv({
+    DB: db,
+    READINESS_CACHE_TTL_MS: "10000",
+    RESELLER_AUTHORIZED: "true",
+    LEGAL_REVIEW_CONFIRMED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
+    UPSTREAM_API_KEY: "upstream-secret",
+    CATALOG_SYNC_SECRET: "catalog-sync-secret-32-characters-minimum",
+    RECONCILIATION_SECRET: "reconcile-secret-32-characters-minimum",
+  });
+  const path = "/v1/tiktok/web/fetch_user_profile";
+  enableCatalogEndpoint(db, path, 2000, "upstream-secret");
+  const setupEnv = { ...env };
+  const createKey = await fetchWorker(
+    "/api/keys",
+    {
+      method: "POST",
+      headers: signedInHeaders(),
+      body: JSON.stringify({ label: "budget key" }),
+    },
+    setupEnv,
+  );
+  assert.equal(createKey.status, 201);
+  const created = (await createKey.json()).key;
+  const user = db.raw
+    .prepare("SELECT id FROM users WHERE email = ?")
+    .get("owner@example.com");
+  db.raw
+    .prepare(
+      `INSERT INTO balance_ledger
+       (id, user_id, entry_type, delta_usd_micros, reference_id)
+       VALUES ('seed-budget', ?, 'test_credit', 1000000, 'test:budget')`,
+    )
+    .run(user.id);
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    Response.json({ code: 200, data: { uniqueId: "budget" }, request_id: "r" });
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+  const call = (key) =>
+    fetchWorker(
+      `${path}?uniqueId=budget`,
+      {
+        headers: {
+          authorization: `Bearer ${created.secret}`,
+          "idempotency-key": key,
+        },
+      },
+      env,
+    );
+
+  db.resetStats({ trace: true });
+  assert.equal((await call("budget-001")).status, 200);
+  const coldRoundTrips = db.stats.roundTrips;
+
+  db.resetStats({ trace: true });
+  assert.equal((await call("budget-002")).status, 200);
+  const warmRoundTrips = db.stats.roundTrips;
+  assert.ok(
+    warmRoundTrips < coldRoundTrips,
+    `cached readiness must cut round trips (${warmRoundTrips} vs ${coldRoundTrips})`,
+  );
+  assert.ok(
+    warmRoundTrips <= D1_ROUND_TRIP_BUDGET,
+    `warm call used ${warmRoundTrips} round trips:\n${db.stats.trace.join("\n")}`,
+  );
+
+  const revision = db.raw
+    .prepare("SELECT revision FROM endpoint_catalog WHERE path = ?")
+    .get(path).revision;
+  const disable = await fetchWorker(
+    "/api/admin/catalog",
+    {
+      method: "PATCH",
+      headers: {
+        authorization: `Bearer ${env.CATALOG_SYNC_SECRET}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        path,
+        enabled: false,
+        readOnly: false,
+        customerPriceUsdMicros: 2000,
+        expectedRevision: revision,
+      }),
+    },
+    env,
+  );
+  assert.equal(disable.status, 200);
+  const afterDisable = await call("budget-003");
+  assert.equal(afterDisable.status, 503);
+  assert.equal((await afterDisable.json()).error.code, "service_not_ready");
 });
