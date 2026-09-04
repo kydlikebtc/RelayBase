@@ -10612,3 +10612,34 @@ test("lets an owner resolve a failed x402 settlement with an on-chain receipt ex
     "released",
   );
 });
+
+test("rate limits anonymous x402 batch lookups per client address", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const endpoint = "/v1/tiktok/web/fetch_user_profile";
+  enableCatalogEndpoint(db, endpoint, 2000);
+  seedX402Batch(db, {
+    id: "xb_lookup_limit_00000000000000",
+    status: "quoted",
+    endpoint,
+    updatedAt: "2020-01-01 00:00:00",
+  });
+  const env = baseEnv({
+    DB: db,
+    X402_LOOKUP_RATE_LIMIT_RPS: "1",
+    X402_LOOKUP_RATE_LIMIT_BURST: "2",
+  });
+  const lookup = () =>
+    fetchWorker(
+      "/api/x402/batches/xb_lookup_limit_00000000000000",
+      { headers: { "cf-connecting-ip": "203.0.113.9" } },
+      env,
+    );
+  assert.equal((await lookup()).status, 200);
+  assert.equal((await lookup()).status, 200);
+  const limited = await lookup();
+  assert.equal(limited.status, 429);
+  assert.equal((await limited.json()).error.code, "x402_lookup_rate_limited");
+  assert.ok(limited.headers.get("retry-after"));
+});

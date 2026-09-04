@@ -189,6 +189,8 @@ export interface PlatformEnv {
   AUTH_SESSION_TTL_DAYS?: string;
   TRUST_SITES_IDENTITY_HEADERS?: string;
   READINESS_CACHE_TTL_MS?: string;
+  X402_LOOKUP_RATE_LIMIT_RPS?: string;
+  X402_LOOKUP_RATE_LIMIT_BURST?: string;
   PRICE_MARKUP_BPS?: string;
   UPSTREAM_RATE_LIMIT_RPS?: string;
   UPSTREAM_RATE_LIMIT_BURST?: string;
@@ -2984,8 +2986,28 @@ async function handleX402BatchLookup(
   env: PlatformEnv,
   requestId: string,
 ): Promise<Response> {
+  // 这是匿名可访问的端点：按客户端地址限流，避免被用来枚举批次 ID。
+  const db = requireDb(env);
+  const clientAddress =
+    request.headers.get("cf-connecting-ip")?.trim().slice(0, 64) ||
+    "unknown";
+  const lookupDecision = await consumeGcraRateLimit(
+    db,
+    "x402_lookup",
+    (await sha256Hex(clientAddress)).slice(0, 24),
+    clampInteger(env.X402_LOOKUP_RATE_LIMIT_RPS, 30, 1, 1_000),
+    clampInteger(env.X402_LOOKUP_RATE_LIMIT_BURST, 60, 1, 2_000),
+  );
+  if (!lookupDecision.allowed) {
+    throw new PlatformError(
+      429,
+      "x402_lookup_rate_limited",
+      "x402 批次查询过于频繁，请稍后重试。",
+      rateLimitHeaders(lookupDecision, "x402-lookup"),
+    );
+  }
   const id = new URL(request.url).pathname.split("/").at(-1) ?? "";
-  const batch = await x402BatchById(requireDb(env), id);
+  const batch = await x402BatchById(db, id);
   if (!batch) {
     throw new PlatformError(
       404,
@@ -6882,7 +6904,7 @@ type RateLimitDecision = {
 
 async function consumeGcraRateLimit(
   db: D1Database,
-  scope: "api_key" | "account",
+  scope: "api_key" | "account" | "x402_lookup",
   subjectId: string,
   rps: number,
   burst: number,
@@ -6951,7 +6973,7 @@ async function consumeGcraRateLimit(
 
 function rateLimitHeaders(
   decision: RateLimitDecision,
-  scope: "api-key" | "account",
+  scope: "api-key" | "account" | "x402-lookup",
 ): Headers {
   return new Headers({
     "x-ratelimit-limit": String(decision.limit),
