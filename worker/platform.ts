@@ -7053,7 +7053,9 @@ async function consumeUpstreamRateBucket(
   };
 }
 
-async function recordUpstreamAttemptHealth(
+// 返回待执行语句而不是自己 await：调用方把一次上游尝试产生的
+// 全部写入合并成单个 batch，省掉三次 D1 往返。
+function upstreamAttemptHealthStatements(
   db: D1Database,
   credential: ResolvedUpstreamProviderCredential,
   endpointPath: string,
@@ -7061,7 +7063,8 @@ async function recordUpstreamAttemptHealth(
   errorCode: string | null,
   latencyMs: number,
   retryAfterSeconds: number,
-): Promise<void> {
+): D1PreparedStatement[] {
+  const statements: D1PreparedStatement[] = [];
   const now = new Date();
   const nowIso = now.toISOString();
   const credentialState =
@@ -7091,7 +7094,7 @@ async function recordUpstreamAttemptHealth(
         ? new Date(now.getTime() + 1000).toISOString()
         : null;
   if (credential.id) {
-    await db
+    const credentialHealth = db
       .prepare(
         `INSERT INTO upstream_credential_health
          (credential_id, state, consecutive_failures, ewma_latency_ms,
@@ -7140,10 +7143,10 @@ async function recordUpstreamAttemptHealth(
         statusCode,
         nowIso,
         nowIso,
-      )
-      .run();
+      );
+    statements.push(credentialHealth);
   }
-  await db
+  const routeHealth = db
     .prepare(
       `INSERT INTO upstream_route_health
        (capacity_group_id, endpoint_path, state, consecutive_failures,
@@ -7190,11 +7193,12 @@ async function recordUpstreamAttemptHealth(
       statusCode,
       nowIso,
       nowIso,
-    )
-    .run();
+    );
+  statements.push(routeHealth);
+  return statements;
 }
 
-async function logUpstreamAttempt(
+function upstreamAttemptLogStatement(
   db: D1Database,
   input: {
     contextType: "api_key" | "x402";
@@ -7209,8 +7213,8 @@ async function logUpstreamAttempt(
     targetCount: number;
     paginationUnitCount: number;
   },
-): Promise<void> {
-  await db
+): D1PreparedStatement {
+  return db
     .prepare(
       `INSERT INTO upstream_request_attempts
        (id, context_type, context_id, endpoint_path, capacity_group_id,
@@ -7235,8 +7239,7 @@ async function logUpstreamAttempt(
       input.upstreamRequestId,
       input.targetCount,
       input.paginationUnitCount,
-    )
-    .run();
+    );
 }
 
 async function upstreamAttemptCountForContext(
@@ -7472,46 +7475,50 @@ async function routedUpstreamFetch(input: {
       1,
       Number(response?.headers.get("retry-after")) || 1,
     );
-    await recordUpstreamAttemptHealth(
-      input.db,
-      selected,
-      input.endpointPath,
-      statusCode,
-      errorCode,
-      latencyMs,
-      retryAfterSeconds,
-    );
-    await logUpstreamAttempt(input.db, {
-      contextType: input.contextType,
-      contextId: input.contextId,
-      endpointPath: input.endpointPath,
-      credential: selected,
-      attemptNumber: attempt,
-      outcome:
-        statusCode === 200
-          ? "success"
-          : errorCode ??
-            (statusCode === 429 ? "rate_limited" : "upstream_error"),
-      statusCode,
-      latencyMs,
-      upstreamRequestId:
-        response?.headers.get("x-request-id")?.slice(0, 160) ?? null,
-      targetCount: Math.max(1, input.targetCount ?? 1),
-      paginationUnitCount: Math.max(
-        0,
-        input.paginationUnitCount ?? 0,
+    const attemptStatements: D1PreparedStatement[] = [
+      ...upstreamAttemptHealthStatements(
+        input.db,
+        selected,
+        input.endpointPath,
+        statusCode,
+        errorCode,
+        latencyMs,
+        retryAfterSeconds,
       ),
-    });
+      upstreamAttemptLogStatement(input.db, {
+        contextType: input.contextType,
+        contextId: input.contextId,
+        endpointPath: input.endpointPath,
+        credential: selected,
+        attemptNumber: attempt,
+        outcome:
+          statusCode === 200
+            ? "success"
+            : errorCode ??
+              (statusCode === 429 ? "rate_limited" : "upstream_error"),
+        statusCode,
+        latencyMs,
+        upstreamRequestId:
+          response?.headers.get("x-request-id")?.slice(0, 160) ?? null,
+        targetCount: Math.max(1, input.targetCount ?? 1),
+        paginationUnitCount: Math.max(
+          0,
+          input.paginationUnitCount ?? 0,
+        ),
+      }),
+    ];
     if (selected.id) {
-      await input.db
-        .prepare(
-          `UPDATE upstream_credentials
-           SET last_used_at = CURRENT_TIMESTAMP
-           WHERE id = ? AND revoked_at IS NULL`,
-        )
-        .bind(selected.id)
-        .run();
+      attemptStatements.push(
+        input.db
+          .prepare(
+            `UPDATE upstream_credentials
+             SET last_used_at = CURRENT_TIMESTAMP
+             WHERE id = ? AND revoked_at IS NULL`,
+          )
+          .bind(selected.id),
+      );
     }
+    await input.db.batch(attemptStatements);
     if (response?.status === 200) {
       return { response, credential: selected, attemptCount: attempt };
     }
