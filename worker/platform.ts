@@ -29,6 +29,11 @@ import {
   type X402PaymentPayload,
   type X402PaymentRequired,
 } from "./x402";
+import {
+  AVAILABLE_BALANCE_SQL,
+  REFRESH_BALANCE_SNAPSHOTS_SQL,
+  availableBalanceBindings,
+} from "./lib/balance-sql";
 import { TtlCache, parseTtlMs } from "./lib/ttl-cache";
 
 const JSON_HEADERS = {
@@ -2588,12 +2593,8 @@ async function handleDashboard(
     prepaidDailyResult,
   ] = await db.batch([
     db
-      .prepare(
-        `SELECT COALESCE(SUM(delta_usd_micros), 0) AS balance
-         FROM balance_ledger
-         WHERE user_id = ?`,
-      )
-      .bind(user.id),
+      .prepare(`SELECT ${AVAILABLE_BALANCE_SQL} AS balance`)
+      .bind(...availableBalanceBindings(user.id)),
     db
       .prepare(
         `SELECT
@@ -8069,11 +8070,7 @@ async function handleProxyRequest(
          (id, user_id, entry_type, delta_usd_micros, reference_id,
           description, created_at)
          SELECT ?, ?, 'api_debit', ?, ?, ?, ?
-         WHERE (
-           SELECT COALESCE(SUM(delta_usd_micros), 0)
-           FROM balance_ledger
-           WHERE user_id = ?
-         ) >= ?`,
+         WHERE ${AVAILABLE_BALANCE_SQL} >= ?`,
       )
       .bind(
         `led_${randomBase64Url(16)}`,
@@ -8082,7 +8079,7 @@ async function handleProxyRequest(
         ledgerReferenceId,
         `${request.method} ${url.pathname}`,
         new Date().toISOString(),
-        key.user_id,
+        ...availableBalanceBindings(key.user_id),
         costUsdMicros,
       ),
     db
@@ -16686,6 +16683,7 @@ async function handleReconciliation(
     status: providerObservationFailed ? "provider_failed" : "healthy",
   });
   const maintenanceStatements = [
+    db.prepare(REFRESH_BALANCE_SNAPSHOTS_SQL),
     db
       .prepare(
         `DELETE FROM rate_limit_buckets
@@ -19414,12 +19412,8 @@ async function logApiCall(
         input.requestId,
       ),
     db
-      .prepare(
-        `SELECT COALESCE(SUM(delta_usd_micros), 0) AS balance
-         FROM balance_ledger
-         WHERE user_id = ?`,
-      )
-      .bind(input.key.user_id),
+      .prepare(`SELECT ${AVAILABLE_BALANCE_SQL} AS balance`)
+      .bind(...availableBalanceBindings(input.key.user_id)),
   ]);
   const balanceRow = (results[3] as D1Result<{ balance: number }> | undefined)
     ?.results?.[0];
@@ -19431,12 +19425,8 @@ async function currentBalance(
   userId: string,
 ): Promise<number> {
   const row = await db
-    .prepare(
-      `SELECT COALESCE(SUM(delta_usd_micros), 0) AS balance
-       FROM balance_ledger
-       WHERE user_id = ?`,
-    )
-    .bind(userId)
+    .prepare(`SELECT ${AVAILABLE_BALANCE_SQL} AS balance`)
+    .bind(...availableBalanceBindings(userId))
     .first<{ balance: number }>();
   return Number(row?.balance ?? 0);
 }
