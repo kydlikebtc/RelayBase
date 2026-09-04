@@ -10410,3 +10410,121 @@ test("marks reserved-but-never-debited requests abandoned so the reconciliation 
     0,
   );
 });
+
+function seedX402Batch(
+  db,
+  { id, status, endpoint, updatedAt, executionStartedAt = null },
+) {
+  db.raw
+    .prepare(
+      `INSERT INTO x402_batches
+       (id, idempotency_hash, endpoint_path, request_hash, verified_quantity,
+        unit_price_usd_micros, amount_usdc_atomic, asset, pay_to,
+        payment_requirements_json, facilitator_mode, status, expires_at,
+        execution_started_at, created_at, quoted_at, updated_at)
+       VALUES (?, ?, ?, ?, 1, 3000, 3000, '0xasset', '0xpayto', '{}', 'custom', ?,
+               datetime('now', '+10 minutes'), ?, ?, ?, ?)`,
+    )
+    .run(
+      id,
+      `idem-${id}`,
+      endpoint,
+      `req-${id}`,
+      status,
+      executionStartedAt,
+      updatedAt,
+      updatedAt,
+      updatedAt,
+    );
+  db.raw
+    .prepare(
+      `INSERT INTO upstream_capacity_leases
+       (id, context_type, context_id, capacity_group_id, endpoint_path,
+        planned_requests, status, expires_at)
+       VALUES (?, 'x402', ?, 'environment-primary', ?, 1, 'reserved',
+               datetime('now', '+1 minute'))`,
+    )
+    .run(`lease-${id}`, id, endpoint);
+}
+
+test("sweeps stuck x402 batches during reconciliation and releases their leases", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const endpoint = "/v1/tiktok/web/fetch_user_profile";
+  enableCatalogEndpoint(db, endpoint, 2000);
+  const env = baseEnv({
+    DB: db,
+    RECONCILIATION_SECRET: "reconcile-secret-32-characters-minimum",
+  });
+  const old = "2020-01-01 00:00:00";
+  seedX402Batch(db, {
+    id: "xb_stale_verifying_000000000000",
+    status: "payment_verifying",
+    endpoint,
+    updatedAt: old,
+  });
+  seedX402Batch(db, {
+    id: "xb_stale_pending_0000000000000",
+    status: "settlement_pending",
+    endpoint,
+    updatedAt: old,
+  });
+  seedX402Batch(db, {
+    id: "xb_stale_executing_00000000000",
+    status: "executing",
+    endpoint,
+    updatedAt: old,
+    executionStartedAt: old,
+  });
+  seedX402Batch(db, {
+    id: "xb_fresh_quoted_00000000000000",
+    status: "quoted",
+    endpoint,
+    updatedAt: old,
+  });
+
+  const reconcile = await fetchWorker(
+    "/api/admin/reconcile",
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.RECONCILIATION_SECRET}` },
+    },
+    env,
+  );
+  assert.equal(reconcile.status, 200);
+  const body = await reconcile.json();
+  assert.deepEqual(body.x402, {
+    staleVerifications: 1,
+    staleSettlements: 1,
+    staleExecutions: 1,
+  });
+  const rows = Object.fromEntries(
+    db.raw
+      .prepare("SELECT id, status, failure_code FROM x402_batches")
+      .all()
+      .map((row) => [row.id, row]),
+  );
+  assert.equal(
+    rows["xb_stale_verifying_000000000000"].status,
+    "settlement_failed",
+  );
+  assert.equal(
+    rows["xb_stale_verifying_000000000000"].failure_code,
+    "stale_payment_verifying",
+  );
+  assert.equal(
+    rows["xb_stale_pending_0000000000000"].failure_code,
+    "stale_settlement_pending_manual_review",
+  );
+  assert.equal(rows["xb_stale_executing_00000000000"].status, "execution_failed");
+  assert.equal(rows["xb_fresh_quoted_00000000000000"].status, "quoted");
+  const leases = Object.fromEntries(
+    db.raw
+      .prepare("SELECT context_id, status FROM upstream_capacity_leases")
+      .all()
+      .map((row) => [row.context_id, row.status]),
+  );
+  assert.equal(leases["xb_stale_verifying_000000000000"], "expired");
+  assert.equal(leases["xb_fresh_quoted_00000000000000"], "reserved");
+});
