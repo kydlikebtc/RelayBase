@@ -41,4 +41,19 @@ jobs:
           DOC_SYNC_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
 
       - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+        run: |
+          # npm 10 (bundled with Node 22.13) posts to the retired
+          # /-/npm/v1/security/audits/quick endpoint, which now always returns
+          # 400. npm 11 uses the bulk advisory endpoint. Retry a few times so a
+          # transient registry blip cannot fail the gate; a real high-severity
+          # production advisory still fails every attempt and fails the build.
+          npm install -g npm@^11
+          for attempt in 1 2 3; do
+            if npm audit --omit=dev --audit-level=high; then
+              exit 0
+            fi
+            echo "npm audit attempt ${attempt} failed; retrying in 20s"
+            sleep 20
+          done
+          echo "npm audit failed after 3 attempts"
+          exit 1
