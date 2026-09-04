@@ -4694,6 +4694,7 @@ async function continueX402Batch(
         stored.id,
       )
       .run();
+    await setX402CapacityLeaseStatus(db, stored.id, "released");
     throw new PlatformError(
       402,
       "x402_verification_failed",
@@ -4716,6 +4717,7 @@ async function continueX402Batch(
         stored.id,
       )
       .run();
+    await setX402CapacityLeaseStatus(db, stored.id, "released");
     const challenged = buildX402PaymentRequired({
       origin: canonicalAppOrigin(request, env),
       requirements,
@@ -4792,6 +4794,7 @@ async function continueX402Batch(
         stored.id,
       )
       .run();
+    await setX402CapacityLeaseStatus(db, stored.id, "released");
     throw new PlatformError(
       402,
       "x402_settlement_failed",
@@ -4823,6 +4826,7 @@ async function continueX402Batch(
         stored.id,
       )
       .run();
+    await setX402CapacityLeaseStatus(db, stored.id, "released");
     throw new PlatformError(
       402,
       "x402_settlement_failed",
@@ -16703,6 +16707,10 @@ async function handleReconciliation(
   });
   const maintenanceStatements = [
     db.prepare(REFRESH_BALANCE_SNAPSHOTS_SQL),
+    db.prepare(
+      `DELETE FROM upstream_capacity_leases
+       WHERE datetime(expires_at) < datetime('now', '-1 day')`,
+    ),
     db
       .prepare(
         `DELETE FROM rate_limit_buckets
@@ -16796,6 +16804,47 @@ async function handleReconciliation(
         .bind(reconciliationDetails),
     );
   }
+  const x402Sweep = await db.batch([
+    db.prepare(
+      `UPDATE x402_batches
+         SET status = 'settlement_failed', failure_code = 'stale_' || status,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE status IN ('payment_verifying', 'payment_verified')
+           AND datetime(updated_at) < datetime('now', '-10 minutes')`,
+    ),
+    db.prepare(
+      `UPDATE x402_batches
+         SET status = 'settlement_failed',
+             failure_code = 'stale_settlement_pending_manual_review',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE status = 'settlement_pending'
+           AND datetime(updated_at) < datetime('now', '-10 minutes')`,
+    ),
+    db.prepare(
+      `UPDATE x402_batches
+         SET status = 'execution_failed', failure_code = 'stale_executing',
+             completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+         WHERE status = 'executing'
+           AND datetime(COALESCE(execution_started_at, updated_at)) <
+               datetime('now', '-5 minutes')`,
+    ),
+    db.prepare(
+      `UPDATE upstream_capacity_leases
+         SET status = 'expired', updated_at = CURRENT_TIMESTAMP
+         WHERE context_type = 'x402'
+           AND status IN ('reserved', 'consuming')
+           AND context_id IN (
+             SELECT id FROM x402_batches
+             WHERE status IN ('settlement_failed', 'execution_failed',
+                              'payment_rejected', 'expired')
+           )`,
+    ),
+  ]);
+  const x402SweepCounts = {
+    staleVerifications: Number(x402Sweep[0]?.meta?.changes ?? 0),
+    staleSettlements: Number(x402Sweep[1]?.meta?.changes ?? 0),
+    staleExecutions: Number(x402Sweep[2]?.meta?.changes ?? 0),
+  };
   // 目录完整性全量校验只在这里和 /api/health、/api/readiness 上跑；
   // 热路径改为比较 catalog_sync_state.taxonomy_verified_generation。
   let taxonomyVerified = false;
@@ -16826,6 +16875,7 @@ async function handleReconciliation(
         refunded,
         abandoned: abandonedCount,
       },
+      x402: x402SweepCounts,
       catalog: { taxonomyVerified },
       payments: {
         eventsProcessed: paymentEventsProcessed,
