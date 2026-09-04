@@ -10528,3 +10528,87 @@ test("sweeps stuck x402 batches during reconciliation and releases their leases"
   assert.equal(leases["xb_stale_verifying_000000000000"], "expired");
   assert.equal(leases["xb_fresh_quoted_00000000000000"], "reserved");
 });
+
+test("lets an owner resolve a failed x402 settlement with an on-chain receipt exactly once", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const endpoint = "/v1/tiktok/web/fetch_user_profile";
+  enableCatalogEndpoint(db, endpoint, 2000);
+  const env = baseEnv({
+    DB: db,
+    ADMIN_MASTER_SECRET: "x402-admin-secret-32-characters-minimum",
+  });
+  seedX402Batch(db, {
+    id: "xb_failed_settlement_000000000",
+    status: "settlement_failed",
+    endpoint,
+    updatedAt: "2020-01-01 00:00:00",
+  });
+  seedX402Batch(db, {
+    id: "xb_failed_settlement_000000001",
+    status: "settlement_failed",
+    endpoint,
+    updatedAt: "2020-01-01 00:00:00",
+  });
+  const resolve = (id, body) =>
+    fetchWorker(
+      `/api/admin/x402/batches/${id}/resolve`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${env.ADMIN_MASTER_SECRET}`,
+          origin: "http://localhost",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+      },
+      env,
+    );
+  const txHash = `0x${"a".repeat(64)}`;
+  const first = await resolve("xb_failed_settlement_000000000", {
+    action: "mark_settled_manually",
+    transactionHash: txHash,
+    note: "Verified on Basescan by operator",
+  });
+  assert.equal(first.status, 200);
+  assert.equal((await first.json()).batch.status, "settled");
+  assert.equal(
+    db.raw
+      .prepare(
+        "SELECT COUNT(*) AS c FROM admin_audit_logs WHERE action = 'x402.batch.mark_settled_manually'",
+      )
+      .get().c,
+    1,
+  );
+  const replay = await resolve("xb_failed_settlement_000000000", {
+    action: "mark_settled_manually",
+    transactionHash: txHash,
+    note: "Verified on Basescan by operator",
+  });
+  assert.equal(replay.status, 409);
+  const duplicateReceipt = await resolve("xb_failed_settlement_000000001", {
+    action: "mark_settled_manually",
+    transactionHash: txHash,
+    note: "Same receipt reused",
+  });
+  assert.equal(duplicateReceipt.status, 409);
+  assert.equal(
+    (await duplicateReceipt.json()).error.code,
+    "x402_receipt_conflict",
+  );
+  const expired = await resolve("xb_failed_settlement_000000001", {
+    action: "mark_expired",
+    note: "No funds observed on chain",
+  });
+  assert.equal(expired.status, 200);
+  assert.equal((await expired.json()).batch.status, "expired");
+  assert.equal(
+    db.raw
+      .prepare(
+        "SELECT status FROM upstream_capacity_leases WHERE context_id = 'xb_failed_settlement_000000001'",
+      )
+      .get().status,
+    "released",
+  );
+});

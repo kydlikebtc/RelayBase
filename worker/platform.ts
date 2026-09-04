@@ -1383,6 +1383,15 @@ export async function handlePlatformRequest(
     }
 
     if (
+      /^\/api\/admin\/x402\/batches\/xb_[A-Za-z0-9_-]{20,80}\/resolve$/.test(
+        url.pathname,
+      ) &&
+      request.method === "POST"
+    ) {
+      return await handleAdminX402BatchResolve(request, env, requestId);
+    }
+
+    if (
       url.pathname === X402_BATCH_PATH &&
       request.method === "POST"
     ) {
@@ -3745,6 +3754,106 @@ async function handleAdminX402RuntimeConfig(
     requestId,
   );
 }
+
+async function handleAdminX402BatchResolve(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  assertSameOrigin(request, env);
+  requireAdminSecret(request, env, "platform");
+  const db = requireDb(env);
+  const batchId = new URL(request.url).pathname.split("/").at(-2) ?? "";
+  const body = await readJsonBody<{
+    action?: unknown;
+    transactionHash?: unknown;
+    note?: unknown;
+  }>(request, MAX_DASHBOARD_BODY_BYTES);
+  const note =
+    typeof body.note === "string" ? body.note.trim().slice(0, 500) : "";
+  if (
+    (body.action !== "mark_settled_manually" &&
+      body.action !== "mark_expired") ||
+    note.length < 4
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_x402_resolution",
+      "必须提供 mark_settled_manually 或 mark_expired 动作，以及至少 4 个字符的说明。",
+    );
+  }
+  let changes = 0;
+  if (body.action === "mark_settled_manually") {
+    if (!isX402TransactionHash(body.transactionHash)) {
+      throw new PlatformError(
+        400,
+        "invalid_x402_transaction_hash",
+        "人工确认结算必须提供 Base 链上的 0x 交易哈希。",
+      );
+    }
+    try {
+      // transaction_hash 上有唯一索引：同一笔链上回执不能绑定到两个批次。
+      const result = await db
+        .prepare(
+          `UPDATE x402_batches
+           SET status = 'settled', transaction_hash = ?, failure_code = NULL,
+               settled_at = CURRENT_TIMESTAMP,
+               revenue_recognized_at = CURRENT_TIMESTAMP,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND status = 'settlement_failed'
+             AND transaction_hash IS NULL`,
+        )
+        .bind(body.transactionHash, batchId)
+        .run();
+      changes = Number(result.meta?.changes ?? 0);
+    } catch {
+      throw new PlatformError(
+        409,
+        "x402_receipt_conflict",
+        "该链上交易哈希已经绑定到其他批次。",
+      );
+    }
+  } else {
+    const result = await db
+      .prepare(
+        `UPDATE x402_batches
+         SET status = 'expired', failure_code = 'resolved_expired',
+             completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status = 'settlement_failed'`,
+      )
+      .bind(batchId)
+      .run();
+    changes = Number(result.meta?.changes ?? 0);
+    if (changes === 1) {
+      await setX402CapacityLeaseStatus(db, batchId, "released");
+    }
+  }
+  if (changes !== 1) {
+    throw new PlatformError(
+      409,
+      "x402_batch_not_resolvable",
+      "只有处于 settlement_failed 状态的批次可以人工处理。",
+    );
+  }
+  await writeAdminAudit(db, request, {
+    action: `x402.batch.${body.action}`,
+    targetType: "x402_batch",
+    targetId: batchId,
+    details: {
+      note,
+      transactionHash:
+        body.action === "mark_settled_manually" ? body.transactionHash : null,
+    },
+    idempotencyKey: `x402-resolve:${batchId}:${body.action}`,
+  });
+  const batch = await x402BatchById(db, batchId);
+  return jsonResponse(
+    { batch: batch ? adminX402Batch(batch) : null },
+    200,
+    requestId,
+  );
+}
+
 
 function publicX402Batch(
   batch: X402BatchRecord,
@@ -21708,12 +21817,7 @@ async function adminActorFingerprint(
 async function writeAdminAudit(
   db: D1Database,
   request: Request,
-  input: {
-    action: string;
-    targetType: string;
-    targetId: string;
-    details?: Record<string, unknown>;
-  },
+  input: Parameters<typeof prepareAdminAuditStatement>[2],
 ): Promise<void> {
   await (await prepareAdminAuditStatement(db, request, input)).run();
 }
