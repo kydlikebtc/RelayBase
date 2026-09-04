@@ -249,6 +249,13 @@ type CatalogRecord = {
   safety_policy_version: number;
   sync_generation: string | null;
   coverage_verified: number;
+  in_latest_generation: number;
+  sync_credential_source: string | null;
+  sync_credential_id: string | null;
+  sync_credential_fingerprint: string | null;
+  sync_credential_state_version: number | null;
+  sync_source_config_version: number | null;
+  sync_source_config_hash: string | null;
 };
 
 type MarketplaceSurface = "app" | "web" | "app_web" | "other";
@@ -7643,6 +7650,24 @@ async function handleProxyRequest(
                   WHERE id = 1
                     AND ${CATALOG_COVERAGE_WHERE}
                 ) AS coverage_verified,
+                EXISTS(
+                  SELECT 1 FROM catalog_sync_state
+                  WHERE id = 1
+                    AND last_success_generation =
+                        endpoint_catalog.sync_generation
+                ) AS in_latest_generation,
+                (SELECT credential_source FROM catalog_sync_state
+                 WHERE id = 1) AS sync_credential_source,
+                (SELECT credential_id FROM catalog_sync_state
+                 WHERE id = 1) AS sync_credential_id,
+                (SELECT credential_fingerprint FROM catalog_sync_state
+                 WHERE id = 1) AS sync_credential_fingerprint,
+                (SELECT credential_state_version FROM catalog_sync_state
+                 WHERE id = 1) AS sync_credential_state_version,
+                (SELECT source_config_version FROM catalog_sync_state
+                 WHERE id = 1) AS sync_source_config_version,
+                (SELECT source_config_hash FROM catalog_sync_state
+                 WHERE id = 1) AS sync_source_config_hash,
                 (SELECT request_count
                  FROM upstream_rate_limit_buckets LIMIT 1)
                   AS _upstream_rate_limit_schema,
@@ -7930,30 +7955,20 @@ async function handleProxyRequest(
       "当前 UpstreamProvider 活动凭据没有调用该数据接口的权限。",
     );
   }
-  const currentCatalogCredential = await db
-    .prepare(
-      `SELECT EXISTS(
-         SELECT 1 FROM catalog_sync_state
-         WHERE id = 1 AND last_success_generation = ?
-           AND credential_source = ?
-           AND credential_id IS ?
-           AND credential_fingerprint = ?
-           AND credential_state_version = ?
-           AND source_config_version = ?
-           AND source_config_hash = ?
-       ) AS matches_current`,
-    )
-    .bind(
-      catalog.sync_generation,
-      upstreamCredential.source,
-      upstreamCredential.id,
-      upstreamCredential.fingerprint,
-      upstreamCredential.stateVersion,
-      sourceConfig.version,
-      sourceConfig.hash,
-    )
-    .first<{ matches_current: number }>();
-  if (Number(currentCatalogCredential?.matches_current ?? 0) !== 1) {
+  // 这些字段已由上面的目录查询一并带出，无需再往返一次。
+  const catalogMatchesCredential =
+    Number(catalog.in_latest_generation) === 1 &&
+    catalog.sync_credential_source === upstreamCredential.source &&
+    (catalog.sync_credential_id ?? null) ===
+      (upstreamCredential.id ?? null) &&
+    catalog.sync_credential_fingerprint ===
+      upstreamCredential.fingerprint &&
+    Number(catalog.sync_credential_state_version) ===
+      upstreamCredential.stateVersion &&
+    Number(catalog.sync_source_config_version) ===
+      sourceConfig.version &&
+    catalog.sync_source_config_hash === sourceConfig.hash;
+  if (!catalogMatchesCredential) {
     throw new PlatformError(
       409,
       "catalog_credential_changed",
@@ -8047,28 +8062,40 @@ async function handleProxyRequest(
   }
 
   const costUsdMicros = catalog.customer_price_usd_micros;
-  const debitResult = await db
-    .prepare(
-      `INSERT INTO balance_ledger
-       (id, user_id, entry_type, delta_usd_micros, reference_id, description, created_at)
-       SELECT ?, ?, 'api_debit', ?, ?, ?, ?
-       WHERE (
-         SELECT COALESCE(SUM(delta_usd_micros), 0)
-         FROM balance_ledger
-         WHERE user_id = ?
-       ) >= ?`,
-    )
-    .bind(
-      `led_${randomBase64Url(16)}`,
-      key.user_id,
-      -costUsdMicros,
-      ledgerReferenceId,
-      `${request.method} ${url.pathname}`,
-      new Date().toISOString(),
-      key.user_id,
-      costUsdMicros,
-    )
-    .run();
+  const [debitResult] = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO balance_ledger
+         (id, user_id, entry_type, delta_usd_micros, reference_id,
+          description, created_at)
+         SELECT ?, ?, 'api_debit', ?, ?, ?, ?
+         WHERE (
+           SELECT COALESCE(SUM(delta_usd_micros), 0)
+           FROM balance_ledger
+           WHERE user_id = ?
+         ) >= ?`,
+      )
+      .bind(
+        `led_${randomBase64Url(16)}`,
+        key.user_id,
+        -costUsdMicros,
+        ledgerReferenceId,
+        `${request.method} ${url.pathname}`,
+        new Date().toISOString(),
+        key.user_id,
+        costUsdMicros,
+      ),
+    db
+      .prepare(
+        `UPDATE proxy_requests
+         SET status = 'charged'
+         WHERE id = ? AND status = 'processing'
+           AND EXISTS (
+             SELECT 1 FROM balance_ledger WHERE reference_id = ?
+           )`,
+      )
+      .bind(requestId, ledgerReferenceId),
+  ]);
   if (Number(debitResult.meta?.changes ?? 0) !== 1) {
     await db
       .prepare(`DELETE FROM proxy_requests WHERE id = ? AND status = 'processing'`)
@@ -8080,8 +8107,6 @@ async function handleProxyRequest(
       "余额不足，请充值后重试。",
     );
   }
-
-  await markProxyRequest(db, requestId, "charged", null);
 
   const upstreamUrl = new URL(
     upstreamConfigUrl(
@@ -8263,6 +8288,7 @@ async function handleProxyRequest(
           catalogCapability.responseItemsPath,
         )
       : null;
+  let balance: number | null = null;
   try {
     await recordReturnedItemsForLastUpstreamAttempt(
       db,
@@ -8270,7 +8296,7 @@ async function handleProxyRequest(
       requestId,
       returnedItemCount,
     );
-    await logApiCall(db, {
+    balance = await logApiCall(db, {
       requestId,
       key,
       method: request.method,
@@ -8301,7 +8327,7 @@ async function handleProxyRequest(
     );
   }
 
-  const balance = await currentBalance(db, key.user_id);
+  if (balance == null) balance = await currentBalance(db, key.user_id);
   const responseHeaders = sanitizeUpstreamHeaders(upstreamResponse.headers);
   customerRateHeaders.forEach((value, name) =>
     responseHeaders.set(name, value),
@@ -19338,8 +19364,9 @@ async function logApiCall(
     paginationUnitCount: number;
     refunded: boolean;
   },
-): Promise<void> {
-  await db.batch([
+  // 顺带把余额读进同一个 batch，成功路径因此不必再单独查一次。
+): Promise<number | null> {
+  const results = await db.batch([
     db
       .prepare(
         `INSERT INTO api_calls
@@ -19386,7 +19413,17 @@ async function logApiCall(
         input.statusCode,
         input.requestId,
       ),
+    db
+      .prepare(
+        `SELECT COALESCE(SUM(delta_usd_micros), 0) AS balance
+         FROM balance_ledger
+         WHERE user_id = ?`,
+      )
+      .bind(input.key.user_id),
   ]);
+  const balanceRow = (results[3] as D1Result<{ balance: number }> | undefined)
+    ?.results?.[0];
+  return balanceRow ? Number(balanceRow.balance) : null;
 }
 
 async function currentBalance(
