@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+### Security
+
+- 生产依赖通过 `overrides` 把 `nanoid` 升级到 `3.3.18`、`postcss` 升级到 `8.5.28`，修复
+  GHSA-28wg-ghj8-5hjv、GHSA-2v37-7h3g-55p8 与 GHSA-fxqj-rqcc-2cmp；
+  `npm audit --omit=dev --audit-level=high` 恢复为零高危生产依赖漏洞。
+
 ## [0.4.0-preview.5] - 2026-07-26
 
 ### Added
