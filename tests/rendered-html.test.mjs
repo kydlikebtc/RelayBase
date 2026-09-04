@@ -251,7 +251,7 @@ function configureUpstreamSource(db) {
 }
 
 const TEST_CATALOG_GENERATION = "sync_test_complete_0001";
-const D1_ROUND_TRIP_BUDGET = 20;
+const D1_ROUND_TRIP_BUDGET = 17;
 
 function enableCatalogEndpoint(
   db,
