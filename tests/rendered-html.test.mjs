@@ -10246,3 +10246,93 @@ test("serves one billable call within the D1 round-trip budget and refreshes rea
   assert.equal(afterDisable.status, 503);
   assert.equal((await afterDisable.json()).error.code, "service_not_ready");
 });
+
+test("debits against balance snapshots plus incremental ledger rows", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const env = baseEnv({
+    DB: db,
+    RESELLER_AUTHORIZED: "true",
+    LEGAL_REVIEW_CONFIRMED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
+    UPSTREAM_API_KEY: "upstream-secret",
+    RECONCILIATION_SECRET: "reconcile-secret-32-characters-minimum",
+  });
+  const path = "/v1/tiktok/web/fetch_user_profile";
+  enableCatalogEndpoint(db, path, 2000, "upstream-secret");
+  const createKey = await fetchWorker(
+    "/api/keys",
+    {
+      method: "POST",
+      headers: signedInHeaders(),
+      body: JSON.stringify({ label: "snapshot key" }),
+    },
+    env,
+  );
+  const created = (await createKey.json()).key;
+  const user = db.raw
+    .prepare("SELECT id FROM users WHERE email = ?")
+    .get("owner@example.com");
+  db.raw
+    .prepare(
+      `INSERT INTO balance_ledger
+       (id, user_id, entry_type, delta_usd_micros, reference_id, created_at)
+       VALUES ('snap-1', ?, 'test_credit', 5000, 'test:snap-1',
+               datetime('now', '-2 hours')),
+              ('snap-2', ?, 'test_debit', -1000, 'test:snap-2',
+               datetime('now', '-1 hour'))`,
+    )
+    .run(user.id, user.id);
+  const reconcile = await fetchWorker(
+    "/api/admin/reconcile",
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.RECONCILIATION_SECRET}` },
+    },
+    env,
+  );
+  assert.equal(reconcile.status, 200);
+  assert.equal(
+    db.raw
+      .prepare(
+        "SELECT balance_usd_micros AS b FROM balance_snapshots WHERE user_id = ?",
+      )
+      .get(user.id).b,
+    4000,
+  );
+  db.raw
+    .prepare(
+      `INSERT INTO balance_ledger
+       (id, user_id, entry_type, delta_usd_micros, reference_id)
+       VALUES ('snap-3', ?, 'test_credit', 1000, 'test:snap-3')`,
+    )
+    .run(user.id);
+
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    Response.json({ code: 200, data: { ok: true }, request_id: "r" });
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+  const call = (key) =>
+    fetchWorker(
+      `${path}?uniqueId=snapshot`,
+      {
+        headers: {
+          authorization: `Bearer ${created.secret}`,
+          "idempotency-key": key,
+        },
+      },
+      env,
+    );
+  const first = await call("snap-call-1");
+  assert.equal(first.status, 200);
+  assert.equal(first.headers.get("x-relaybase-balance-usd-micros"), "3000");
+  const second = await call("snap-call-2");
+  assert.equal(second.status, 200);
+  assert.equal(second.headers.get("x-relaybase-balance-usd-micros"), "1000");
+  const third = await call("snap-call-3");
+  assert.equal(third.status, 402);
+  assert.equal((await third.json()).error.code, "insufficient_balance");
+});
