@@ -994,7 +994,9 @@ export async function handlePlatformRequest(
     }
 
     if (url.pathname === "/api/health" && request.method === "GET") {
-      const readiness = await operationalReadiness(env);
+      const readiness = await operationalReadiness(env, {
+        verifyTaxonomy: true,
+      });
       return jsonResponse(
         {
           ok: true,
@@ -1012,7 +1014,9 @@ export async function handlePlatformRequest(
     }
 
     if (url.pathname === "/api/readiness" && request.method === "GET") {
-      const readiness = await operationalReadiness(env);
+      const readiness = await operationalReadiness(env, {
+        verifyTaxonomy: true,
+      });
       return jsonResponse(
         {
           ok: readiness.ready,
@@ -9846,8 +9850,10 @@ async function handlePublicCatalog(
     maxLimit: 200,
     maxOffset: 5_000,
   });
+  // 公开目录是唯一消费 taxonomyReady 的面，且带 30 秒缓存、
+  // 不在计费热路径上，所以这里坚持做全量完整性校验。
   const [readiness, overlay] = await Promise.all([
-    operationalReadiness(env),
+    operationalReadiness(env, { verifyTaxonomy: true }),
     loadMarketplaceCatalogOverlay(env),
   ]);
   if (
@@ -15614,9 +15620,10 @@ async function handleCatalogSync(
             scope_excluded_count, matched_price_count,
             positive_price_count, zero_price_count,
             awaiting_price_count, openapi_snapshot_hash,
-            price_snapshot_hash, synced_at)
+            price_snapshot_hash, taxonomy_verified_generation,
+            synced_at)
            SELECT 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?,
                   CURRENT_TIMESTAMP
            WHERE EXISTS (
              SELECT 1 FROM catalog_sync_locks
@@ -15657,6 +15664,8 @@ async function handleCatalogSync(
              awaiting_price_count = excluded.awaiting_price_count,
              openapi_snapshot_hash = excluded.openapi_snapshot_hash,
              price_snapshot_hash = excluded.price_snapshot_hash,
+             taxonomy_verified_generation =
+               excluded.taxonomy_verified_generation,
              synced_at = CURRENT_TIMESTAMP`,
         )
         .bind(
@@ -15681,6 +15690,7 @@ async function handleCatalogSync(
           awaitingPriceEntries,
           openApiSnapshotHash,
           priceSnapshotHash,
+          syncGeneration,
           syncGeneration,
           sourceConfig.version,
           sourceConfig.hash,
@@ -16777,6 +16787,26 @@ async function handleReconciliation(
         .bind(reconciliationDetails),
     );
   }
+  // 目录完整性全量校验只在这里和 /api/health、/api/readiness 上跑；
+  // 热路径改为比较 catalog_sync_state.taxonomy_verified_generation。
+  let taxonomyVerified = false;
+  try {
+    await assertStoredCatalogTaxonomyIntegrity(db);
+    taxonomyVerified = true;
+  } catch {
+    taxonomyVerified = false;
+  }
+  maintenanceStatements.push(
+    db.prepare(
+      taxonomyVerified
+        ? `UPDATE catalog_sync_state
+           SET taxonomy_verified_generation = last_success_generation
+           WHERE id = 1`
+        : `UPDATE catalog_sync_state
+           SET taxonomy_verified_generation = NULL
+           WHERE id = 1`,
+    ),
+  );
   await db.batch(maintenanceStatements);
 
   return jsonResponse(
@@ -16785,6 +16815,7 @@ async function handleReconciliation(
         inspected: stale.results?.length ?? 0,
         refunded,
       },
+      catalog: { taxonomyVerified },
       payments: {
         eventsProcessed: paymentEventsProcessed,
         polled: paymentsPolled,
@@ -18411,7 +18442,10 @@ async function hasX402Schema(db: D1Database): Promise<boolean> {
   }
 }
 
-async function operationalReadiness(env: PlatformEnv) {
+async function operationalReadiness(
+  env: PlatformEnv,
+  options: { verifyTaxonomy?: boolean } = {},
+) {
   const base = platformReadiness(env);
   let x402RuntimeState = x402Runtime(env);
   let catalogReady = false;
@@ -18594,6 +18628,15 @@ async function operationalReadiness(env: PlatformEnv) {
              (SELECT managed_enabled
               FROM upstream_credential_state LIMIT 1)
                AS upstream_credential_state_schema,
+             (SELECT taxonomy_verified_generation
+              FROM catalog_sync_state WHERE id = 1)
+               AS taxonomy_verified_generation,
+             (SELECT last_success_generation
+              FROM catalog_sync_state WHERE id = 1)
+               AS last_success_generation,
+             (SELECT balance_usd_micros
+              FROM balance_snapshots LIMIT 1)
+               AS balance_snapshots_schema,
              EXISTS(
                SELECT 1
                FROM operation_heartbeats
@@ -18606,6 +18649,8 @@ async function operationalReadiness(env: PlatformEnv) {
           enabled_count: number;
           coverage_verified: number;
           reconciliation_recent: number;
+          taxonomy_verified_generation: string | null;
+          last_success_generation: string | null;
           catalog_credential_source: string | null;
           catalog_credential_id: string | null;
           catalog_credential_fingerprint: string | null;
@@ -18620,11 +18665,19 @@ async function operationalReadiness(env: PlatformEnv) {
           await resolveX402Configuration(env, env.DB)
         ).runtime;
       }
-      try {
-        await assertStoredCatalogTaxonomyIntegrity(env.DB);
-        taxonomyReady = true;
-      } catch {
-        taxonomyReady = false;
+      const taxonomyColumnVerified =
+        row != null &&
+        row.taxonomy_verified_generation != null &&
+        row.taxonomy_verified_generation === row.last_success_generation;
+      if (options.verifyTaxonomy) {
+        try {
+          await assertStoredCatalogTaxonomyIntegrity(env.DB);
+          taxonomyReady = taxonomyColumnVerified;
+        } catch {
+          taxonomyReady = false;
+        }
+      } else {
+        taxonomyReady = taxonomyColumnVerified;
       }
       reconciliationRecent =
         Number(row?.reconciliation_recent ?? 0) === 1;
