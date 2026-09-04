@@ -29,23 +29,34 @@ const TEST_UPSTREAM_SOURCE_CONFIG_HASH = createHash("sha256")
   .digest("hex");
 
 class D1Statement {
-  constructor(database, sql) {
+  constructor(database, sql, stats) {
     this.database = database;
     this.sql = sql;
     this.params = [];
+    this.stats = stats;
   }
 
   bind(...params) {
-    const statement = new D1Statement(this.database, this.sql);
+    const statement = new D1Statement(this.database, this.sql, this.stats);
     statement.params = params;
     return statement;
   }
 
+  record() {
+    this.stats.statements += 1;
+    if (!this.stats.inBatch) this.stats.roundTrips += 1;
+    if (this.stats.trace) {
+      this.stats.trace.push(this.sql.replace(/\s+/g, " ").trim().slice(0, 90));
+    }
+  }
+
   first() {
+    this.record();
     return this.database.prepare(this.sql).get(...this.params) ?? null;
   }
 
   all() {
+    this.record();
     return {
       success: true,
       results: this.database.prepare(this.sql).all(...this.params),
@@ -54,6 +65,7 @@ class D1Statement {
   }
 
   run() {
+    this.record();
     const result = this.database.prepare(this.sql).run(...this.params);
     return {
       success: true,
@@ -67,13 +79,30 @@ class TestD1 {
   constructor() {
     this.raw = new DatabaseSync(":memory:");
     this.raw.exec("PRAGMA foreign_keys = ON");
+    this.stats = {
+      roundTrips: 0,
+      statements: 0,
+      batches: 0,
+      inBatch: false,
+      trace: null,
+    };
   }
 
   prepare(sql) {
-    return new D1Statement(this.raw, sql);
+    return new D1Statement(this.raw, sql, this.stats);
+  }
+
+  resetStats({ trace = false } = {}) {
+    this.stats.roundTrips = 0;
+    this.stats.statements = 0;
+    this.stats.batches = 0;
+    this.stats.trace = trace ? [] : null;
   }
 
   batch(statements) {
+    this.stats.roundTrips += 1;
+    this.stats.batches += 1;
+    this.stats.inBatch = true;
     this.raw.exec("BEGIN IMMEDIATE");
     try {
       const results = statements.map((statement) => {
@@ -90,6 +119,8 @@ class TestD1 {
     } catch (error) {
       this.raw.exec("ROLLBACK");
       throw error;
+    } finally {
+      this.stats.inBatch = false;
     }
   }
 
@@ -150,6 +181,7 @@ function baseEnv(overrides = {}) {
     PUBLIC_APP_URL: "http://localhost",
     TRUST_SITES_IDENTITY_HEADERS: "true",
     UPSTREAM_ALLOWED_ORIGINS: TEST_UPSTREAM_ORIGIN,
+    READINESS_CACHE_TTL_MS: "0",
     ...overrides,
   };
 }
@@ -165,29 +197,12 @@ async function fetchWorker(path, init = {}, env = baseEnv()) {
   return response;
 }
 
-const migrationFiles = [
-  "drizzle/0000_wandering_richard_fisk.sql",
-  "drizzle/0001_overrated_ted_forrester.sql",
-  "drizzle/0002_overrated_iron_fist.sql",
-  "drizzle/0003_woozy_switch.sql",
-  "drizzle/0004_sad_azazel.sql",
-  "drizzle/0005_red_swarm.sql",
-  "drizzle/0006_needy_barracuda.sql",
-  "drizzle/0007_ambiguous_colonel_america.sql",
-  "drizzle/0008_good_apocalypse.sql",
-  "drizzle/0009_conscious_unicorn.sql",
-  "drizzle/0010_solid_wasp.sql",
-  "drizzle/0011_eminent_molten_man.sql",
-  "drizzle/0012_mute_wasp.sql",
-  "drizzle/0013_overrated_thunderball.sql",
-  "drizzle/0014_reflective_firestar.sql",
-  "drizzle/0015_tan_lila_cheney.sql",
-  "drizzle/0016_windy_lord_tyger.sql",
-  "drizzle/0017_omniscient_zarda.sql",
-  "drizzle/0018_previous_jackpot.sql",
-  "drizzle/0019_previous_patriot.sql",
-  "drizzle/0020_regular_steve_rogers.sql",
-];
+const migrationJournal = JSON.parse(
+  await readFile(new URL("drizzle/meta/_journal.json", root), "utf8"),
+);
+const migrationFiles = migrationJournal.entries.map(
+  (entry) => `drizzle/${entry.tag}.sql`,
+);
 
 async function migrate(db, names = migrationFiles) {
   for (const name of names) {
