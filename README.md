@@ -370,9 +370,35 @@ curl -X PATCH "$APP_URL/api/admin/catalog" \
 能力 id 而不是路径；`endpoint_path` 对目录级联，`status` 默认 `draft`，`revision`
 沿用既有的 `expectedRevision` 乐观并发。
 
-**当前没有任何路由读取这张表，运行时行为与迁移前完全一致。** 能力 id 的形状规则
-在 `worker/lib/capability-id.ts`，同一套规则以 GLOB 形式写进列的 CHECK 约束；
-SQLite 没有 REGEXP，所以 SQL 守卫比应用层校验更宽松，应用层始终是权威。
+能力 id 的形状规则在 `worker/lib/capability-id.ts`，同一套规则以 GLOB 形式写进列的
+CHECK 约束；SQLite 没有 REGEXP，所以 SQL 守卫比应用层校验更宽松，应用层始终是权威。
+
+### 调用能力
+
+- `GET /v1/c/{capabilityId}`：与 `/v1/{path}` 共用同一套鉴权、幂等、限流、扣款与
+  输入校验（`executeCatalogRequest`），能力层只做输入别名翻译与响应装配，不新增
+  任何计费语义。用量按**端点**记账，因此同一端点上的多个能力别名不会把消费拆散。
+  响应为 `{ success, capability, data, items, nextCursor }`；`items` 与 `nextCursor`
+  无法从上游响应提取时为 `null`，不会伪造成空数组——空数组会让调用方的分页循环
+  把"读不出来"当成"读完了"。
+- 未发布能力与不存在的能力同样返回 404 `capability_not_found`；已下架能力返回
+  410 `capability_deprecated`。两个能力字段映射到同一个上游参数时返回 400
+  `capability_input_conflict`，不会自行取舍。
+
+### 公开能力接口
+
+- `GET /api/capabilities?q&platform&category&limit&offset`：已发布能力的分页列表，
+  含价格与可用性。只有端点已在市场公开的能力才会列出。
+- `GET /api/capabilities/{id}`：详情与 curl / JavaScript / Python 示例。输入结构经
+  与市场同一套 allowlist 过滤，并把上游参数名换成调用方实际要发送的能力字段名。
+
+### 能力管理
+
+- `GET|POST /api/admin/capabilities`、`PATCH /api/admin/capabilities/{id}`：权限为
+  `catalog_write`，修改用 `expectedRevision` 乐观并发，冲突返回 409。
+- `POST /api/admin/capabilities/draft-from-endpoint`：由端点推导草稿 id；推导不出
+  合法 id 时返回 400 `capability_id_underivable`，不会自造名字。
+- 目录同步下架端点时，同一 batch 内把关联能力置为 `deprecated`。
 
 ## 客户调用
 

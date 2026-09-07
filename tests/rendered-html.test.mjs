@@ -11196,3 +11196,225 @@ test("filters and pages the public capability list", async (t) => {
   const bad = await fetchWorker("/api/capabilities?limit=0", {}, env);
   assert.equal(bad.status, 400);
 });
+
+test("administers capabilities under catalog_write with revision CAS", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const { env, path } = seedCapabilityFixture(db, t);
+  const admin = (init) => ({
+    ...init,
+    headers: {
+      authorization: `Bearer ${env.CATALOG_SYNC_SECRET}`,
+      "content-type": "application/json",
+      ...(init?.headers ?? {}),
+    },
+  });
+
+  const unauthorized = await fetchWorker(
+    "/api/admin/capabilities",
+    { method: "POST", body: "{}" },
+    env,
+  );
+  assert.equal(unauthorized.status, 401);
+
+  const created = await fetchWorker(
+    "/api/admin/capabilities",
+    admin({
+      method: "POST",
+      body: JSON.stringify({
+        id: "tiktok.user.posts",
+        platform: "tiktok",
+        category: "profile_creator",
+        endpointPath: path,
+        httpMethod: "GET",
+        summaryZh: "用户作品",
+        summaryEn: "User posts",
+        inputAliases: { handle: "uniqueId" },
+      }),
+    }),
+    env,
+  );
+  assert.equal(created.status, 201);
+  const createdBody = await created.json();
+  assert.equal(createdBody.capability.status, "draft");
+  assert.equal(createdBody.capability.revision, 1);
+
+  const duplicate = await fetchWorker(
+    "/api/admin/capabilities",
+    admin({
+      method: "POST",
+      body: JSON.stringify({
+        id: "tiktok.user.posts",
+        platform: "tiktok",
+        category: "profile_creator",
+        endpointPath: path,
+        httpMethod: "GET",
+        summaryZh: "重复",
+        summaryEn: "Duplicate",
+      }),
+    }),
+    env,
+  );
+  assert.equal(duplicate.status, 409);
+  assert.equal(
+    (await duplicate.json()).error.code,
+    "capability_already_exists",
+  );
+
+  const list = await fetchWorker(
+    "/api/admin/capabilities",
+    admin({}),
+    env,
+  );
+  assert.equal(list.status, 200);
+  const listed = (await list.json()).capabilities.map((entry) => entry.id);
+  assert.deepEqual(listed.sort(), ["tiktok.user.posts", "tiktok.user.profile"]);
+
+  const published = await fetchWorker(
+    "/api/admin/capabilities/tiktok.user.posts",
+    admin({
+      method: "PATCH",
+      body: JSON.stringify({ expectedRevision: 1, status: "published" }),
+    }),
+    env,
+  );
+  assert.equal(published.status, 200);
+  assert.equal((await published.json()).capability.revision, 2);
+
+  const stale = await fetchWorker(
+    "/api/admin/capabilities/tiktok.user.posts",
+    admin({
+      method: "PATCH",
+      body: JSON.stringify({ expectedRevision: 1, status: "deprecated" }),
+    }),
+    env,
+  );
+  assert.equal(stale.status, 409);
+  assert.equal((await stale.json()).error.code, "capability_conflict");
+  assert.equal(
+    db.raw
+      .prepare("SELECT status FROM capabilities WHERE id = ?")
+      .get("tiktok.user.posts").status,
+    "published",
+    "a rejected CAS must not have written",
+  );
+});
+
+test("derives capability drafts from endpoints and refuses unnamable ones", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const { env, path } = seedCapabilityFixture(db, t);
+  const admin = (body) => ({
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${env.CATALOG_SYNC_SECRET}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const derived = await fetchWorker(
+    "/api/admin/capabilities/draft-from-endpoint",
+    admin({ path, method: "GET" }),
+    env,
+  );
+  assert.equal(derived.status, 201);
+  const body = await derived.json();
+  assert.equal(body.capability.id, "tiktok.profile_creator.fetch_user_profile");
+  assert.equal(body.capability.status, "draft");
+
+  const missing = await fetchWorker(
+    "/api/admin/capabilities/draft-from-endpoint",
+    admin({ path: "/v1/tiktok/web/absent", method: "GET" }),
+    env,
+  );
+  assert.equal(missing.status, 404);
+
+  // A path whose last segment folds to nothing cannot produce a legal id.
+  db.raw
+    .prepare(
+      `INSERT INTO endpoint_catalog
+       (path, platform, http_method, data_type, tags_json, surface,
+        upstream_price_usd_micros, customer_price_usd_micros,
+        price_verified, enabled, read_only, sync_generation)
+       VALUES ('/v1/tiktok/web/---', 'tiktok', 'GET', 'other', '[]',
+               'web', 1000, 2000, 1, 1, 1, ?)`,
+    )
+    .run(TEST_CATALOG_GENERATION);
+  const unnamable = await fetchWorker(
+    "/api/admin/capabilities/draft-from-endpoint",
+    admin({ path: "/v1/tiktok/web/---", method: "GET" }),
+    env,
+  );
+  assert.equal(unnamable.status, 400);
+  assert.equal(
+    (await unnamable.json()).error.code,
+    "capability_id_underivable",
+  );
+});
+
+test("deprecates capabilities in the same batch that retires their endpoint", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const catalogSecret = "catalog-sync-secret-32-characters-minimum";
+  const { env, path } = seedCapabilityFixture(db, t);
+  assert.equal(
+    db.raw.prepare("SELECT status FROM capabilities WHERE id = ?")
+      .get("tiktok.user.profile").status,
+    "published",
+  );
+
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const target = new URL(
+      typeof input === "string" || input instanceof URL ? input : input.url,
+    );
+    if (target.pathname === "/openapi.json") {
+      return Response.json({
+        openapi: "3.1.0",
+        paths: {
+          "/api/v1/youtube/web/fetch_video": { get: { parameters: [] } },
+        },
+      });
+    }
+    return Response.json({
+      code: 200,
+      data: [
+        {
+          endpoint_uri: "/api/v1/youtube/web/fetch_video",
+          endpoint_cost: 0.001,
+          rate_limit: "5/second",
+          endpoint_type: "self-operated",
+          endpoint_owner: "Synthetic Provider",
+        },
+      ],
+    });
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+
+  const sync = await fetchWorker(
+    "/api/admin/catalog/sync",
+    { method: "POST", headers: { authorization: `Bearer ${catalogSecret}` } },
+    env,
+  );
+  assert.equal(sync.status, 200, JSON.stringify(await sync.clone().json()));
+
+  const retired = db.raw
+    .prepare("SELECT enabled FROM endpoint_catalog WHERE path = ?")
+    .get(path);
+  assert.equal(retired.enabled, 0, "the endpoint left the upstream catalog");
+  const capability = db.raw
+    .prepare("SELECT status, revision FROM capabilities WHERE id = ?")
+    .get("tiktok.user.profile");
+  assert.equal(
+    capability.status,
+    "deprecated",
+    "a retired endpoint must not keep serving a published capability",
+  );
+  assert.equal(capability.revision, 2);
+});

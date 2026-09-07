@@ -40,12 +40,17 @@ import {
 } from "./lib/balance-sql";
 import { trustedIdentityHeadersActive } from "./lib/identity-headers";
 import { TtlCache, parseTtlMs } from "./lib/ttl-cache";
-import { isCapabilityId } from "./lib/capability-id";
+import {
+  CAPABILITY_ID_MAX_LENGTH,
+  deriveCapabilityId,
+  isCapabilityId,
+} from "./lib/capability-id";
 import {
   extractItems,
   extractNextCursor,
   parseCapabilityAliases,
   parseCapabilityPagination,
+  parseJsonPath,
   translateCapabilityInput,
   translateCapabilityQuery,
 } from "./lib/capability-io";
@@ -1028,6 +1033,40 @@ export async function handlePlatformRequest(
 
     if (url.pathname === "/api/catalog" && request.method === "GET") {
       return await handlePublicCatalog(request, env, requestId);
+    }
+
+    if (url.pathname === "/api/admin/capabilities") {
+      if (request.method === "GET") {
+        return await handleAdminCapabilityList(request, env, requestId);
+      }
+      if (request.method === "POST") {
+        return await handleAdminCapabilityCreate(request, env, requestId);
+      }
+    }
+
+    if (
+      url.pathname === "/api/admin/capabilities/draft-from-endpoint" &&
+      request.method === "POST"
+    ) {
+      return await handleAdminCapabilityDraftFromEndpoint(
+        request,
+        env,
+        requestId,
+      );
+    }
+
+    if (
+      url.pathname.startsWith("/api/admin/capabilities/") &&
+      request.method === "PATCH"
+    ) {
+      return await handleAdminCapabilityUpdate(
+        request,
+        env,
+        requestId,
+        decodeURIComponent(
+          url.pathname.slice("/api/admin/capabilities/".length),
+        ),
+      );
     }
 
     if (url.pathname === "/api/capabilities" && request.method === "GET") {
@@ -10256,6 +10295,450 @@ async function handleCapabilityDetail(
   );
 }
 
+type AdminCapabilityRow = PublicCapabilityRow & {
+  status: "draft" | "published" | "deprecated";
+  created_at: string;
+  updated_at: string;
+};
+
+function adminCapabilityShape(row: AdminCapabilityRow) {
+  return {
+    id: row.id,
+    platform: row.platform,
+    category: row.category,
+    endpointPath: row.endpoint_path,
+    httpMethod: row.http_method,
+    status: row.status,
+    inputAliases: parseCapabilityAliases(
+      safeStoredJson(row.input_aliases_json),
+    ),
+    pagination: safeStoredJson(row.pagination_json),
+    responseItemsPath: row.response_items_path,
+    summaryZh: row.summary_zh,
+    summaryEn: row.summary_en,
+    revision: row.revision,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+const ADMIN_CAPABILITY_COLUMNS = `id, platform, category, endpoint_path,
+        http_method, status, input_aliases_json, pagination_json,
+        response_items_path, summary_zh, summary_en, revision,
+        created_at, updated_at`;
+
+async function adminCapabilityRecord(
+  db: D1Database,
+  id: string,
+): Promise<AdminCapabilityRow | null> {
+  return await db
+    .prepare(
+      `SELECT ${ADMIN_CAPABILITY_COLUMNS} FROM capabilities WHERE id = ?`,
+    )
+    .bind(id)
+    .first<AdminCapabilityRow>();
+}
+
+function capabilityText(
+  value: unknown,
+  field: string,
+  maxLength: number,
+): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new PlatformError(
+      400,
+      "invalid_capability",
+      `能力字段 ${field} 必须是非空字符串。`,
+    );
+  }
+  const text = value.trim();
+  if (text.length > maxLength) {
+    throw new PlatformError(
+      400,
+      "invalid_capability",
+      `能力字段 ${field} 超过 ${maxLength} 字符。`,
+    );
+  }
+  return text;
+}
+
+function capabilityStatusValue(value: unknown): "draft" | "published" | "deprecated" {
+  if (value === "draft" || value === "published" || value === "deprecated") {
+    return value;
+  }
+  throw new PlatformError(
+    400,
+    "invalid_capability",
+    "能力状态只能是 draft、published 或 deprecated。",
+  );
+}
+
+// 别名 JSON 在写入前就校验：存进去再在调用路径上失败，等于把一次配置错误推迟
+// 到某个 Agent 的线上请求里。
+function capabilityAliasesJson(value: unknown): string {
+  if (value === undefined || value === null) return "{}";
+  if (!isPlainRecord(value)) {
+    throw new PlatformError(
+      400,
+      "invalid_capability",
+      "inputAliases 必须是字段名到上游参数名的对象。",
+    );
+  }
+  const aliases: Record<string, string> = {};
+  const claimed = new Map<string, string>();
+  for (const [field, target] of Object.entries(value)) {
+    const name = capabilityText(field, "inputAliases", 120);
+    const upstream = capabilityText(target, `inputAliases.${name}`, 120);
+    const owner = claimed.get(upstream);
+    if (owner !== undefined) {
+      throw capabilityInputConflict(upstream);
+    }
+    claimed.set(upstream, name);
+    aliases[name] = upstream;
+  }
+  return JSON.stringify(aliases);
+}
+
+function capabilityPaginationJson(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (parseCapabilityPagination(value) === null) {
+    throw new PlatformError(
+      400,
+      "invalid_capability",
+      "pagination 必须至少包含一个可用字段，且 responseCursorPath 必须是合法 JSON 路径。",
+    );
+  }
+  return JSON.stringify(value);
+}
+
+function capabilityItemsPath(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  const path = capabilityText(value, "responseItemsPath", 200);
+  if (parseJsonPath(path) === null) {
+    throw new PlatformError(
+      400,
+      "invalid_capability",
+      "responseItemsPath 不是合法的 JSON 路径。",
+    );
+  }
+  return path;
+}
+
+async function assertCapabilityEndpoint(
+  db: D1Database,
+  endpointPath: string,
+  method: "GET" | "POST",
+): Promise<void> {
+  const endpoint = await db
+    .prepare(
+      `SELECT http_method FROM endpoint_catalog WHERE path = ?`,
+    )
+    .bind(endpointPath)
+    .first<{ http_method: string }>();
+  if (!endpoint) {
+    throw new PlatformError(
+      404,
+      "endpoint_not_found",
+      "目录中没有这个端点，无法为它创建能力。",
+    );
+  }
+  if (endpoint.http_method !== method) {
+    throw new PlatformError(
+      400,
+      "invalid_capability",
+      `该端点的方法是 ${endpoint.http_method}，能力必须与之一致。`,
+    );
+  }
+}
+
+async function handleAdminCapabilityList(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  requireAdminSecret(request, env, "catalog");
+  const db = requireDb(env);
+  const rows = await db
+    .prepare(
+      `SELECT ${ADMIN_CAPABILITY_COLUMNS} FROM capabilities ORDER BY id`,
+    )
+    .all<AdminCapabilityRow>();
+  const capabilities = resultRows<AdminCapabilityRow>(rows).map(
+    adminCapabilityShape,
+  );
+  return jsonResponse(
+    { capabilities, count: capabilities.length },
+    200,
+    requestId,
+    { "cache-control": "no-store" },
+  );
+}
+
+async function insertCapabilityDraft(
+  db: D1Database,
+  requestId: string,
+  draft: {
+    id: string;
+    platform: string;
+    category: string;
+    endpointPath: string;
+    httpMethod: "GET" | "POST";
+    status: "draft" | "published" | "deprecated";
+    aliasesJson: string;
+    paginationJson: string | null;
+    responseItemsPath: string | null;
+    summaryZh: string;
+    summaryEn: string;
+  },
+): Promise<Response> {
+  const inserted = await db
+    .prepare(
+      `INSERT OR IGNORE INTO capabilities
+       (id, platform, category, endpoint_path, http_method, status,
+        input_aliases_json, pagination_json, response_items_path,
+        summary_zh, summary_en, revision)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+    )
+    .bind(
+      draft.id,
+      draft.platform,
+      draft.category,
+      draft.endpointPath,
+      draft.httpMethod,
+      draft.status,
+      draft.aliasesJson,
+      draft.paginationJson,
+      draft.responseItemsPath,
+      draft.summaryZh,
+      draft.summaryEn,
+    )
+    .run();
+  if ((inserted.meta?.changes ?? 0) === 0) {
+    throw new PlatformError(
+      409,
+      "capability_already_exists",
+      "该能力 id 已存在。",
+    );
+  }
+  const row = await adminCapabilityRecord(db, draft.id);
+  if (!row) {
+    throw new PlatformError(
+      500,
+      "capability_write_failed",
+      "能力写入后无法读回。",
+    );
+  }
+  return jsonResponse({ capability: adminCapabilityShape(row) }, 201, requestId);
+}
+
+async function handleAdminCapabilityCreate(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  // 与 /api/admin/catalog 一致：不强制 Origin。带密钥的机器调用没有 Origin 头，
+  // 而浏览器会话走 authorizeNamedAdminRequest，那条路径已经做了同源校验。
+  requireAdminSecret(request, env, "catalog");
+  const db = requireDb(env);
+  const body = await readJsonBody<Record<string, unknown>>(
+    request,
+    MAX_DASHBOARD_BODY_BYTES,
+  );
+  const id = capabilityText(body.id, "id", CAPABILITY_ID_MAX_LENGTH);
+  if (!isCapabilityId(id)) {
+    throw new PlatformError(
+      400,
+      "invalid_capability",
+      "能力 id 必须是 2–4 段小写点分标识，例如 douyin.user.profile。",
+    );
+  }
+  const httpMethod = body.httpMethod === "POST" ? "POST" : "GET";
+  const endpointPath = normalizeCatalogPath(
+    capabilityText(body.endpointPath, "endpointPath", 512),
+  );
+  await assertCapabilityEndpoint(db, endpointPath, httpMethod);
+  return await insertCapabilityDraft(db, requestId, {
+    id,
+    platform: capabilityText(body.platform, "platform", 120),
+    category: capabilityText(body.category, "category", 120),
+    endpointPath,
+    httpMethod,
+    status: body.status === undefined ? "draft" : capabilityStatusValue(body.status),
+    aliasesJson: capabilityAliasesJson(body.inputAliases),
+    paginationJson: capabilityPaginationJson(body.pagination),
+    responseItemsPath: capabilityItemsPath(body.responseItemsPath),
+    summaryZh: capabilityText(body.summaryZh, "summaryZh", 400),
+    summaryEn: capabilityText(body.summaryEn, "summaryEn", 400),
+  });
+}
+
+async function handleAdminCapabilityDraftFromEndpoint(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  // 与 /api/admin/catalog 一致：不强制 Origin。带密钥的机器调用没有 Origin 头，
+  // 而浏览器会话走 authorizeNamedAdminRequest，那条路径已经做了同源校验。
+  requireAdminSecret(request, env, "catalog");
+  const db = requireDb(env);
+  const body = await readJsonBody<Record<string, unknown>>(
+    request,
+    MAX_DASHBOARD_BODY_BYTES,
+  );
+  const endpointPath = normalizeCatalogPath(
+    capabilityText(body.path, "path", 512),
+  );
+  const method = body.method === "POST" ? "POST" : "GET";
+  const endpoint = await db
+    .prepare(
+      `SELECT path, platform, http_method, data_type, summary
+         FROM endpoint_catalog WHERE path = ?`,
+    )
+    .bind(endpointPath)
+    .first<{
+      path: string;
+      platform: string;
+      http_method: string;
+      data_type: string | null;
+      summary: string | null;
+    }>();
+  if (!endpoint) {
+    throw new PlatformError(
+      404,
+      "endpoint_not_found",
+      "目录中没有这个端点，无法为它创建能力。",
+    );
+  }
+  if (endpoint.http_method !== method) {
+    throw new PlatformError(
+      400,
+      "invalid_capability",
+      `该端点的方法是 ${endpoint.http_method}，能力必须与之一致。`,
+    );
+  }
+  const category = endpoint.data_type ?? "other";
+  const id = deriveCapabilityId({
+    platform: endpoint.platform,
+    dataType: category,
+    path: endpoint.path,
+  });
+  // 推导失败时不自造 id：一个运营看不懂来源的能力名比没有能力更糟。
+  if (id === null) {
+    throw new PlatformError(
+      400,
+      "capability_id_underivable",
+      `无法从 平台=${endpoint.platform}、类别=${category}、路径=${endpoint.path} 推导出合法能力 id，请手动创建。`,
+    );
+  }
+  const summary = endpoint.summary ?? endpoint.path;
+  return await insertCapabilityDraft(db, requestId, {
+    id,
+    platform: endpoint.platform,
+    category,
+    endpointPath: endpoint.path,
+    httpMethod: method,
+    status: "draft",
+    aliasesJson: "{}",
+    paginationJson: null,
+    responseItemsPath: null,
+    summaryZh: summary,
+    summaryEn: summary,
+  });
+}
+
+async function handleAdminCapabilityUpdate(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+  capabilityId: string,
+): Promise<Response> {
+  // 与 /api/admin/catalog 一致：不强制 Origin。带密钥的机器调用没有 Origin 头，
+  // 而浏览器会话走 authorizeNamedAdminRequest，那条路径已经做了同源校验。
+  requireAdminSecret(request, env, "catalog");
+  const db = requireDb(env);
+  const body = await readJsonBody<Record<string, unknown>>(
+    request,
+    MAX_DASHBOARD_BODY_BYTES,
+  );
+  if (
+    typeof body.expectedRevision !== "number" ||
+    !Number.isSafeInteger(body.expectedRevision) ||
+    body.expectedRevision < 1
+  ) {
+    throw new PlatformError(
+      400,
+      "invalid_capability",
+      "expectedRevision 必须是不小于 1 的整数。",
+    );
+  }
+  const existing = await adminCapabilityRecord(db, capabilityId);
+  if (!existing) throw capabilityNotFound();
+
+  const next = {
+    category:
+      body.category === undefined
+        ? existing.category
+        : capabilityText(body.category, "category", 120),
+    status:
+      body.status === undefined
+        ? existing.status
+        : capabilityStatusValue(body.status),
+    aliasesJson:
+      body.inputAliases === undefined
+        ? existing.input_aliases_json
+        : capabilityAliasesJson(body.inputAliases),
+    paginationJson:
+      body.pagination === undefined
+        ? existing.pagination_json
+        : capabilityPaginationJson(body.pagination),
+    responseItemsPath:
+      body.responseItemsPath === undefined
+        ? existing.response_items_path
+        : capabilityItemsPath(body.responseItemsPath),
+    summaryZh:
+      body.summaryZh === undefined
+        ? existing.summary_zh
+        : capabilityText(body.summaryZh, "summaryZh", 400),
+    summaryEn:
+      body.summaryEn === undefined
+        ? existing.summary_en
+        : capabilityText(body.summaryEn, "summaryEn", 400),
+  };
+
+  // CAS 写在 WHERE 里，而不是先读后写：并发的两次修改否则会互相覆盖。
+  const updated = await db
+    .prepare(
+      `UPDATE capabilities
+          SET category = ?, status = ?, input_aliases_json = ?,
+              pagination_json = ?, response_items_path = ?,
+              summary_zh = ?, summary_en = ?,
+              revision = revision + 1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND revision = ?`,
+    )
+    .bind(
+      next.category,
+      next.status,
+      next.aliasesJson,
+      next.paginationJson,
+      next.responseItemsPath,
+      next.summaryZh,
+      next.summaryEn,
+      capabilityId,
+      body.expectedRevision,
+    )
+    .run();
+  if ((updated.meta?.changes ?? 0) === 0) {
+    throw new PlatformError(
+      409,
+      "capability_conflict",
+      "能力已被其他修改更新，请刷新后重试。",
+    );
+  }
+  const row = await adminCapabilityRecord(db, capabilityId);
+  if (!row) throw capabilityNotFound();
+  return jsonResponse({ capability: adminCapabilityShape(row) }, 200, requestId);
+}
+
 async function handleMarketplaceDetail(
   request: Request,
   env: PlatformEnv,
@@ -16397,6 +16880,48 @@ async function handleCatalogSync(
           credentialId,
         ),
       syncAudit,
+      // 与端点下架同批：端点被下架而能力仍是 published，会让调用方拿到一个
+      // 必定 404 的能力名。部分提交就是一次目录不一致事故。
+      // 位置有两个约束：必须排在上面的下架 UPDATE 之后，且必须排在下面清理
+      // catalog_sync_staging 之前——本语句要读那张表。同时也必须留在
+      // syncAudit 之后，因为下面的原子性校验按固定下标检查 finalization[4]
+      // 与 [5]，在前面插入语句会让它检查错误的结果。
+      db
+        .prepare(
+          `UPDATE capabilities
+           SET status = 'deprecated', revision = revision + 1,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE status <> 'deprecated'
+             AND NOT EXISTS (
+               SELECT 1
+               FROM catalog_sync_staging s
+               WHERE s.generation = ? AND s.path = capabilities.endpoint_path
+             )
+             AND EXISTS (
+               SELECT 1 FROM catalog_sync_locks l
+               WHERE l.id = 1 AND l.generation = ?
+             )
+             AND EXISTS (
+               SELECT 1 FROM upstream_source_config c
+               WHERE c.id = 1 AND c.enabled = 1
+                 AND c.version = ? AND c.config_hash = ?
+             )
+             AND EXISTS (
+               SELECT 1 FROM upstream_credential_state u
+               WHERE u.provider = 'primary' AND u.version = ?
+                 AND u.managed_enabled = ?
+                 AND u.active_credential_id IS ?
+             )`,
+        )
+        .bind(
+          syncGeneration,
+          syncGeneration,
+          sourceConfig.version,
+          sourceConfig.hash,
+          credentialState.version,
+          managedCredentialFlag,
+          credentialId,
+        ),
       db
         .prepare(
           `DELETE FROM catalog_sync_staging
@@ -22342,7 +22867,10 @@ function namedAdminPermission(
 ): "read" | "catalog_write" | "owner_write" {
   if (request.method === "GET" || request.method === "HEAD") return "read";
   const path = new URL(request.url).pathname;
-  if (path.startsWith("/api/admin/catalog")) {
+  if (
+    path.startsWith("/api/admin/catalog") ||
+    path.startsWith("/api/admin/capabilities")
+  ) {
     return "catalog_write";
   }
   return "owner_write";

@@ -40,8 +40,21 @@
   方法；把方法存到行上保留了这一校验，同时让 `endpointCapabilityFor` 保持为对预载
   映射求值的纯函数。
 - `executeCatalogRequest` 从 `handleProxyRequest` 中抽出，承载目录解析、输入校验、
-  鉴权、幂等、限流、扣费与响应装配。能力入口将复用同一实现，两条路径的计费与幂等
+  鉴权、幂等、限流、扣费与响应装配。能力入口复用同一实现，两条路径的计费与幂等
   语义因此不会分叉。搬移的函数体逐字节相同。
+- 能力调用入口 `GET /v1/c/{capabilityId}`。用量按端点记账；草稿与不存在同为 404，
+  已下架为 410；输入别名冲突返回 400 `capability_input_conflict`。`items` 与
+  `nextCursor` 提取失败时为 `null` 而非空数组。
+- 公开能力接口 `GET /api/capabilities` 与 `GET /api/capabilities/{id}`。详情把上游
+  参数名换成能力字段名后再输出，示例直接指向 `/v1/c/{id}`；输入结构仍经市场同一套
+  allowlist 过滤。
+- 管理端能力 CRUD：`GET|POST /api/admin/capabilities`、
+  `PATCH /api/admin/capabilities/{id}`（`expectedRevision` CAS，冲突 409）与
+  `POST /api/admin/capabilities/draft-from-endpoint`（推导不出合法 id 时 400）。
+  目录同步下架端点时，同一 batch 内把关联能力置为 `deprecated`。
+- `worker/lib/capability-io.ts` 新增 `translateCapabilityQuery` 与
+  `parseCapabilityAliases`。查询串翻译单独实现：记录表达不了 `?id=1&id=2`，
+  合并重复值会改变调用方的请求。单元测试由 34 项增至 41 项，集成测试增至 85 项。
 - 迁移 `0022` 新增 `capabilities` 表，作为能力层（Phase 1）的数据地基：能力 id 为
   主键，`endpoint_path` 对 `endpoint_catalog` 级联，`status` 默认 `draft`，
   `revision` 沿用既有的 `expectedRevision` 乐观并发。**当前没有任何路由读取该表，
