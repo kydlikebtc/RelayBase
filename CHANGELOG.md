@@ -16,12 +16,32 @@
   此前被 `admin.css`、`console.css` 与 `docs-pricing.css` 引用但从未定义，相关声明一直被
   浏览器静默丢弃，现已生效。
 
+### Fixed
+
+- 全新数据库不再丢失已验证的能力证据。迁移 `0019` 用
+  `INSERT ... SELECT FROM endpoint_catalog` 播种 `endpoint_capabilities`，再逐条
+  `UPDATE` 写入证据；全新库执行迁移时目录仍为空，播种 0 行、8 条 UPDATE 全部
+  影响 0 行，8 个原生批量与分页端点在新部署上没有任何证据。运行时此前读的是两个
+  硬编码常量，因此这个缺陷一直被掩盖。
+
 ### Added
 
 - 首页 hero 新增 `app/components/HeroFlow.tsx`：以 three.js 绘制供给流水（分散供给 → 审核
   闸门 → 有序目录点阵，未通过审核的供给在闸门处被打回）。three.js 以动态 import 分离为独立
   chunk（gzip 171KB），其余页面不加载；`prefers-reduced-motion` 与视口宽度不足 1100px 时
   完全跳过，连 chunk 都不会请求。
+- 迁移 `0023` 新增 `capability_evidence_seed`，并把
+  `endpoint_capabilities_after_catalog_insert` 触发器改写为 `LEFT JOIN` 种子表：
+  证据在目录行插入时注入，覆盖目录同步、人工 SQL 与测试夹具全部插入路径；种子
+  缺失时 `COALESCE` 落回原来的 `direct`/`pending` 默认值。已有部署由同一迁移回填，
+  并保护运营人工确认过的行。
+- `endpoint_capabilities` 新增 `evidence_http_method`。被删除的
+  `VERIFIED_ENDPOINT_METHODS` 常量让运行时在每次查询时确认目录仍在提供证据对应的
+  方法；把方法存到行上保留了这一校验，同时让 `endpointCapabilityFor` 保持为对预载
+  映射求值的纯函数。
+- `executeCatalogRequest` 从 `handleProxyRequest` 中抽出，承载目录解析、输入校验、
+  鉴权、幂等、限流、扣费与响应装配。能力入口将复用同一实现，两条路径的计费与幂等
+  语义因此不会分叉。搬移的函数体逐字节相同。
 - 迁移 `0022` 新增 `capabilities` 表，作为能力层（Phase 1）的数据地基：能力 id 为
   主键，`endpoint_path` 对 `endpoint_catalog` 级联，`status` 默认 `draft`，
   `revision` 沿用既有的 `expectedRevision` 乐观并发。**当前没有任何路由读取该表，
