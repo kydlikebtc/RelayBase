@@ -4,6 +4,7 @@ import {
   check,
   index,
   integer,
+  primaryKey,
   sqliteTable,
   text,
   uniqueIndex,
@@ -598,6 +599,13 @@ export const endpointCapabilities = sqliteTable(
     evidenceStatus: text("evidence_status").notNull().default("pending"),
     evidenceUrl: text("evidence_url"),
     evidenceNote: text("evidence_note"),
+    /**
+     * The HTTP method the evidence was gathered for. The runtime compares it
+     * against the catalog's current method before honouring the evidence, so a
+     * catalog contract change silently downgrades the endpoint to `direct`
+     * instead of executing under a stale batching assumption.
+     */
+    evidenceHttpMethod: text("evidence_http_method"),
     capabilityRevision: integer("capability_revision").notNull().default(1),
     verifiedAt: text("verified_at"),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -643,6 +651,59 @@ export const endpointCapabilities = sqliteTable(
  * `/v1/c/{id}` resolves here. One endpoint may carry several capabilities as
  * aliases or versions, so the id — not the path — is the primary key.
  */
+/**
+ * Durable evidence for endpoints whose execution semantics were confirmed from
+ * upstream documentation.
+ *
+ * Deliberately has no foreign key to `endpoint_catalog`: the evidence has to
+ * exist *before* a catalog row is inserted, because the
+ * `endpoint_capabilities_after_catalog_insert` trigger reads this table to
+ * populate `endpoint_capabilities`. Attaching the injection to the trigger
+ * rather than to catalog-sync code covers every insertion path, including raw
+ * SQL fixtures and manual operator inserts.
+ */
+export const capabilityEvidenceSeed = sqliteTable(
+  "capability_evidence_seed",
+  {
+    path: text("path").notNull(),
+    /** Evidence only applies when the catalog serves this method. */
+    httpMethod: text("http_method").notNull(),
+    executionMode: text("execution_mode").notNull(),
+    nativeBatchSupported: integer("native_batch_supported", {
+      mode: "boolean",
+    }).notNull(),
+    nativeBatchMax: integer("native_batch_max"),
+    targetField: text("target_field"),
+    targetEncoding: text("target_encoding"),
+    paginationStyle: text("pagination_style"),
+    paginationRequestField: text("pagination_request_field"),
+    paginationResponseField: text("pagination_response_field"),
+    paginationPageSizeField: text("pagination_page_size_field"),
+    paginationPageSizeMax: integer("pagination_page_size_max"),
+    typicalItemsPerResponse: integer("typical_items_per_response"),
+    responseItemsPath: text("response_items_path"),
+    evidenceStatus: text("evidence_status").notNull(),
+    evidenceUrl: text("evidence_url"),
+    evidenceNote: text("evidence_note").notNull(),
+    verifiedAt: text("verified_at"),
+  },
+  (table) => [
+    primaryKey({ columns: [table.path, table.httpMethod] }),
+    check(
+      "capability_evidence_seed_http_method_values",
+      sql`${table.httpMethod} IN ('GET', 'POST')`,
+    ),
+    check(
+      "capability_evidence_seed_execution_mode_values",
+      sql`${table.executionMode} IN ('direct', 'native_batch', 'paginated', 'async_job', 'fanout')`,
+    ),
+    check(
+      "capability_evidence_seed_evidence_status_values",
+      sql`${table.evidenceStatus} IN ('verified', 'openapi_inferred', 'pending')`,
+    ),
+  ],
+);
+
 export const capabilities = sqliteTable(
   "capabilities",
   {

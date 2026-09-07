@@ -426,179 +426,137 @@ type MarketplaceOverlayRow = {
   documentationStatus: MarketplaceDocumentationStatus;
 };
 
-const VERIFIED_ENDPOINT_CAPABILITIES: Readonly<
-  Record<string, EndpointCapability>
-> = {
-  "/v1/tiktok/app/v3/fetch_multi_video": {
-    executionMode: "native_batch",
-    nativeBatchSupported: true,
-    nativeBatchMax: 10,
-    targetField: "aweme_ids",
-    targetEncoding: "json_array",
-    pagination: null,
-    typicalItemsPerResponse: null,
-    responseItemsPath: null,
-    evidence: {
-      status: "verified",
-      url: "https://docs.tikhub.io/190419367e0",
-      note:
-        "TikHub endpoint documentation states that one POST accepts up to 10 aweme IDs and is billed per upstream request.",
-      verifiedAt: "2026-07-26",
-    },
-    revision: 1,
-  },
-  "/v1/tiktok/app/v3/fetch_multi_video_v2": {
-    executionMode: "native_batch",
-    nativeBatchSupported: true,
-    nativeBatchMax: 25,
-    targetField: "aweme_ids",
-    targetEncoding: "json_array",
-    pagination: null,
-    typicalItemsPerResponse: null,
-    responseItemsPath: null,
-    evidence: {
-      status: "verified",
-      url: "https://docs.tikhub.io/258124428e0",
-      note:
-        "The endpoint-specific TikHub document states a maximum of 25 aweme IDs per POST. It is stronger evidence than a conflicting landing-page summary.",
-      verifiedAt: "2026-07-26",
-    },
-    revision: 1,
-  },
-  "/v1/douyin/app/v3/fetch_multi_video_v2": {
-    executionMode: "native_batch",
-    nativeBatchSupported: true,
-    nativeBatchMax: 50,
-    targetField: "aweme_ids",
-    targetEncoding: "json_array",
-    pagination: null,
-    typicalItemsPerResponse: null,
-    responseItemsPath: null,
-    evidence: {
-      status: "verified",
-      url: "https://docs.tikhub.io/339033805e0",
-      note:
-        "TikHub endpoint documentation states that one POST accepts up to 50 aweme IDs and is billed per upstream request.",
-      verifiedAt: "2026-07-26",
-    },
-    revision: 1,
-  },
-  "/v1/douyin/web/fetch_multi_video": {
-    executionMode: "native_batch",
-    nativeBatchSupported: true,
-    nativeBatchMax: 50,
-    targetField: "aweme_ids",
-    targetEncoding: "json_array",
-    pagination: null,
-    typicalItemsPerResponse: null,
-    responseItemsPath: null,
-    evidence: {
-      status: "verified",
-      url: "https://docs.tikhub.io/244469112e0",
-      note:
-        "TikHub endpoint documentation states that one POST accepts up to 50 aweme IDs.",
-      verifiedAt: "2026-07-26",
-    },
-    revision: 1,
-  },
-  "/v1/douyin/app/v3/fetch_multi_video_statistics": {
-    executionMode: "native_batch",
-    nativeBatchSupported: true,
-    nativeBatchMax: 50,
-    targetField: "aweme_ids",
-    targetEncoding: "csv_query",
-    pagination: null,
-    typicalItemsPerResponse: null,
-    responseItemsPath: null,
-    evidence: {
-      status: "verified",
-      url: "https://docs.tikhub.io/256258480e0",
-      note:
-        "TikHub documents a comma-separated aweme_ids query parameter with a maximum of 50 IDs per GET.",
-      verifiedAt: "2026-07-26",
-    },
-    revision: 1,
-  },
-  "/v1/douyin/web/fetch_multi_video_high_quality_play_url": {
-    executionMode: "native_batch",
-    nativeBatchSupported: true,
-    nativeBatchMax: 50,
-    targetField: "aweme_ids",
-    targetEncoding: "csv_body",
-    pagination: null,
-    typicalItemsPerResponse: null,
-    responseItemsPath: null,
-    evidence: {
-      status: "verified",
-      url: "https://docs.tikhub.io/360401424e0",
-      note:
-        "TikHub documents up to 50 comma-separated aweme IDs per POST and notes special minimum-50 charging and longer processing.",
-      verifiedAt: "2026-07-26",
-    },
-    revision: 1,
-  },
-  "/v1/instagram/v3/get_user_posts": {
-    executionMode: "paginated",
-    nativeBatchSupported: false,
-    nativeBatchMax: null,
-    targetField: null,
-    targetEncoding: null,
-    pagination: {
-      style: "cursor",
-      requestField: "pagination_token",
-      responseField: null,
-      pageSizeField: "count",
-      pageSizeMax: 50,
-      autoFollow: false,
-    },
-    typicalItemsPerResponse: null,
-    responseItemsPath: null,
-    evidence: {
-      status: "verified",
-      url: "https://docs.tikhub.io/419083061e0",
-      note:
-        "TikHub documents at most 50 posts per page. RelayBase never follows the next-page token implicitly.",
-      verifiedAt: "2026-07-26",
-    },
-    revision: 1,
-  },
-  "/v1/instagram/v3/get_user_following": {
-    executionMode: "paginated",
-    nativeBatchSupported: false,
-    nativeBatchMax: null,
-    targetField: null,
-    targetEncoding: null,
-    pagination: {
-      style: "cursor",
-      requestField: "pagination_token",
-      responseField: null,
-      pageSizeField: "count",
-      pageSizeMax: 100,
-      autoFollow: false,
-    },
-    typicalItemsPerResponse: null,
-    responseItemsPath: null,
-    evidence: {
-      status: "verified",
-      url: "https://docs.tikhub.io/419083077e0",
-      note:
-        "TikHub documents at most 100 following records per page. RelayBase treats each cursor page as one upstream request.",
-      verifiedAt: "2026-07-26",
-    },
-    revision: 1,
-  },
+type EndpointEvidenceRecord = {
+  capability: EndpointCapability;
+  httpMethod: "GET" | "POST" | null;
 };
 
-const VERIFIED_ENDPOINT_METHODS: Readonly<Record<string, "GET" | "POST">> = {
-  "/v1/tiktok/app/v3/fetch_multi_video": "POST",
-  "/v1/tiktok/app/v3/fetch_multi_video_v2": "POST",
-  "/v1/douyin/app/v3/fetch_multi_video_v2": "POST",
-  "/v1/douyin/web/fetch_multi_video": "POST",
-  "/v1/douyin/app/v3/fetch_multi_video_statistics": "GET",
-  "/v1/douyin/web/fetch_multi_video_high_quality_play_url": "POST",
-  "/v1/instagram/v3/get_user_posts": "GET",
-  "/v1/instagram/v3/get_user_following": "GET",
+// 已验证能力证据，按目录路径索引。
+// 证据行存放在 endpoint_capabilities；迁移 0023 通过 endpoint_catalog 的插入
+// 触发器从 capability_evidence_seed 注入，因此目录同步、人工 SQL 与测试夹具
+// 三条插入路径都会被覆盖。httpMethod 记录证据针对的方法，运行时每次查询都会
+// 与目录当前的方法比对。
+type EndpointEvidenceMap = ReadonlyMap<string, EndpointEvidenceRecord>;
+
+const EMPTY_ENDPOINT_EVIDENCE: EndpointEvidenceMap = new Map();
+const ENDPOINT_EVIDENCE_CACHE_TTL_MS = 5_000;
+const endpointEvidenceCache = new TtlCache<EndpointEvidenceMap>();
+
+type EndpointCapabilityRow = {
+  path: string;
+  execution_mode: string;
+  native_batch_supported: number;
+  native_batch_max: number | null;
+  target_field: string | null;
+  target_encoding: string | null;
+  pagination_style: string | null;
+  pagination_request_field: string | null;
+  pagination_response_field: string | null;
+  pagination_page_size_field: string | null;
+  pagination_page_size_max: number | null;
+  typical_items_per_response: number | null;
+  response_items_path: string | null;
+  evidence_status: string;
+  evidence_url: string | null;
+  evidence_note: string | null;
+  evidence_http_method: string | null;
+  capability_revision: number;
+  verified_at: string | null;
 };
+
+function endpointEvidenceRecord(
+  row: EndpointCapabilityRow,
+): EndpointEvidenceRecord {
+  const style = row.pagination_style;
+  const paginated =
+    style === "cursor" ||
+    style === "page" ||
+    style === "offset" ||
+    style === "mixed";
+  return {
+    httpMethod:
+      row.evidence_http_method === "GET" || row.evidence_http_method === "POST"
+        ? row.evidence_http_method
+        : null,
+    capability: {
+      executionMode: row.execution_mode as EndpointExecutionMode,
+      nativeBatchSupported: Number(row.native_batch_supported) === 1,
+      nativeBatchMax:
+        row.native_batch_max == null ? null : Number(row.native_batch_max),
+      targetField: row.target_field,
+      targetEncoding:
+        row.target_encoding as EndpointCapability["targetEncoding"],
+      pagination: paginated
+        ? {
+            style,
+            requestField: row.pagination_request_field,
+            responseField: row.pagination_response_field,
+            pageSizeField: row.pagination_page_size_field,
+            pageSizeMax:
+              row.pagination_page_size_max == null
+                ? null
+                : Number(row.pagination_page_size_max),
+            autoFollow: false,
+          }
+        : null,
+      typicalItemsPerResponse:
+        row.typical_items_per_response == null
+          ? null
+          : Number(row.typical_items_per_response),
+      responseItemsPath: row.response_items_path,
+      evidence: {
+        status: row.evidence_status as EndpointEvidenceStatus,
+        url: row.evidence_url,
+        note: row.evidence_note ?? "",
+        verifiedAt: row.verified_at,
+      },
+      revision: Number(row.capability_revision),
+    },
+  };
+}
+
+// 只返回 verified 行。未验证的端点继续走 endpointCapabilityFor 内的 OpenAPI
+// 推断，这是运营在端点被确认之前获得分页提示的唯一来源。
+async function endpointEvidenceMap(
+  env: PlatformEnv,
+): Promise<EndpointEvidenceMap> {
+  const db = env.DB;
+  if (!db) return EMPTY_ENDPOINT_EVIDENCE;
+  return await endpointEvidenceCache.remember(
+    env as object,
+    ENDPOINT_EVIDENCE_CACHE_TTL_MS,
+    async () => {
+      try {
+        const result = await db
+          .prepare(
+            `SELECT path, execution_mode, native_batch_supported,
+                    native_batch_max, target_field, target_encoding,
+                    pagination_style, pagination_request_field,
+                    pagination_response_field, pagination_page_size_field,
+                    pagination_page_size_max, typical_items_per_response,
+                    response_items_path, evidence_status, evidence_url,
+                    evidence_note, evidence_http_method, capability_revision,
+                    verified_at
+               FROM endpoint_capabilities
+              WHERE evidence_status = 'verified'`,
+          )
+          .all<EndpointCapabilityRow>();
+        const evidence = new Map<string, EndpointEvidenceRecord>();
+        for (const row of resultRows<EndpointCapabilityRow>(result)) {
+          evidence.set(row.path, endpointEvidenceRecord(row));
+        }
+        return evidence;
+      } catch (error) {
+        // 迁移尚未跑到 0019/0023 的库（例如只应用了部分迁移的测试）没有这张
+        // 表。降级为空证据与删除常量前的行为一致：一切回落到推断与 direct。
+        console.error("endpoint capability evidence unavailable", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return EMPTY_ENDPOINT_EVIDENCE;
+      }
+    },
+  );
+}
 
 function collectCapabilityInputFields(
   value: unknown,
@@ -686,9 +644,10 @@ function endpointCapabilityFor(
   parameterSchema: unknown,
   documentationStatus: MarketplaceDocumentationStatus,
   method: "GET" | "POST" | null,
+  evidence: EndpointEvidenceMap,
 ): EndpointCapability {
-  const verified = VERIFIED_ENDPOINT_CAPABILITIES[path];
-  if (verified && VERIFIED_ENDPOINT_METHODS[path] === method) return verified;
+  const verified = evidence.get(path);
+  if (verified && verified.httpMethod === method) return verified.capability;
   const pagination =
     documentationStatus === "complete"
       ? inferredPaginationCapability(parameterSchema)
@@ -729,7 +688,7 @@ function endpointCapabilityFor(
         documentationStatus === "pending"
           ? "The HTTP method and input contract are not present in the current OpenAPI snapshot. Capability must be confirmed from official documentation or a controlled upstream test."
           : verified
-            ? `The current catalog method (${method ?? "unknown"}) does not match the endpoint-specific evidence (${VERIFIED_ENDPOINT_METHODS[path]}). RelayBase keeps execution 1:1 until the catalog contract is reconciled.`
+            ? `The current catalog method (${method ?? "unknown"}) does not match the endpoint-specific evidence (${verified.httpMethod ?? "unknown"}). RelayBase keeps execution 1:1 until the catalog contract is reconciled.`
           : "RelayBase currently forwards one customer request as one upstream request. Native batching, response size and async behavior are not assumed without endpoint-specific evidence.",
       verifiedAt: null,
     },
@@ -4522,6 +4481,7 @@ async function handleX402Batch(
       batch,
       existingCatalog,
       existing,
+      await endpointEvidenceMap(env),
     );
     if (
       existingPlan.mode !== existing.execution_mode ||
@@ -4568,7 +4528,11 @@ async function handleX402Batch(
   assertX402CatalogCallable(catalog);
   await assertX402UpstreamRouteAvailable(env, db, batch.endpoint);
   validateX402Targets(batch, catalog);
-  const executionPlan = buildX402ExecutionPlan(batch, catalog);
+  const executionPlan = buildX402ExecutionPlan(
+    batch,
+    catalog,
+    await endpointEvidenceMap(env),
+  );
   if (executionPlan.verifiedQuantity > catalog.x402_max_batch_size) {
     throw new PlatformError(
       400,
@@ -5192,10 +5156,12 @@ async function executeX402Targets(
       "The data route became unavailable after settlement; no alternate route was used.",
     );
   }
+  const evidence = await endpointEvidenceMap(env);
   const executionPlan = buildX402ExecutionPlanForStored(
     batch,
     catalog,
     stored,
+    evidence,
   );
   if (
     executionPlan.mode !== stored.execution_mode ||
@@ -5278,6 +5244,7 @@ async function executeX402Targets(
           inputIndexes: work.inputIndexes,
           targetValues: work.targetValues,
           contextId: `${stored.id}:${work.index}`,
+          evidence,
         });
       }
     },
@@ -5358,6 +5325,7 @@ async function executeX402Target(input: {
   inputIndexes: number[];
   targetValues: Array<string | number> | null;
   contextId: string;
+  evidence: EndpointEvidenceMap;
 }): Promise<Record<string, unknown>> {
   const upstreamUrl = new URL(
     upstreamConfigUrl(
@@ -5441,6 +5409,7 @@ async function executeX402Target(input: {
         safeStoredJson(input.catalog.parameter_schema_json),
         "complete",
         input.catalog.http_method as "GET" | "POST",
+        input.evidence,
       ).responseItemsPath,
     );
     await recordReturnedItemsForLastUpstreamAttempt(
@@ -5613,12 +5582,14 @@ function nativeBatchTargetValues(
 function buildX402ExecutionPlan(
   batch: NormalizedX402Batch,
   catalog: X402CatalogRecord,
+  evidence: EndpointEvidenceMap,
 ): X402ExecutionPlan {
   const capability = endpointCapabilityFor(
     catalog.path,
     safeStoredJson(catalog.parameter_schema_json),
     "complete",
     catalog.http_method as "GET" | "POST",
+    evidence,
   );
   if (
     capability.executionMode !== "native_batch" ||
@@ -5739,15 +5710,17 @@ function buildX402ExecutionPlanForStored(
   batch: NormalizedX402Batch,
   catalog: X402CatalogRecord,
   stored: X402BatchRecord,
+  evidence: EndpointEvidenceMap,
 ): X402ExecutionPlan {
   if (storedX402QuoteHasExecutionPlan(stored.payment_requirements_json)) {
-    return buildX402ExecutionPlan(batch, catalog);
+    return buildX402ExecutionPlan(batch, catalog, evidence);
   }
   const currentCapability = endpointCapabilityFor(
     catalog.path,
     safeStoredJson(catalog.parameter_schema_json),
     "complete",
     catalog.http_method as "GET" | "POST",
+    evidence,
   );
   return {
     mode: "fanout",
@@ -8000,6 +7973,7 @@ async function handleProxyRequest(
     safeStoredJson(catalog.parameter_schema_json),
     "complete",
     catalog.http_method as "GET" | "POST",
+    await endpointEvidenceMap(env),
   );
   const requestTargetCount = requestTargetCountForCapability(
     url,
@@ -8766,6 +8740,7 @@ async function loadMarketplaceCatalogOverlay(
     };
   }
   try {
+    const evidence = await endpointEvidenceMap(env);
     const x402SchemaReady =
       readiness.capabilities.x402SchemaReady === true;
     const config = await loadUpstreamSourceConfig(env.DB, env, false);
@@ -8929,6 +8904,7 @@ async function loadMarketplaceCatalogOverlay(
           parameterSchema,
           "complete",
           row.http_method as "GET" | "POST",
+          evidence,
         ),
         updatedAt: row.updated_at,
         documentationStatus: "complete",
@@ -8959,7 +8935,13 @@ async function loadMarketplaceCatalogOverlay(
         rateLimitRps:
           row.rate_limit_rps == null ? null : Number(row.rate_limit_rps),
         runtimeRouteAvailable: false,
-        capability: endpointCapabilityFor(row.path, null, "pending", null),
+        capability: endpointCapabilityFor(
+          row.path,
+          null,
+          "pending",
+          null,
+          evidence,
+        ),
         updatedAt: row.updated_at,
         documentationStatus: "pending",
       });
@@ -10092,6 +10074,7 @@ async function handleCatalogList(
 ): Promise<Response> {
   requireAdminSecret(request, env, "catalog");
   const db = requireDb(env);
+  const evidence = await endpointEvidenceMap(env);
   const x402SchemaReady = await hasX402Schema(db);
   const url = new URL(request.url);
   const filters = normalizeCatalogListFilters(url, {
@@ -10336,6 +10319,7 @@ async function handleCatalogList(
         parameterSchema,
         "complete",
         row.http_method as "GET" | "POST",
+        evidence,
       ),
       priceVerified: row.price_verified === 1,
       enabled: row.enabled === 1,
@@ -10426,6 +10410,7 @@ async function handlePendingCatalogList(
 ): Promise<Response> {
   requireAdminSecret(request, env, "catalog");
   const db = requireDb(env);
+  const evidence = await endpointEvidenceMap(env);
   const url = new URL(request.url);
   const single = (name: string, maxLength: number): string => {
     if (url.searchParams.getAll(name).length > 1) {
@@ -10565,7 +10550,7 @@ async function handlePendingCatalogList(
     rateLimit: row.rate_limit_raw,
     rateLimitRps:
       row.rate_limit_rps == null ? null : Number(row.rate_limit_rps),
-    capability: endpointCapabilityFor(row.path, null, "pending", null),
+    capability: endpointCapabilityFor(row.path, null, "pending", null, evidence),
     documentationStatus: "pending" as const,
     callable: false,
     updatedAt: row.updated_at,
@@ -18706,6 +18691,7 @@ async function operationalReadiness(
 function invalidateRuntimeCaches(env: PlatformEnv): void {
   readinessCache.delete(env as object);
   marketplaceOverlayCache.delete(env as object);
+  endpointEvidenceCache.delete(env as object);
 }
 
 async function computeOperationalReadiness(

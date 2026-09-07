@@ -162,6 +162,13 @@
       "when": 1788791794714,
       "tag": "0022_short_silvermane",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1788797313634,
+      "tag": "0023_capability_evidence_seed",
+      "breakpoints": true
     }
   ]
 }
