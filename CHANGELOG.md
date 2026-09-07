@@ -4,6 +4,25 @@
 
 ## Unreleased
 
+### Changed
+
+- 全站九个页面（首页、数据市场、定价、文档、登录、控制台、运营后台及其子页）从暖纸浅色
+  主题改为近黑仪表主题：单一近黑底色、五级墨阶、一个信号绿加待处理琥珀 / 阻断红，直角、
+  1px 发丝线、72px 网格与暗角。标签与读数使用 JetBrains Mono，标题使用 Noto Sans SC 900，
+  两套字体经 `next/font` 自托管，不产生第三方字体请求。接口、计费语义、权限边界与数据结构
+  均未改动。
+- `app/globals.css` 的兼容别名层补齐了 `--font-display`、`--font-mono`、`--font-sans`、
+  `--success`、`--surface-soft`、`--console-muted`、`--ink-muted` 与 `--tan-dark`：这些变量
+  此前被 `admin.css`、`console.css` 与 `docs-pricing.css` 引用但从未定义，相关声明一直被
+  浏览器静默丢弃，现已生效。
+
+### Added
+
+- 首页 hero 新增 `app/components/HeroFlow.tsx`：以 three.js 绘制供给流水（分散供给 → 审核
+  闸门 → 有序目录点阵，未通过审核的供给在闸门处被打回）。three.js 以动态 import 分离为独立
+  chunk（gzip 171KB），其余页面不加载；`prefers-reduced-motion` 与视口宽度不足 1100px 时
+  完全跳过，连 chunk 都不会请求。
+
 ### Security
 
 - 生产依赖通过 `overrides` 把 `nanoid` 升级到 `3.3.18`、`postcss` 升级到 `8.5.28`，修复
