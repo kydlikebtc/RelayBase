@@ -11049,3 +11049,150 @@ test("rejects capability input that collides on one upstream parameter", async (
     "a rejected capability call must not be billed",
   );
 });
+
+test("publishes capabilities with capability-facing input names and no upstream detail", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const { env, path } = seedCapabilityFixture(db, t);
+  db.raw
+    .prepare(
+      `UPDATE endpoint_catalog
+          SET parameter_schema_json = ?
+        WHERE path = ?`,
+    )
+    .run(
+      JSON.stringify({
+        parameters: [
+          { name: "uniqueId", in: "query", required: true,
+            schema: { type: "string" } },
+          { name: "count", in: "query", schema: { type: "integer",
+            maximum: 50 } },
+        ],
+      }),
+      path,
+    );
+  db.raw
+    .prepare(
+      `INSERT INTO capabilities
+       (id, platform, category, endpoint_path, http_method, status,
+        input_aliases_json, summary_zh, summary_en, revision)
+       VALUES ('tiktok.user.draft', 'tiktok', 'profile_creator', ?,
+               'GET', 'draft', '{}', '草稿', 'Draft', 1)`,
+    )
+    .run(path);
+
+  const list = await fetchWorker("/api/capabilities", {}, env);
+  assert.equal(list.status, 200);
+  const listData = await list.json();
+  assert.deepEqual(
+    listData.capabilities.map((entry) => entry.id),
+    ["tiktok.user.profile"],
+    "only published capabilities are public",
+  );
+  assert.equal(listData.total, 1);
+  const listed = listData.capabilities[0];
+  assert.equal(listed.platform, "tiktok");
+  assert.equal(listed.endpoint, path);
+  assert.equal(listed.pricing.amountUsdMicros, 2000);
+  assert.equal(Object.hasOwn(listed, "operationId"), false);
+
+  const detail = await fetchWorker(
+    "/api/capabilities/tiktok.user.profile",
+    {},
+    env,
+  );
+  assert.equal(detail.status, 200);
+  const detailData = await detail.json();
+  assert.equal(detailData.capability.id, "tiktok.user.profile");
+  assert.equal(detailData.capability.summary.en, "TikTok user profile");
+
+  // The caller must be shown the capability's own field names.
+  assert.deepEqual(
+    detailData.input.parameters.map((parameter) => parameter.name),
+    ["handle", "count"],
+    "the aliased upstream parameter is presented as the capability field",
+  );
+  assert.match(detailData.examples.curl, /\/v1\/c\/tiktok\.user\.profile/);
+  assert.match(detailData.examples.curl, /handle=/);
+  assert.doesNotMatch(detailData.examples.curl, /uniqueId/);
+  assert.ok(detailData.examples.javascript.length > 0);
+  assert.ok(detailData.examples.python.length > 0);
+
+  // Same provider-neutrality contract as the marketplace.
+  for (const payload of [listData, detailData]) {
+    const serialized = JSON.stringify(payload);
+    assert.doesNotMatch(serialized, /source\.example|\/api\/v1\/control\//i);
+    assert.doesNotMatch(serialized, /upstream-secret/);
+    assert.doesNotMatch(serialized, /fetch_user_profile_api_v1/);
+  }
+
+  const missing = await fetchWorker(
+    "/api/capabilities/tiktok.user.draft",
+    {},
+    env,
+  );
+  assert.equal(missing.status, 404);
+  assert.equal((await missing.json()).error.code, "capability_not_found");
+});
+
+test("filters and pages the public capability list", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const { env, path } = seedCapabilityFixture(db, t);
+  const insert = db.raw.prepare(
+    `INSERT INTO capabilities
+     (id, platform, category, endpoint_path, http_method, status,
+      input_aliases_json, summary_zh, summary_en, revision)
+     VALUES (?, ?, 'profile_creator', ?, 'GET', 'published', '{}',
+             '摘要', ?, 1)`,
+  );
+  insert.run("douyin.user.profile", "douyin", path, "Douyin profile");
+  insert.run("douyin.user.followers", "douyin", path, "Douyin followers");
+
+  const all = await fetchWorker("/api/capabilities", {}, env);
+  assert.equal((await all.json()).total, 3);
+
+  const filtered = await fetchWorker(
+    "/api/capabilities?platform=douyin",
+    {},
+    env,
+  );
+  const filteredData = await filtered.json();
+  assert.equal(filteredData.total, 2);
+  assert.deepEqual(
+    filteredData.capabilities.map((entry) => entry.platform),
+    ["douyin", "douyin"],
+  );
+
+  const searched = await fetchWorker(
+    "/api/capabilities?q=followers",
+    {},
+    env,
+  );
+  assert.deepEqual(
+    (await searched.json()).capabilities.map((entry) => entry.id),
+    ["douyin.user.followers"],
+  );
+
+  const page = await fetchWorker(
+    "/api/capabilities?limit=2&offset=0",
+    {},
+    env,
+  );
+  const pageData = await page.json();
+  assert.equal(pageData.capabilities.length, 2);
+  assert.equal(pageData.total, 3);
+  assert.equal(pageData.nextOffset, 2);
+
+  const lastPage = await fetchWorker(
+    "/api/capabilities?limit=2&offset=2",
+    {},
+    env,
+  );
+  assert.equal((await lastPage.json()).nextOffset, null);
+
+  const bad = await fetchWorker("/api/capabilities?limit=0", {}, env);
+  assert.equal(bad.status, 400);
+});

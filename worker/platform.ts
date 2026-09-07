@@ -1030,6 +1030,24 @@ export async function handlePlatformRequest(
       return await handlePublicCatalog(request, env, requestId);
     }
 
+    if (url.pathname === "/api/capabilities" && request.method === "GET") {
+      return await handleCapabilityList(request, env, requestId);
+    }
+
+    if (
+      url.pathname.startsWith("/api/capabilities/") &&
+      request.method === "GET"
+    ) {
+      return await handleCapabilityDetail(
+        request,
+        env,
+        requestId,
+        decodeURIComponent(
+          url.pathname.slice("/api/capabilities/".length),
+        ),
+      );
+    }
+
     if (url.pathname === "/api/marketplace" && request.method === "GET") {
       return await handleMarketplace(request, env, requestId);
     }
@@ -9880,6 +9898,362 @@ response = requests.${endpoint.method.toLowerCase()}(
 response.raise_for_status()
 payload = response.json()`;
   return { curl, javascript, python };
+}
+
+type PublicCapabilityRow = {
+  id: string;
+  platform: string;
+  category: string;
+  endpoint_path: string;
+  http_method: "GET" | "POST";
+  input_aliases_json: string;
+  pagination_json: string | null;
+  response_items_path: string | null;
+  summary_zh: string;
+  summary_en: string;
+  revision: number;
+};
+
+// 只读已发布能力。草稿是运营的在途工作，下架能力不该继续出现在目录里。
+async function publishedCapabilityRows(
+  env: PlatformEnv,
+): Promise<PublicCapabilityRow[]> {
+  const db = env.DB;
+  if (!db) return [];
+  try {
+    const result = await db
+      .prepare(
+        `SELECT id, platform, category, endpoint_path, http_method,
+                input_aliases_json, pagination_json, response_items_path,
+                summary_zh, summary_en, revision
+           FROM capabilities
+          WHERE status = 'published'
+          ORDER BY id`,
+      )
+      .all<PublicCapabilityRow>();
+    return resultRows<PublicCapabilityRow>(result);
+  } catch (error) {
+    console.error("published capability list unavailable", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return [];
+  }
+}
+
+// 能力字段名 -> 上游参数名的反向表。别名只重命名顶层字段，因此反向表也只用于
+// 顶层参数与顶层 body 属性。
+function capabilityFieldNames(
+  aliases: Readonly<Record<string, string>>,
+): Map<string, string> {
+  const byUpstream = new Map<string, string>();
+  for (const [field, target] of Object.entries(aliases)) {
+    if (!byUpstream.has(target)) byUpstream.set(target, field);
+  }
+  return byUpstream;
+}
+
+// 把公开输入结构里的上游参数名换成调用方实际要发送的能力字段名。展示上游名字
+// 会让调用方按错误的字段名构造请求。
+function capabilityPublicParameters(
+  parameters: unknown,
+  byUpstream: Map<string, string>,
+): unknown {
+  const filtered = marketplacePublicInputSchema(parameters);
+  if (!Array.isArray(filtered)) return filtered;
+  return filtered.map((parameter) => {
+    if (!isPlainRecord(parameter) || typeof parameter.name !== "string") {
+      return parameter;
+    }
+    const field = byUpstream.get(parameter.name);
+    return field === undefined ? parameter : { ...parameter, name: field };
+  });
+}
+
+function capabilityPublicRequestBody(
+  requestBody: unknown,
+  byUpstream: Map<string, string>,
+): unknown {
+  const filtered = marketplacePublicInputSchema(requestBody);
+  if (!isPlainRecord(filtered) || byUpstream.size === 0) return filtered;
+  const rename = (value: unknown): unknown => {
+    if (!isPlainRecord(value)) return value;
+    const next: Record<string, unknown> = { ...value };
+    if (isPlainRecord(next.properties)) {
+      const properties: Record<string, unknown> = {};
+      for (const [name, schema] of Object.entries(next.properties)) {
+        properties[byUpstream.get(name) ?? name] = schema;
+      }
+      next.properties = properties;
+    }
+    if (Array.isArray(next.required)) {
+      next.required = next.required.map((name) =>
+        typeof name === "string" ? (byUpstream.get(name) ?? name) : name,
+      );
+    }
+    for (const key of ["schema", "content", "application/json"]) {
+      if (isPlainRecord(next[key])) next[key] = rename(next[key]);
+    }
+    return next;
+  };
+  return rename(filtered);
+}
+
+function capabilityCodeExamples(
+  request: Request,
+  capability: PublicCapabilityRow,
+  parameters: unknown,
+) {
+  const origin = new URL(request.url).origin;
+  const target = `${origin}/v1/c/${capability.id}`;
+  const fields = (Array.isArray(parameters) ? parameters : [])
+    .filter(
+      (parameter) =>
+        isPlainRecord(parameter) &&
+        parameter.in === "query" &&
+        typeof parameter.name === "string",
+    )
+    .slice(0, 3)
+    .map((parameter) => String((parameter as Record<string, unknown>).name));
+  const query = fields.map((field) => `${field}=<${field}>`).join("&");
+  const url = query.length > 0 ? `${target}?${query}` : target;
+  const body = Object.fromEntries(fields.map((field) => [field, `<${field}>`]));
+  const isPost = capability.http_method === "POST";
+  return {
+    curl: isPost
+      ? [
+          `curl -X POST '${target}' \\`,
+          `  -H 'authorization: Bearer $RELAYBASE_API_KEY' \\`,
+          `  -H 'idempotency-key: '"$(uuidgen)" \\`,
+          `  -H 'content-type: application/json' \\`,
+          `  -d '${JSON.stringify(body)}'`,
+        ].join("\n")
+      : [
+          `curl '${url}' \\`,
+          `  -H 'authorization: Bearer $RELAYBASE_API_KEY' \\`,
+          `  -H 'idempotency-key: '"$(uuidgen)"`,
+        ].join("\n"),
+    javascript: isPost
+      ? [
+          `const response = await fetch("${target}", {`,
+          `  method: "POST",`,
+          `  headers: {`,
+          `    authorization: \`Bearer \${process.env.RELAYBASE_API_KEY}\`,`,
+          `    "idempotency-key": crypto.randomUUID(),`,
+          `    "content-type": "application/json",`,
+          `  },`,
+          `  body: JSON.stringify(${JSON.stringify(body)}),`,
+          `});`,
+          `const { data, items, nextCursor } = await response.json();`,
+        ].join("\n")
+      : [
+          `const response = await fetch("${url}", {`,
+          `  headers: {`,
+          `    authorization: \`Bearer \${process.env.RELAYBASE_API_KEY}\`,`,
+          `    "idempotency-key": crypto.randomUUID(),`,
+          `  },`,
+          `});`,
+          `const { data, items, nextCursor } = await response.json();`,
+        ].join("\n"),
+    python: isPost
+      ? [
+          `import os, uuid, requests`,
+          ``,
+          `response = requests.post(`,
+          `    "${target}",`,
+          `    headers={`,
+          `        "authorization": f"Bearer {os.environ['RELAYBASE_API_KEY']}",`,
+          `        "idempotency-key": str(uuid.uuid4()),`,
+          `    },`,
+          `    json=${JSON.stringify(body)},`,
+          `)`,
+          `payload = response.json()`,
+        ].join("\n")
+      : [
+          `import os, uuid, requests`,
+          ``,
+          `response = requests.get(`,
+          `    "${url}",`,
+          `    headers={`,
+          `        "authorization": f"Bearer {os.environ['RELAYBASE_API_KEY']}",`,
+          `        "idempotency-key": str(uuid.uuid4()),`,
+          `    },`,
+          `)`,
+          `payload = response.json()`,
+        ].join("\n"),
+  };
+}
+
+function publicCapabilitySummary(
+  capability: PublicCapabilityRow,
+  endpoint: ReturnType<typeof mergedMarketplaceEndpoints>[number],
+) {
+  return {
+    id: capability.id,
+    platform: capability.platform,
+    category: capability.category,
+    summary: { zh: capability.summary_zh, en: capability.summary_en },
+    method: capability.http_method,
+    endpoint: capability.endpoint_path,
+    pricing: endpoint.pricing,
+    rateLimitRps: endpoint.rateLimitRps,
+    availability: endpoint.availability,
+    revision: capability.revision,
+  };
+}
+
+// 能力与市场端点的配对。没有对应公开端点的能力不会被列出——公开一个不可调用的
+// 能力等于给调用方一个必定失败的名字。
+async function publicCapabilityPairs(env: PlatformEnv) {
+  const overlay = await marketplaceCatalogOverlay(env);
+  const endpoints = mergedMarketplaceEndpoints(overlay);
+  const rows = await publishedCapabilityRows(env);
+  const pairs = [];
+  for (const capability of rows) {
+    const endpoint = endpoints.find(
+      (candidate) =>
+        candidate.path === capability.endpoint_path &&
+        candidate.method === capability.http_method,
+    );
+    if (endpoint) pairs.push({ capability, endpoint });
+  }
+  return { pairs, catalog: overlay.catalog };
+}
+
+async function handleCapabilityList(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const single = (name: string): string | null => {
+    if (url.searchParams.getAll(name).length > 1) {
+      throw new PlatformError(
+        400,
+        "invalid_capability_filter",
+        `能力筛选参数 ${name} 重复。`,
+      );
+    }
+    const value = url.searchParams.get(name)?.trim() ?? "";
+    return value.length > 0 ? value.slice(0, 120).toLowerCase() : null;
+  };
+  const bounded = (name: string, fallback: number, max: number): number => {
+    const raw = url.searchParams.get(name);
+    if (raw == null || raw.trim() === "") return fallback;
+    const parsed = Number(raw);
+    if (!Number.isSafeInteger(parsed) || parsed < (name === "offset" ? 0 : 1)) {
+      throw new PlatformError(
+        400,
+        "invalid_capability_filter",
+        `能力筛选参数 ${name} 无效。`,
+      );
+    }
+    return Math.min(parsed, max);
+  };
+  const q = single("q");
+  const platform = single("platform");
+  const category = single("category");
+  const limit = bounded("limit", 50, 200);
+  const offset = bounded("offset", 0, 100_000);
+
+  const { pairs, catalog } = await publicCapabilityPairs(env);
+  const matched = pairs.filter(({ capability }) => {
+    if (platform && capability.platform.toLowerCase() !== platform) {
+      return false;
+    }
+    if (category && capability.category.toLowerCase() !== category) {
+      return false;
+    }
+    if (q) {
+      const searchable = [
+        capability.id,
+        capability.platform,
+        capability.category,
+        capability.summary_zh,
+        capability.summary_en,
+      ]
+        .join(" ")
+        .toLowerCase();
+      if (!searchable.includes(q)) return false;
+    }
+    return true;
+  });
+  const page = matched.slice(offset, offset + limit);
+  return jsonResponse(
+    {
+      catalog,
+      capabilities: page.map(({ capability, endpoint }) =>
+        publicCapabilitySummary(capability, endpoint),
+      ),
+      count: page.length,
+      total: matched.length,
+      offset,
+      nextOffset:
+        offset + page.length < matched.length ? offset + page.length : null,
+    },
+    200,
+    requestId,
+    { "cache-control": "no-store" },
+  );
+}
+
+async function handleCapabilityDetail(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+  capabilityId: string,
+): Promise<Response> {
+  if (!isCapabilityId(capabilityId)) throw capabilityNotFound();
+  const { pairs, catalog } = await publicCapabilityPairs(env);
+  const found = pairs.find(({ capability }) => capability.id === capabilityId);
+  if (!found) throw capabilityNotFound();
+  const { capability, endpoint } = found;
+
+  const byUpstream = capabilityFieldNames(
+    parseCapabilityAliases(safeStoredJson(capability.input_aliases_json)),
+  );
+  const documented = endpoint.documentationStatus === "complete";
+  const parameters = documented
+    ? capabilityPublicParameters(endpoint.parameters, byUpstream)
+    : null;
+  const pagination = parseCapabilityPagination(
+    safeStoredJson(capability.pagination_json),
+  );
+  return jsonResponse(
+    {
+      catalog,
+      capability: {
+        ...publicCapabilitySummary(capability, endpoint),
+        description: endpoint.description,
+        pagination:
+          pagination === null
+            ? null
+            : {
+                requestField: pagination.requestField,
+                pageSizeField: pagination.pageSizeField,
+                pageSizeMax: pagination.pageSizeMax,
+                cursorAvailable: pagination.responseCursorPath !== null,
+              },
+      },
+      input: {
+        parameters,
+        requestBody: documented
+          ? capabilityPublicRequestBody(endpoint.requestBody, byUpstream)
+          : null,
+      },
+      response: {
+        contentType: "application/json",
+        mode: "relaybase_capability_envelope",
+        itemsAvailable: capability.response_items_path !== null,
+        description:
+          "成功时返回 { success, capability, data, items, nextCursor }；" +
+          "items 与 nextCursor 无法从上游响应中提取时为 null，不会伪造成空数组。",
+      },
+      examples: capabilityCodeExamples(request, capability, parameters),
+    },
+    200,
+    requestId,
+    { "cache-control": "no-store" },
+  );
 }
 
 async function handleMarketplaceDetail(
