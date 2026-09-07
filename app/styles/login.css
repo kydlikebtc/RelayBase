@@ -1,8 +1,8 @@
 .login-page {
   min-height: 100vh;
   background:
-    radial-gradient(circle at 8% 20%, rgb(216 184 150 / 0.18), transparent 26%),
-    radial-gradient(circle at 90% 74%, rgb(106 143 94 / 0.1), transparent 24%),
+    radial-gradient(circle at 8% 20%, var(--signal-wash), transparent 30%),
+    radial-gradient(circle at 90% 74%, rgb(94 227 155 / 0.05), transparent 28%),
     var(--bg);
 }
 
@@ -23,8 +23,7 @@
   height: 50px;
   margin-bottom: 30px;
   place-items: center;
-  border-radius: 13px;
-  color: white;
+  color: var(--bg);
   background: var(--accent);
   font-family: var(--mono);
   font-size: 16px;
@@ -100,9 +99,8 @@
   position: relative;
   padding: clamp(24px, 4vw, 38px);
   border: 1px solid var(--border);
-  border-radius: 18px;
-  background: rgb(252 252 251 / 0.78);
-  box-shadow: 0 24px 70px rgb(44 44 44 / 0.08);
+  background: var(--surface-raised);
+  box-shadow: none;
   backdrop-filter: blur(18px);
 }
 
@@ -112,7 +110,6 @@
   right: 22px;
   width: 46px;
   height: 3px;
-  border-radius: 999px;
   background: var(--tan);
   content: "";
 }
@@ -129,8 +126,7 @@
   width: 40px;
   height: 40px;
   place-items: center;
-  border-radius: 50%;
-  color: white;
+  color: var(--bg);
   background: var(--accent);
   font-family: var(--mono);
   font-size: 10px;
@@ -160,7 +156,6 @@
   margin-bottom: 12px;
   padding: 11px 13px;
   border: 1px solid var(--border);
-  border-radius: 10px;
   color: var(--ink-2);
   background: var(--bg-alt);
   font-family: var(--mono);
@@ -172,7 +167,6 @@
   height: 13px;
   border: 2px solid var(--border);
   border-top-color: var(--accent);
-  border-radius: 50%;
   animation: login-spin 800ms linear infinite;
 }
 
@@ -190,9 +184,8 @@
   margin-bottom: 12px;
   padding: 11px 12px;
   border: 1px solid color-mix(in srgb, var(--danger) 34%, var(--border));
-  border-radius: 10px;
-  color: #74453f;
-  background: #f9eeeb;
+  color: var(--blocked);
+  background: var(--blocked-wash);
 }
 
 .login-alert > span {
@@ -200,8 +193,7 @@
   width: 24px;
   height: 24px;
   place-items: center;
-  border-radius: 50%;
-  color: white;
+  color: var(--bg);
   background: var(--danger);
   font-family: var(--mono);
   font-size: 9px;
@@ -242,7 +234,6 @@
   gap: 14px;
   padding: 11px 15px;
   border: 1px solid var(--border);
-  border-radius: 12px;
   cursor: pointer;
   text-align: left;
   transition:
@@ -267,7 +258,6 @@
   width: 38px;
   height: 38px;
   place-items: center;
-  border-radius: 10px;
   font-family: var(--mono);
   font-size: 11px;
   font-weight: 650;
@@ -312,17 +302,17 @@
 
 .login-provider-wallet {
   border-color: var(--charcoal);
-  color: white;
+  color: var(--bg);
   background: var(--charcoal);
 }
 
 .login-provider-wallet > span {
-  color: white;
-  background: #403e3b;
+  color: var(--ink);
+  background: var(--surface-soft);
 }
 
 .login-provider-wallet small {
-  color: #b8b2a9;
+  color: var(--ink-3);
 }
 
 .login-provider-wallet > b {

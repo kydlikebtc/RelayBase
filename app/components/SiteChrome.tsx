@@ -26,6 +26,7 @@ const copy = {
     footerMarket: "RelayBase Data Market",
     settlement: "Stablecoin settlement",
     console: "Console",
+    login: "Sign in",
     disclaimer:
       "Independent data marketplace and service layer · Not an official upstream platform product",
   },
@@ -47,6 +48,7 @@ const copy = {
     footerMarket: "RelayBase 数据市场",
     settlement: "稳定币结算",
     console: "控制台",
+    login: "登录",
     disclaimer: "独立数据市场与服务封装层 · 非上游平台官方产品",
   },
 } as const;
@@ -76,8 +78,8 @@ export function SiteHeader({ locale }: { locale: Locale }) {
             <span className="brand-mark" aria-hidden="true">
               R/
             </span>
-            <span className="brand-name">RelayBase</span>
-            <span className="brand-suffix">MARKET</span>
+            <span className="brand-name">RELAYBASE</span>
+            <span className="brand-suffix">DATA MARKET</span>
           </Link>
 
           <nav className="desktop-nav" aria-label={content.mainNavigation}>
@@ -186,20 +188,22 @@ export function SiteFooter({ locale }: { locale: Locale }) {
     <footer className="site-footer">
       <div className="site-footer-inner">
         <span>{content.footerMarket}</span>
-        <span className="footer-separator">·</span>
+        <span className="footer-separator">/</span>
         <PlatformStatus className="footer-status" locale={locale} />
-        <span className="footer-separator">·</span>
+        <span className="footer-separator">/</span>
         <span>{content.settlement}</span>
-        <span className="footer-separator">·</span>
+        <span className="footer-separator">/</span>
         <Link href="/catalog">{content.navigation[1].label}</Link>
-        <span className="footer-separator">·</span>
+        <span className="footer-separator">/</span>
         <Link href="/pricing">{content.navigation[2].label}</Link>
-        <span className="footer-separator">·</span>
+        <span className="footer-separator">/</span>
         <Link href="/docs">{content.navigation[3].label}</Link>
-        <span className="footer-separator">·</span>
+        <span className="footer-separator">/</span>
         <a href="/console">{content.console}</a>
+        <span className="footer-separator">/</span>
+        <a href="/login">{content.login}</a>
         <span className="site-footer-meta">
-          © 2026 · v{packageJson.version} · {content.disclaimer}
+          © 2026 / v{packageJson.version} / {content.disclaimer}
         </span>
       </div>
     </footer>

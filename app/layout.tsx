@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { JetBrains_Mono, Noto_Sans_SC } from "next/font/google";
 import { SiteFooter, SiteHeader } from "./components/SiteChrome";
 import { getLocale } from "./locale";
 import { getRequestOrigin } from "./request-origin";
@@ -6,6 +7,24 @@ import "./globals.css";
 import "./styles/home.css";
 import "./styles/console.css";
 import "./styles/docs-pricing.css";
+
+// Every label, code and readout in the instrument style is JetBrains Mono;
+// headlines lean on Noto Sans SC 900, which no system CJK face can stand in for.
+const mono = JetBrains_Mono({
+  subsets: ["latin"],
+  weight: ["400", "500", "700"],
+  display: "swap",
+  variable: "--font-jetbrains-mono",
+});
+
+// Chinese faces ship as ~100 unicode-range slices per weight, so preloading
+// them is wasteful: let the browser pull only the slices a page actually needs.
+const sans = Noto_Sans_SC({
+  weight: ["400", "700", "900"],
+  display: "swap",
+  preload: false,
+  variable: "--font-noto-sans-sc",
+});
 
 export async function generateMetadata(): Promise<Metadata> {
   const origin = await getRequestOrigin();
@@ -75,7 +94,10 @@ export default async function RootLayout({
   const isZh = locale === "zh";
 
   return (
-    <html lang={isZh ? "zh-CN" : "en"}>
+    <html
+      lang={isZh ? "zh-CN" : "en"}
+      className={`${sans.variable} ${mono.variable}`}
+    >
       <body>
         <a className="skip-link" href="#main-content">
           {isZh ? "跳到主要内容" : "Skip to main content"}
