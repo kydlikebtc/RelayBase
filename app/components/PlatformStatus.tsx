@@ -30,6 +30,17 @@ const labels: Record<Locale, Record<PlatformMode, string>> = {
   },
 };
 
+// The chrome shows a fixed-width machine code rather than the prose label; the
+// prose stays on `title` so the meaning is still one hover away in either locale.
+const codes: Record<PlatformMode, string> = {
+  checking: "CHECKING",
+  sandbox: "SANDBOX",
+  partial: "PARTIAL",
+  live: "LIVE",
+  configuring: "CONFIG",
+  unknown: "OFFLINE",
+};
+
 export function PlatformStatus({
   className,
   locale,
@@ -88,7 +99,7 @@ export function PlatformStatus({
       title={labels[locale][mode]}
     >
       <span className="status-dot" aria-hidden="true" />
-      {labels[locale][mode]}
+      {codes[mode]}
     </span>
   );
 }

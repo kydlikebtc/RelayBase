@@ -1,6 +1,6 @@
 .console-page {
   min-height: 100vh;
-  background: #f7f6f2;
+  background: var(--surface-soft);
 }
 
 .console-shell {
@@ -20,7 +20,7 @@
   flex-direction: column;
   padding: 26px 16px 18px;
   border-right: 1px solid var(--border);
-  background: #f2f0ea;
+  background: var(--surface-soft);
 }
 
 .console-sidebar-heading {
@@ -62,7 +62,6 @@
   gap: 8px;
   padding: 10px;
   border: 1px solid transparent;
-  border-radius: 10px;
   color: var(--ink-2);
   transition:
     border-color 140ms ease,
@@ -73,14 +72,14 @@
 .console-nav > a:hover {
   border-color: var(--border);
   color: var(--ink);
-  background: rgb(255 255 255 / 0.6);
+  background: var(--surface-raised);
 }
 
 .console-nav > a.is-active {
-  border-color: #d5c4b2;
+  border-color: var(--line-strong);
   color: var(--ink);
   background: var(--surface);
-  box-shadow: 0 1px 2px rgb(26 22 17 / 0.04);
+  box-shadow: none;
 }
 
 .console-nav > a > span {
@@ -89,16 +88,15 @@
   height: 28px;
   place-items: center;
   border: 1px solid var(--border);
-  border-radius: 8px;
   color: var(--ink-3);
-  background: #f9f8f5;
+  background: var(--surface-soft);
   font-family: var(--mono);
   font-size: 9px;
 }
 
 .console-nav > a.is-active > span {
   border-color: var(--accent);
-  color: white;
+  color: var(--bg);
   background: var(--accent);
 }
 
@@ -169,8 +167,7 @@
   width: 34px;
   height: 34px;
   place-items: center;
-  border-radius: 9px;
-  color: white;
+  color: var(--bg);
   background: var(--accent);
   font-family: var(--mono);
   font-size: 11px;
@@ -194,7 +191,9 @@
   font-size: 11px;
 }
 
-.console-side-account span {
+/* The avatar is also a <span> in here, and it sits on a signal-green fill, so
+   the muted meta colour would leave its initial at 1.6:1 against the tile. */
+.console-side-account span:not(.console-avatar) {
   color: var(--ink-3);
   font-family: var(--mono);
   font-size: 8px;
@@ -211,7 +210,7 @@
 .console-workspace {
   min-width: 0;
   padding: 34px clamp(24px, 3.5vw, 54px) 90px;
-  background: #fbfaf7;
+  background: var(--surface-soft);
 }
 
 .console-workspace-header {
@@ -254,7 +253,6 @@
   flex: 0 0 auto;
   padding: 9px 12px;
   border: 1px solid var(--border);
-  border-radius: 8px;
   cursor: pointer;
   color: var(--ink-2);
   background: var(--surface);
@@ -280,12 +278,11 @@
   margin-bottom: 14px;
   padding: 13px 15px;
   border: 1px solid var(--border);
-  border-radius: 10px;
 }
 
 .console-auth-banner {
   grid-template-columns: auto 1fr;
-  background: #f0ede6;
+  background: var(--surface-soft);
 }
 
 .console-auth-banner > span {
@@ -320,7 +317,6 @@
   height: 22px;
   place-items: center;
   border: 1px solid currentColor;
-  border-radius: 50%;
   font-family: var(--mono);
   font-size: 9px;
   font-weight: 800;
@@ -339,13 +335,13 @@
 }
 
 .console-alert-error {
-  color: #792d24;
-  background: #fff0ec;
+  color: var(--blocked);
+  background: var(--blocked-wash);
 }
 
 .console-alert-success {
-  color: #275431;
-  background: #eef6e8;
+  color: var(--signal);
+  background: var(--signal-wash);
 }
 
 .console-metric-grid {
@@ -363,7 +359,6 @@
   align-content: space-between;
   padding: 17px 18px;
   border: 1px solid var(--border);
-  border-radius: 12px;
   background: var(--surface);
 }
 
@@ -394,17 +389,20 @@
   letter-spacing: 0.08em;
 }
 
+/* On paper the balance card earned attention by inverting to a dark slab. On
+   the dark ground the same inversion would be a white block, so it takes the
+   signal tint and border instead — loud enough, still part of the system. */
 .console-metric-primary,
 .console-compact-metrics article.is-primary {
-  color: white;
-  border-color: var(--ink);
-  background: var(--ink);
+  color: var(--signal);
+  border-color: rgb(94 227 155 / 0.35);
+  background: rgb(94 227 155 / 0.05);
 }
 
 .console-metric-primary > span,
 .console-metric-primary small,
 .console-compact-metrics article.is-primary > span {
-  color: #bcb9b1;
+  color: var(--ink-4);
 }
 
 .loading-value {
@@ -416,15 +414,24 @@
 .loading-value::after {
   position: absolute;
   inset: 4px 28% 4px 0;
-  border-radius: 4px;
-  background: linear-gradient(90deg, #dedbd4, #f1efe9, #dedbd4);
+  background: linear-gradient(
+    90deg,
+    var(--surface-soft),
+    var(--surface-soft),
+    var(--surface-soft)
+  );
   background-size: 200% 100%;
   animation: console-shimmer 1.4s linear infinite;
   content: "";
 }
 
 .console-metric-primary .loading-value::after {
-  background: linear-gradient(90deg, #373738, #4b4b4d, #373738);
+  background: linear-gradient(
+    90deg,
+    var(--surface-sunken),
+    var(--surface-sunken),
+    var(--surface-sunken)
+  );
   background-size: 200% 100%;
 }
 
@@ -440,7 +447,6 @@
   margin-bottom: 18px;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 12px;
   background: var(--surface);
 }
 
@@ -451,7 +457,7 @@
 }
 
 .console-quick-actions > div {
-  background: #f2efe8;
+  background: var(--surface-soft);
 }
 
 .console-quick-actions h2 {
@@ -470,7 +476,7 @@
 }
 
 .console-quick-actions > a:hover {
-  background: #faf7f1;
+  background: var(--surface-soft);
 }
 
 .console-quick-actions a b {
@@ -513,7 +519,6 @@
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 12px;
   background: var(--surface);
 }
 
@@ -558,7 +563,6 @@
 .pay-badge {
   padding: 5px 7px;
   border: 1px solid var(--border);
-  border-radius: 999px;
   color: var(--ink-2);
   font-family: var(--mono);
   font-size: 8px;
@@ -583,7 +587,7 @@
   padding: 10px 13px;
   border-bottom: 1px solid var(--border);
   color: var(--ink-3);
-  background: #faf9f6;
+  background: var(--surface-soft);
   font-family: var(--mono);
   font-size: 8px;
   font-weight: 700;
@@ -596,7 +600,7 @@
 .requests-table td,
 .key-table td {
   padding: 12px 13px;
-  border-bottom: 1px solid #ebe8e1;
+  border-bottom: 1px solid var(--line);
   color: var(--ink-2);
   font-size: 10px;
   white-space: nowrap;
@@ -609,7 +613,7 @@
 
 .requests-table tbody tr:hover,
 .key-table tbody tr:hover {
-  background: #fcfaf6;
+  background: var(--surface-soft);
 }
 
 .request-path {
@@ -621,9 +625,8 @@
 
 .request-path i {
   padding: 3px 5px;
-  border-radius: 4px;
-  color: #335d3d;
-  background: #e7f0df;
+  color: var(--signal);
+  background: var(--signal-wash);
   font-size: 7px;
   font-style: normal;
   font-weight: 800;
@@ -656,7 +659,6 @@
 .request-status::before {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
   content: "";
 }
 
@@ -728,7 +730,7 @@
   align-items: center;
   gap: 10px;
   padding: 12px 0;
-  border-bottom: 1px solid #ebe8e1;
+  border-bottom: 1px solid var(--line);
 }
 
 .console-checklist li:last-child {
@@ -741,14 +743,13 @@
   height: 26px;
   place-items: center;
   border: 1px solid var(--border);
-  border-radius: 50%;
   color: var(--ink-3);
   font-family: var(--mono);
   font-size: 9px;
 }
 
 .console-checklist li.is-complete > span {
-  color: white;
+  color: var(--bg);
   border-color: var(--green);
   background: var(--green);
 }
@@ -783,7 +784,7 @@
   justify-content: space-between;
   gap: 15px;
   padding: 12px 0;
-  border-bottom: 1px solid #ebe8e1;
+  border-bottom: 1px solid var(--line);
 }
 
 .console-status-panel dl > div:last-child {
@@ -806,7 +807,7 @@
 }
 
 .status-warning {
-  color: #9a641f;
+  color: var(--pending);
 }
 
 .console-compact-metrics {
@@ -832,7 +833,7 @@
 .key-form {
   padding: 16px 18px;
   border-bottom: 1px solid var(--border);
-  background: #faf9f6;
+  background: var(--surface-soft);
 }
 
 .key-form > label,
@@ -860,16 +861,15 @@
   min-height: 42px;
   padding: 0 12px;
   border: 1px solid var(--border);
-  border-radius: 8px;
   color: var(--ink);
-  background: white;
+  background: var(--surface);
   font-size: 11px;
 }
 
 .key-form input:focus,
 .currency-select select:focus {
   border-color: var(--accent);
-  outline: 2px solid rgb(194 141 97 / 0.15);
+  outline: 2px solid rgb(94 227 155 / 0.3);
 }
 
 .key-form input:disabled,
@@ -881,15 +881,14 @@
 .created-key-card {
   margin: 16px 18px 0;
   padding: 14px;
-  border: 1px solid #94a36b;
-  border-radius: 9px;
-  background: #f2f7e8;
+  border: 1px solid rgb(94 227 155 / 0.4);
+  background: var(--signal-wash);
 }
 
 .created-key-card > div:first-child {
   display: flex;
   justify-content: space-between;
-  color: #526334;
+  color: var(--signal);
   font-family: var(--mono);
   font-size: 8px;
   font-weight: 750;
@@ -906,7 +905,7 @@
 
 .created-key-card p {
   margin: 8px 0 11px;
-  color: #53613b;
+  color: var(--signal);
   font-size: 10px;
   line-height: 1.55;
 }
@@ -915,9 +914,8 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   overflow: hidden;
-  border: 1px solid #a9b78a;
-  border-radius: 7px;
-  background: white;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
 }
 
 .secret-value code {
@@ -929,7 +927,7 @@
 
 .secret-value button {
   padding: 0 12px;
-  border-left: 1px solid #a9b78a;
+  border-left: 1px solid var(--line-strong);
   cursor: pointer;
   color: var(--ink);
   background: transparent;
@@ -949,9 +947,8 @@
 .key-active {
   display: inline-flex;
   padding: 4px 7px;
-  border-radius: 999px;
-  color: #356342;
-  background: #e7f1e2;
+  color: var(--signal);
+  background: var(--signal-wash);
   font-family: var(--mono);
   font-size: 8px;
   font-weight: 750;
@@ -959,18 +956,17 @@
 
 .key-revoke {
   padding: 6px 8px;
-  border: 1px solid #dfc6c0;
-  border-radius: 6px;
+  border: 1px solid var(--line);
   cursor: pointer;
-  color: #9a4338;
-  background: #fff8f6;
+  color: var(--blocked);
+  background: var(--surface-soft);
   font-size: 9px;
   font-weight: 700;
 }
 
 .key-revoke:hover:not(:disabled) {
-  border-color: #b96c61;
-  background: #fff0ec;
+  border-color: rgb(255 107 90 / 0.4);
+  background: var(--blocked-wash);
 }
 
 .key-revoke:disabled {
@@ -1012,9 +1008,8 @@
   width: 22px;
   height: 22px;
   place-items: center;
-  border-radius: 50%;
   color: var(--accent);
-  background: #f2e8de;
+  background: var(--pending-wash);
   font-family: var(--mono);
   font-size: 8px;
   font-weight: 750;
@@ -1071,15 +1066,14 @@
   min-height: 45px;
   place-items: center;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  background: #faf9f6;
+  background: var(--surface-soft);
   font-family: var(--mono);
   font-size: 11px;
   font-weight: 700;
 }
 
 .amount-options input:checked + span {
-  color: white;
+  color: var(--bg);
   border-color: var(--accent);
   background: var(--accent);
 }
@@ -1108,17 +1102,16 @@
 }
 
 .pay-badge {
-  color: #4d5d35;
-  border-color: #b3c18f;
-  background: #eef4df;
+  color: var(--signal);
+  border-color: var(--line-strong);
+  background: var(--signal-wash);
 }
 
 .invoice-panel {
   margin-bottom: 18px;
   padding: 18px;
-  border: 1px solid #abb98a;
-  border-radius: 12px;
-  background: #f0f5e4;
+  border: 1px solid var(--line-strong);
+  background: var(--signal-wash);
 }
 
 .invoice-title {
@@ -1129,7 +1122,7 @@
 }
 
 .invoice-title span {
-  color: #667349;
+  color: var(--signal);
   font-family: var(--mono);
   font-size: 8px;
   font-weight: 750;
@@ -1155,15 +1148,14 @@
   grid-template-columns: 0.8fr 1.8fr 0.8fr;
   margin-bottom: 15px;
   overflow: hidden;
-  border: 1px solid #c7d0ad;
-  border-radius: 9px;
-  background: white;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
 }
 
 .invoice-grid > div {
   min-width: 0;
   padding: 14px;
-  border-right: 1px solid #dde3cc;
+  border-right: 1px solid var(--line);
 }
 
 .invoice-grid > div:last-child {
@@ -1202,7 +1194,6 @@
   margin-top: 8px;
   padding: 5px 7px;
   border: 1px solid var(--border);
-  border-radius: 5px;
   cursor: pointer;
   background: transparent;
   font-size: 8px;
@@ -1225,7 +1216,7 @@
   align-items: center;
   gap: 14px;
   padding: 13px 0;
-  border-bottom: 1px solid #ebe8e1;
+  border-bottom: 1px solid var(--line);
   font-size: 10px;
 }
 
@@ -1236,15 +1227,14 @@
 .payment-dot {
   width: 8px;
   height: 8px;
-  border: 1px solid #807d75;
-  border-radius: 50%;
-  background: #d0cdc5;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
 }
 
 .payment-finished,
 .payment-completed,
 .payment-paid {
-  background: #7c9a68;
+  background: var(--signal-wash);
 }
 
 .payment-pending,
@@ -1254,7 +1244,7 @@
 .payment-sending,
 .payment-partially_paid,
 .payment-creating {
-  background: #d9a946;
+  background: var(--pending);
 }
 
 .payment-failed,
@@ -1262,7 +1252,7 @@
 .payment-provider_error,
 .payment-refunded,
 .payment-manual_review {
-  background: #c96d5e;
+  background: var(--blocked);
 }
 
 .payment-list article > div {
@@ -1294,10 +1284,9 @@
 .payment-list article > button {
   padding: 6px 8px;
   border: 1px solid var(--border);
-  border-radius: 6px;
   cursor: pointer;
   color: var(--ink);
-  background: #f2f0ea;
+  background: var(--surface-soft);
   font-size: 8px;
   font-weight: 700;
 }
@@ -1459,7 +1448,7 @@
 
   .invoice-grid > div {
     border-right: 0;
-    border-bottom: 1px solid #dde3cc;
+    border-bottom: 1px solid var(--line);
   }
 
   .invoice-grid > div:last-child {
@@ -1534,7 +1523,6 @@
 .usage-chart-legend i {
   width: 8px;
   height: 8px;
-  border-radius: 2px;
 }
 
 .usage-chart-legend .is-prepaid,
@@ -1562,9 +1550,24 @@
   padding: 18px 0 0;
   border-bottom: 1px solid var(--border);
   background:
-    linear-gradient(to bottom, transparent 24%, var(--border) 25%, transparent 26%),
-    linear-gradient(to bottom, transparent 49%, var(--border) 50%, transparent 51%),
-    linear-gradient(to bottom, transparent 74%, var(--border) 75%, transparent 76%);
+    linear-gradient(
+      to bottom,
+      transparent 24%,
+      var(--border) 25%,
+      transparent 26%
+    ),
+    linear-gradient(
+      to bottom,
+      transparent 49%,
+      var(--border) 50%,
+      transparent 51%
+    ),
+    linear-gradient(
+      to bottom,
+      transparent 74%,
+      var(--border) 75%,
+      transparent 76%
+    );
 }
 
 .usage-day {
@@ -1592,8 +1595,7 @@
   flex-direction: column;
   justify-content: flex-end;
   overflow: hidden;
-  border-radius: 3px 3px 0 0;
-  background: rgb(44 44 44 / 0.035);
+  background: rgb(242 244 245 / 0.04);
 }
 
 .usage-bar-segment {
@@ -1632,17 +1634,17 @@
 }
 
 .console-x402-metrics .is-primary small {
-  color: #bcb9b1;
+  color: var(--ink-2);
 }
 
 .console-x402-metrics .is-ready {
-  border-color: #4e7150;
-  background: #35533d;
+  border-color: var(--line-strong);
+  background: var(--signal-wash);
 }
 
 .console-x402-metrics .is-not-ready {
-  border-color: #4e4740;
-  background: #383430;
+  border-color: var(--line-strong);
+  background: var(--surface-sunken);
 }
 
 .console-x402-boundary {
@@ -1653,8 +1655,7 @@
   margin-bottom: 18px;
   padding: 13px 16px;
   border: 1px solid var(--border);
-  border-radius: 10px;
-  background: #f3f0e9;
+  background: var(--surface-soft);
 }
 
 .console-x402-boundary > div {
@@ -1692,17 +1693,16 @@
   width: 9px;
   height: 9px;
   flex: 0 0 9px;
-  border-radius: 50%;
 }
 
 .x402-runtime-dot.is-ready {
   background: var(--green);
-  box-shadow: 0 0 0 4px rgb(106 143 94 / 0.13);
+  box-shadow: none;
 }
 
 .x402-runtime-dot.is-not-ready {
   background: var(--warning);
-  box-shadow: 0 0 0 4px rgb(180 133 66 / 0.13);
+  box-shadow: none;
 }
 
 .console-x402-history {
@@ -1733,7 +1733,7 @@
   gap: 10px;
   padding: 12px 18px;
   border-bottom: 1px solid var(--border);
-  background: #faf9f6;
+  background: var(--surface-soft);
 }
 
 .x402-history-toolbar label {
@@ -1753,9 +1753,8 @@
   height: 38px;
   padding: 0 10px;
   border: 1px solid var(--border);
-  border-radius: 7px;
   color: var(--ink);
-  background: white;
+  background: var(--surface);
   font-size: 10px;
 }
 
@@ -1765,16 +1764,14 @@
 }
 
 .x402-history-toolbar form input {
-  border-radius: 7px 0 0 7px;
 }
 
 .x402-history-toolbar form button {
   min-width: 105px;
   padding: 0 13px;
   border: 1px solid var(--accent);
-  border-radius: 0 7px 7px 0;
   cursor: pointer;
-  color: white;
+  color: var(--bg);
   background: var(--accent);
   font-size: 9px;
   font-weight: 720;
@@ -1800,7 +1797,7 @@
   padding: 9px 10px;
   border-bottom: 1px solid var(--border);
   color: var(--ink-3);
-  background: #f6f4ef;
+  background: var(--surface-soft);
   font-family: var(--mono);
   font-size: 7px;
   font-weight: 720;
@@ -1814,7 +1811,7 @@
   height: 58px;
   padding: 9px 10px;
   overflow: hidden;
-  border-bottom: 1px solid #ebe8e1;
+  border-bottom: 1px solid var(--line);
   color: var(--ink-2);
   font-size: 9px;
   text-overflow: ellipsis;
@@ -1857,7 +1854,7 @@
 
 .x402-table tbody tr:hover,
 .x402-table tbody tr.is-selected {
-  background: #fcf8f2;
+  background: var(--surface-soft);
 }
 
 .x402-table .is-number {
@@ -1909,7 +1906,6 @@
   gap: 5px;
   padding: 4px 6px;
   border: 1px solid transparent;
-  border-radius: 999px;
   font-family: var(--mono);
   font-size: 7px;
   font-weight: 720;
@@ -1919,37 +1915,36 @@
 .x402-status::before {
   width: 5px;
   height: 5px;
-  border-radius: 50%;
   background: currentColor;
   content: "";
 }
 
 .x402-status.is-settled,
 .x402-status.is-success {
-  color: #356342;
-  border-color: #c8dac2;
-  background: #edf5e8;
+  color: var(--signal);
+  border-color: var(--line);
+  background: var(--signal-wash);
 }
 
 .x402-status.is-pending,
 .x402-status.is-progress {
-  color: #8a641f;
-  border-color: #e6d4af;
-  background: #fbf5e7;
+  color: var(--pending);
+  border-color: rgb(245 181 68 / 0.4);
+  background: var(--pending-wash);
 }
 
 .x402-status.is-review_required,
 .x402-status.is-rejected,
 .x402-status.is-danger {
-  color: #93463b;
-  border-color: #e3c7c1;
-  background: #fff1ed;
+  color: var(--blocked);
+  border-color: var(--line);
+  background: var(--blocked-wash);
 }
 
 .x402-status.is-muted {
-  color: #77736a;
-  border-color: #ddd9d0;
-  background: #f4f2ed;
+  color: var(--ink-3);
+  border-color: var(--line);
+  background: var(--surface-soft);
 }
 
 .x402-no-value {
@@ -1960,10 +1955,9 @@
 .x402-row-action {
   padding: 5px 7px;
   border: 1px solid var(--border);
-  border-radius: 5px;
   cursor: pointer;
   color: var(--ink);
-  background: white;
+  background: var(--surface);
   font-size: 8px;
   font-weight: 700;
 }
@@ -1976,7 +1970,7 @@
   gap: 14px;
   padding: 9px 18px;
   border-top: 1px solid var(--border);
-  background: #faf9f6;
+  background: var(--surface-soft);
 }
 
 .x402-pagination > span {
@@ -1993,9 +1987,8 @@
 .x402-pagination button {
   padding: 6px 9px;
   border: 1px solid var(--border);
-  border-radius: 6px;
   cursor: pointer;
-  background: white;
+  background: var(--surface);
   font-size: 8px;
   font-weight: 700;
 }
@@ -2008,15 +2001,14 @@
 .console-x402-detail .panel-heading > button {
   padding: 6px 8px;
   border: 1px solid var(--border);
-  border-radius: 6px;
   color: var(--ink-2);
-  background: white;
+  background: var(--surface);
 }
 
 .x402-detail-summary {
   padding: 16px 18px;
   border-bottom: 1px solid var(--border);
-  background: #faf9f6;
+  background: var(--surface-soft);
 }
 
 .x402-detail-title {
@@ -2048,8 +2040,7 @@
   margin: 0;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  background: white;
+  background: var(--surface);
 }
 
 .x402-detail-summary dl > div {
@@ -2112,7 +2103,6 @@
   height: 24px;
   place-items: center;
   border: 1px solid var(--border);
-  border-radius: 7px;
   color: var(--accent);
   font-family: var(--mono);
   font-size: 8px;
@@ -2132,7 +2122,7 @@
 
 .x402-evidence-grid dl > div {
   padding: 10px 0;
-  border-bottom: 1px solid #ebe8e1;
+  border-bottom: 1px solid var(--line);
 }
 
 .x402-evidence-grid dl > div:last-child {
@@ -2157,10 +2147,9 @@
   width: fit-content;
   padding: 5px 7px;
   border: 1px solid var(--border);
-  border-radius: 5px;
   cursor: pointer;
   color: var(--ink-2);
-  background: #faf9f6;
+  background: var(--surface-soft);
   font-size: 8px;
   font-weight: 700;
 }
@@ -2179,23 +2168,22 @@
   margin: 12px 0 0;
   padding: 10px 11px;
   border: 1px solid var(--border);
-  border-radius: 7px;
   color: var(--ink-2);
-  background: #f7f5f0;
+  background: var(--surface-soft);
   font-size: 9px;
   line-height: 1.55;
 }
 
 .x402-evidence-note.is-confirmed {
-  color: #3e5c40;
-  border-color: #c8dac2;
-  background: #f0f6ec;
+  color: var(--signal);
+  border-color: var(--line);
+  background: var(--surface-soft);
 }
 
 .x402-evidence-note.is-pending {
-  color: #7f5e26;
-  border-color: #e6d4af;
-  background: #fbf6ea;
+  color: var(--pending);
+  border-color: rgb(245 181 68 / 0.4);
+  background: var(--pending-wash);
 }
 
 @media (max-width: 1120px) {

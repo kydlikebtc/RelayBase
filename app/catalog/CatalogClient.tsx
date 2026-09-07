@@ -1967,7 +1967,7 @@ export default function CatalogClient({ locale }: { locale: Locale }) {
         aria-labelledby="marketplace-title"
       >
         <div className="marketplace-masthead-copy">
-          <p className="section-kicker">RELAYBASE / DATA MARKETPLACE</p>
+          <p className="page-kicker">RUNTIME CATALOG</p>
           <h1 id="marketplace-title">{c.mastheadTitle}</h1>
           <p>{c.mastheadBody}</p>
           <dl className="marketplace-market-facts" aria-label={c.marketOverview}>
