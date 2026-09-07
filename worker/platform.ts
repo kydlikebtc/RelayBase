@@ -40,6 +40,15 @@ import {
 } from "./lib/balance-sql";
 import { trustedIdentityHeadersActive } from "./lib/identity-headers";
 import { TtlCache, parseTtlMs } from "./lib/ttl-cache";
+import { isCapabilityId } from "./lib/capability-id";
+import {
+  extractItems,
+  extractNextCursor,
+  parseCapabilityAliases,
+  parseCapabilityPagination,
+  translateCapabilityInput,
+  translateCapabilityQuery,
+} from "./lib/capability-io";
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -1358,6 +1367,15 @@ export async function handlePlatformRequest(
       request.method === "POST"
     ) {
       return await handleX402Batch(request, env, ctx, requestId);
+    }
+
+    if (url.pathname.startsWith("/v1/c/")) {
+      return await handleCapabilityRequest(
+        request,
+        env,
+        requestId,
+        decodeURIComponent(url.pathname.slice("/v1/c/".length)),
+      );
     }
 
     if (url.pathname.startsWith("/v1/")) {
@@ -7698,12 +7716,160 @@ async function routedUpstreamFetch(input: {
   );
 }
 
+type CapabilityRecord = {
+  id: string;
+  platform: string;
+  category: string;
+  endpoint_path: string;
+  http_method: "GET" | "POST";
+  status: "draft" | "published" | "deprecated";
+  input_aliases_json: string;
+  pagination_json: string | null;
+  response_items_path: string | null;
+  revision: number;
+};
+
+// 能力入口。解析能力、翻译输入别名、复用目录执行路径，最后套上能力信封。
+// 这里不新增任何计费语义：鉴权、幂等、限流与扣款全部来自 executeCatalogRequest。
+async function handleCapabilityRequest(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+  capabilityId: string,
+): Promise<Response> {
+  const { readiness, db } = await catalogRequestPreflight(request, env);
+  // 形状不合法的 id 与不存在的能力对调用方是同一件事，不泄露 id 规则细节。
+  if (!isCapabilityId(capabilityId)) throw capabilityNotFound();
+  assertReconciliationFresh(readiness);
+
+  let capability: CapabilityRecord | null;
+  try {
+    capability = await db
+      .prepare(
+        `SELECT id, platform, category, endpoint_path, http_method, status,
+                input_aliases_json, pagination_json, response_items_path,
+                revision
+           FROM capabilities
+          WHERE id = ?`,
+      )
+      .bind(capabilityId)
+      .first<CapabilityRecord>();
+  } catch {
+    throw new PlatformError(
+      503,
+      "service_not_ready",
+      "数据库迁移尚未完成，已停止真实调用与扣费。",
+    );
+  }
+  if (!capability) throw capabilityNotFound();
+  if (capability.status === "deprecated") {
+    throw new PlatformError(
+      410,
+      "capability_deprecated",
+      "该能力已下架，请改用目录中现行的能力。",
+    );
+  }
+  // 草稿只对管理端可见；对调用方与不存在无异。
+  if (capability.status !== "published") throw capabilityNotFound();
+
+  const aliases = parseCapabilityAliases(
+    safeStoredJson(capability.input_aliases_json),
+  );
+  const requestUrl = new URL(request.url);
+  const query = translateCapabilityQuery(requestUrl.searchParams, aliases);
+  if (!query.ok) throw capabilityInputConflict(query.conflict);
+
+  // 端点 URL：路径换成目录路径，查询换成翻译后的参数。executeCatalogRequest 用它
+  // 解析目录、校验输入、拼上游 URL 并记账，因此计量记录的始终是端点而非能力。
+  const endpointUrl = new URL(capability.endpoint_path, requestUrl);
+  endpointUrl.search = query.params.toString();
+
+  const pagination = parseCapabilityPagination(
+    safeStoredJson(capability.pagination_json),
+  );
+  const summary = {
+    id: capability.id,
+    platform: capability.platform,
+    category: capability.category,
+    revision: capability.revision,
+  };
+
+  return await executeCatalogRequest(
+    request,
+    env,
+    requestId,
+    db,
+    readiness,
+    endpointUrl,
+    {
+      translateBody: (parsed) => {
+        if (!isPlainRecord(parsed)) return parsed;
+        const translated = translateCapabilityInput(parsed, aliases);
+        if (!translated.ok) throw capabilityInputConflict(translated.conflict);
+        return translated.input;
+      },
+      respond: (payload, headers) =>
+        jsonResponse(
+          {
+            success: true,
+            capability: summary,
+            data: payload,
+            // 提取失败一律 null。空数组会让调用方的分页循环把"读不出来"误当成
+            // "读完了"，那是静默的数据丢失。
+            items: extractItems(payload, capability.response_items_path),
+            nextCursor: extractNextCursor(payload, pagination),
+          },
+          200,
+          requestId,
+          headers,
+        ),
+    },
+  );
+}
+
+function capabilityNotFound(): PlatformError {
+  return new PlatformError(
+    404,
+    "capability_not_found",
+    "该能力不存在或尚未发布。",
+  );
+}
+
+function capabilityInputConflict(target: string): PlatformError {
+  return new PlatformError(
+    400,
+    "capability_input_conflict",
+    `多个能力输入字段映射到同一个上游参数 ${target}；请只提供其中一个。`,
+  );
+}
+
 async function handleProxyRequest(
   request: Request,
   env: PlatformEnv,
   ctx: WorkerExecutionContext,
   requestId: string,
 ): Promise<Response> {
+  const { readiness, db } = await catalogRequestPreflight(request, env);
+  const url = new URL(request.url);
+  validateProxyPath(url.pathname);
+  assertReconciliationFresh(readiness);
+  return await executeCatalogRequest(
+    request,
+    env,
+    requestId,
+    db,
+    readiness,
+    url,
+  );
+}
+
+// 目录调用的共同前置检查：就绪性、数据库与 HTTP 方法。
+// 对账新鲜度刻意不在这里检查——原实现把它放在路径校验之后，畸形路径应当先得到
+// 400 而不是 503，调用方按同样顺序自行调用 assertReconciliationFresh。
+async function catalogRequestPreflight(
+  request: Request,
+  env: PlatformEnv,
+): Promise<{ readiness: OperationalReadiness; db: D1Database }> {
   const readiness = await operationalReadiness(env);
   if (
     readiness.capabilities.databaseConfigured &&
@@ -7754,9 +7920,10 @@ async function handleProxyRequest(
       "仅支持目录中经过审核的 GET 或 POST 数据查询。",
     );
   }
+  return { readiness, db };
+}
 
-  const url = new URL(request.url);
-  validateProxyPath(url.pathname);
+function assertReconciliationFresh(readiness: OperationalReadiness): void {
   if (!readiness.capabilities.reconciliationRecent) {
     throw new PlatformError(
       503,
@@ -7764,14 +7931,6 @@ async function handleProxyRequest(
       "自动对账心跳已超时，已停止真实调用与扣费。",
     );
   }
-  return await executeCatalogRequest(
-    request,
-    env,
-    requestId,
-    db,
-    readiness,
-    url,
-  );
 }
 
 // 目录端点的共用执行路径：目录解析、输入校验、鉴权、幂等、限流、扣费、
@@ -7780,6 +7939,14 @@ async function handleProxyRequest(
 //
 // 调用方只负责就绪性检查与请求解析；鉴权刻意留在目录解析之后，与提取前的
 // 顺序一致——先解析目录再鉴权，未启用端点返回 404 而不是 401。
+type CatalogExecutionHooks = {
+  // 在 validateCatalogProxyInputs 之前重写已解析的 POST 请求体。能力入口用它把
+  // 能力字段名翻译成上游参数名；翻译冲突以 PlatformError 抛出。
+  translateBody?: (parsed: unknown) => unknown;
+  // 装配成功响应。默认是 /v1/{path} 的 { success, data } 信封。
+  respond?: (payload: unknown, headers: Headers) => Response;
+};
+
 async function executeCatalogRequest(
   request: Request,
   env: PlatformEnv,
@@ -7787,6 +7954,7 @@ async function executeCatalogRequest(
   db: D1Database,
   readiness: OperationalReadiness,
   url: URL,
+  hooks: CatalogExecutionHooks = {},
 ): Promise<Response> {
   let catalog: CatalogRecord | null;
   try {
@@ -7989,6 +8157,11 @@ async function executeCatalogRequest(
         "invalid_json",
         "POST 请求体必须是有效的 JSON 对象或数组。",
       );
+    }
+    if (hooks.translateBody) {
+      parsedUpstreamBody = hooks.translateBody(parsedUpstreamBody);
+      // 转发给上游的是翻译后的字节，而不是调用方发来的原始字节。
+      upstreamBody = JSON.stringify(parsedUpstreamBody);
     }
   }
   validateCatalogProxyInputs(url, parsedUpstreamBody);
@@ -8503,6 +8676,7 @@ async function executeCatalogRequest(
     );
   }
 
+  if (hooks.respond) return hooks.respond(successfulPayload, responseHeaders);
   return jsonResponse(
     {
       success: true,

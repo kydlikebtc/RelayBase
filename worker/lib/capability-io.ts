@@ -194,3 +194,48 @@ export function extractNextCursor(
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   return null;
 }
+
+export type CapabilityQueryTranslation =
+  | { ok: true; params: URLSearchParams }
+  | { ok: false; conflict: string };
+
+/**
+ * The query-string sibling of {@link translateCapabilityInput}.
+ *
+ * A record cannot represent `?id=1&id=2`, and collapsing repeats would change
+ * what the caller asked for, so query translation renames keys in place and
+ * keeps order and multiplicity intact. Repeating one capability field is
+ * allowed; two different fields landing on one upstream parameter is the same
+ * conflict the record translator reports.
+ */
+export function translateCapabilityQuery(
+  params: URLSearchParams,
+  aliases: CapabilityInputAliases,
+): CapabilityQueryTranslation {
+  const translated = new URLSearchParams();
+  const claimedBy = new Map<string, string>();
+
+  for (const [field, value] of params) {
+    const target = Object.hasOwn(aliases, field) ? aliases[field] : field;
+    const owner = claimedBy.get(target);
+    if (owner !== undefined && owner !== field) {
+      return { ok: false, conflict: target };
+    }
+    claimedBy.set(target, field);
+    translated.append(target, value);
+  }
+
+  return { ok: true, params: translated };
+}
+
+/** Read stored `input_aliases_json` into a plain alias map. */
+export function parseCapabilityAliases(raw: unknown): CapabilityInputAliases {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+  const aliases: Record<string, string> = {};
+  for (const [field, target] of Object.entries(raw)) {
+    if (typeof target === "string" && target.length > 0) {
+      aliases[field] = target;
+    }
+  }
+  return aliases;
+}

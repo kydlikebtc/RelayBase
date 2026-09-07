@@ -4,9 +4,11 @@ import {
   extractItems,
   extractNextCursor,
   parseCapabilityPagination,
+  parseCapabilityAliases,
   parseJsonPath,
   readJsonPath,
   translateCapabilityInput,
+  translateCapabilityQuery,
 } from "../../worker/lib/capability-io.ts";
 
 test("translates capability field names into upstream parameter names", () => {
@@ -184,4 +186,56 @@ test("translation does not mutate its inputs", () => {
   translateCapabilityInput(input, aliases);
   assert.deepEqual(input, { userId: "a" });
   assert.deepEqual(aliases, { userId: "sec_user_id" });
+});
+
+test("query translation renames keys while keeping order and repeats", () => {
+  const result = translateCapabilityQuery(
+    new URLSearchParams("handle=a&handle=b&count=2"),
+    { handle: "unique_id" },
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.params.toString(), "unique_id=a&unique_id=b&count=2");
+});
+
+test("repeating one capability field is not a conflict", () => {
+  const result = translateCapabilityQuery(
+    new URLSearchParams("ids=1&ids=2"),
+    { ids: "aweme_ids" },
+  );
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.params.getAll("aweme_ids"), ["1", "2"]);
+});
+
+test("two capability fields on one upstream parameter conflict", () => {
+  const result = translateCapabilityQuery(
+    new URLSearchParams("handle=a&unique_id=b"),
+    { handle: "unique_id" },
+  );
+  assert.deepEqual(result, { ok: false, conflict: "unique_id" });
+});
+
+test("an unaliased query passes through untouched", () => {
+  const result = translateCapabilityQuery(new URLSearchParams("a=1&b=2"), {});
+  assert.equal(result.ok, true);
+  assert.equal(result.params.toString(), "a=1&b=2");
+});
+
+test("query translation does not mutate its input", () => {
+  const params = new URLSearchParams("handle=a");
+  translateCapabilityQuery(params, { handle: "unique_id" });
+  assert.equal(params.toString(), "handle=a");
+});
+
+test("stored aliases keep only string targets", () => {
+  assert.deepEqual(
+    parseCapabilityAliases({ a: "x", b: 3, c: "", d: null, e: "y" }),
+    { a: "x", e: "y" },
+    "a non-string alias target would rename a field to undefined",
+  );
+});
+
+test("malformed alias configuration reads as no aliases", () => {
+  assert.deepEqual(parseCapabilityAliases(null), {});
+  assert.deepEqual(parseCapabilityAliases(["a"]), {});
+  assert.deepEqual(parseCapabilityAliases("handle"), {});
 });

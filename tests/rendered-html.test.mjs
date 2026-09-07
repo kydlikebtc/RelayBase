@@ -10831,3 +10831,221 @@ test("a swept executing batch still persists its receipt when the in-flight exec
   assert.equal(lookup.status, 200);
   assert.equal((await lookup.json()).batch.status, "succeeded");
 });
+
+function seedCapabilityFixture(db, t, overrides = {}) {
+  const env = baseEnv({
+    DB: db,
+    READINESS_CACHE_TTL_MS: "10000",
+    RESELLER_AUTHORIZED: "true",
+    LEGAL_REVIEW_CONFIRMED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
+    UPSTREAM_API_KEY: "upstream-secret",
+    CATALOG_SYNC_SECRET: "catalog-sync-secret-32-characters-minimum",
+    RECONCILIATION_SECRET: "reconcile-secret-32-characters-minimum",
+  });
+  const path = "/v1/tiktok/web/fetch_user_profile";
+  enableCatalogEndpoint(db, path, 2000, "upstream-secret");
+  db.raw
+    .prepare(
+      `INSERT INTO capabilities
+       (id, platform, category, endpoint_path, http_method, status,
+        input_aliases_json, pagination_json, response_items_path,
+        summary_zh, summary_en, revision)
+       VALUES (?, 'tiktok', 'profile_creator', ?, 'GET', ?, ?, ?, ?,
+               '抖音用户资料', 'TikTok user profile', 1)`,
+    )
+    .run(
+      overrides.id ?? "tiktok.user.profile",
+      path,
+      overrides.status ?? "published",
+      overrides.aliases ?? JSON.stringify({ handle: "uniqueId" }),
+      overrides.pagination ??
+        JSON.stringify({
+          requestField: "cursor",
+          responseCursorPath: "next_cursor",
+          pageSizeField: "count",
+          pageSizeMax: 50,
+        }),
+      overrides.itemsPath === undefined ? "items" : overrides.itemsPath,
+    );
+  return { env, path };
+}
+
+async function capabilityCaller(db, env, t, upstream) {
+  const setupEnv = { ...env };
+  const createKey = await fetchWorker(
+    "/api/keys",
+    {
+      method: "POST",
+      headers: signedInHeaders(),
+      body: JSON.stringify({ label: "capability key" }),
+    },
+    setupEnv,
+  );
+  assert.equal(createKey.status, 201);
+  const created = (await createKey.json()).key;
+  const user = db.raw
+    .prepare("SELECT id FROM users WHERE email = ?")
+    .get("owner@example.com");
+  db.raw
+    .prepare(
+      `INSERT INTO balance_ledger
+       (id, user_id, entry_type, delta_usd_micros, reference_id)
+       VALUES ('seed-capability', ?, 'test_credit', 1000000, 'test:capability')`,
+    )
+    .run(user.id);
+  const upstreamUrls = [];
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    upstreamUrls.push(input instanceof Request ? input.url : String(input));
+    return upstream(input, init);
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+  return {
+    upstreamUrls,
+    call: (target, key, init = {}) =>
+      fetchWorker(
+        target,
+        {
+          ...init,
+          headers: {
+            authorization: `Bearer ${created.secret}`,
+            "idempotency-key": key,
+            ...(init.headers ?? {}),
+          },
+        },
+        env,
+      ),
+  };
+}
+
+test("resolves a published capability, bills it as the endpoint and shapes the response", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const { env, path } = seedCapabilityFixture(db, t);
+  const { call, upstreamUrls } = await capabilityCaller(db, env, t, async () =>
+    Response.json({
+      code: 200,
+      request_id: "upstream-req",
+      data: { items: [{ id: "a" }, { id: "b" }], next_cursor: "cursor-2" },
+    }),
+  );
+
+  const response = await call(
+    "/v1/c/tiktok.user.profile?handle=budget",
+    "capability-001",
+  );
+  const body = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.equal(body.success, true);
+  assert.equal(body.capability.id, "tiktok.user.profile");
+  assert.equal(body.capability.platform, "tiktok");
+  assert.deepEqual(body.data, {
+    items: [{ id: "a" }, { id: "b" }],
+    next_cursor: "cursor-2",
+  });
+  assert.deepEqual(body.items, [{ id: "a" }, { id: "b" }]);
+  assert.equal(body.nextCursor, "cursor-2");
+
+  // The alias must reach the upstream as the upstream's own parameter name.
+  assert.equal(upstreamUrls.length, 1);
+  assert.match(upstreamUrls[0], /uniqueId=budget/);
+  assert.doesNotMatch(upstreamUrls[0], /handle=/);
+
+  // Billing is recorded against the endpoint, at the endpoint's price.
+  const billed = db.raw
+    .prepare(
+      `SELECT upstream_path AS path, cost_usd_micros AS cost,
+              status_code AS status
+       FROM api_calls ORDER BY rowid DESC LIMIT 1`,
+    )
+    .get();
+  assert.deepEqual({ ...billed }, { path, cost: 2000, status: 200 });
+});
+
+test("hides unpublished capabilities and separates deprecated from missing", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const { env } = seedCapabilityFixture(db, t, { status: "draft" });
+  db.raw
+    .prepare(
+      `INSERT INTO capabilities
+       (id, platform, category, endpoint_path, http_method, status,
+        input_aliases_json, summary_zh, summary_en, revision)
+       VALUES ('tiktok.user.retired', 'tiktok', 'profile_creator', ?,
+               'GET', 'deprecated', '{}', '旧能力', 'Retired', 1)`,
+    )
+    .run("/v1/tiktok/web/fetch_user_profile");
+  const { call } = await capabilityCaller(db, env, t, async () =>
+    Response.json({ code: 200, data: {}, request_id: "r" }),
+  );
+
+  const draft = await call("/v1/c/tiktok.user.profile?handle=x", "capability-010");
+  assert.equal(draft.status, 404);
+  assert.equal((await draft.json()).error.code, "capability_not_found");
+
+  const deprecated = await call("/v1/c/tiktok.user.retired", "capability-011");
+  assert.equal(deprecated.status, 410);
+  assert.equal((await deprecated.json()).error.code, "capability_deprecated");
+
+  const missing = await call("/v1/c/tiktok.user.absent", "capability-012");
+  assert.equal(missing.status, 404);
+  assert.equal((await missing.json()).error.code, "capability_not_found");
+
+  const malformed = await call("/v1/c/NotACapabilityId", "capability-013");
+  assert.equal(malformed.status, 404);
+  assert.equal((await malformed.json()).error.code, "capability_not_found");
+});
+
+test("reports unextractable items and cursors as null rather than empty", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const { env } = seedCapabilityFixture(db, t, {
+    itemsPath: null,
+    pagination: null,
+  });
+  const { call } = await capabilityCaller(db, env, t, async () =>
+    Response.json({ code: 200, request_id: "r", data: { uniqueId: "solo" } }),
+  );
+
+  const response = await call(
+    "/v1/c/tiktok.user.profile?handle=solo",
+    "capability-020",
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body.data, { uniqueId: "solo" });
+  assert.equal(body.items, null, "a missing item path is not an empty list");
+  assert.equal(body.nextCursor, null);
+});
+
+test("rejects capability input that collides on one upstream parameter", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const { env } = seedCapabilityFixture(db, t);
+  const { call, upstreamUrls } = await capabilityCaller(db, env, t, async () =>
+    Response.json({ code: 200, data: {}, request_id: "r" }),
+  );
+
+  const response = await call(
+    "/v1/c/tiktok.user.profile?handle=one&uniqueId=two",
+    "capability-030",
+  );
+  assert.equal(response.status, 400);
+  assert.equal(
+    (await response.json()).error.code,
+    "capability_input_conflict",
+  );
+  assert.equal(upstreamUrls.length, 0, "a conflict must not reach upstream");
+  assert.equal(
+    db.raw.prepare("SELECT COUNT(*) AS n FROM api_calls").get().n,
+    0,
+    "a rejected capability call must not be billed",
+  );
+});
