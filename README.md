@@ -342,6 +342,17 @@ curl -X PATCH "$APP_URL/api/admin/catalog" \
 批量操作使用服务端冻结的预览计划和独立幂等键。目录代次、端点 revision、成本、
 分类、上游凭据或快照发生变化时，整批操作返回 `409`，不会部分提交。
 
+### 能力层（建设中，尚未接线）
+
+迁移 `0022` 新增 `capabilities` 表：能力是面向 Agent 的公开名字，未来由
+`/v1/c/{capabilityId}` 解析。一个端点可以挂多个能力作为别名或版本，所以主键是
+能力 id 而不是路径；`endpoint_path` 对目录级联，`status` 默认 `draft`，`revision`
+沿用既有的 `expectedRevision` 乐观并发。
+
+**当前没有任何路由读取这张表，运行时行为与迁移前完全一致。** 能力 id 的形状规则
+在 `worker/lib/capability-id.ts`，同一套规则以 GLOB 形式写进列的 CHECK 约束；
+SQLite 没有 REGEXP，所以 SQL 守卫比应用层校验更宽松，应用层始终是权威。
+
 ## 客户调用
 
 ```bash
