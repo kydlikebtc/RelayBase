@@ -7764,6 +7764,30 @@ async function handleProxyRequest(
       "自动对账心跳已超时，已停止真实调用与扣费。",
     );
   }
+  return await executeCatalogRequest(
+    request,
+    env,
+    requestId,
+    db,
+    readiness,
+    url,
+  );
+}
+
+// 目录端点的共用执行路径：目录解析、输入校验、鉴权、幂等、限流、扣费、
+// 上游调用与响应装配。/v1/{path} 与能力入口共用同一份实现，两者的计费与
+// 幂等语义因此不会分叉。
+//
+// 调用方只负责就绪性检查与请求解析；鉴权刻意留在目录解析之后，与提取前的
+// 顺序一致——先解析目录再鉴权，未启用端点返回 404 而不是 401。
+async function executeCatalogRequest(
+  request: Request,
+  env: PlatformEnv,
+  requestId: string,
+  db: D1Database,
+  readiness: OperationalReadiness,
+  url: URL,
+): Promise<Response> {
   let catalog: CatalogRecord | null;
   try {
     catalog = await db
