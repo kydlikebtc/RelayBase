@@ -531,6 +531,10 @@ function endpointEvidenceRecord(
 
 // 只返回 verified 行。未验证的端点继续走 endpointCapabilityFor 内的 OpenAPI
 // 推断，这是运营在端点被确认之前获得分页提示的唯一来源。
+// 证据读取失败必须失败关闭。降级为空证据不是"回到删除常量之前"——常量是编译期
+// 的，不可能读不到；而空证据会让已验证的 native_batch 端点在 x402 报价里被当成
+// fanout，按 requests.length 而不是目标数计费，交付 50 条数据只收 1 个单位。
+// 因此这里让错误上抛，由调用方决定：计费路径拒绝服务，展示路径自行降级。
 async function endpointEvidenceMap(
   env: PlatformEnv,
 ): Promise<EndpointEvidenceMap> {
@@ -561,15 +565,33 @@ async function endpointEvidenceMap(
         }
         return evidence;
       } catch (error) {
-        // 迁移尚未跑到 0019/0023 的库（例如只应用了部分迁移的测试）没有这张
-        // 表。降级为空证据与删除常量前的行为一致：一切回落到推断与 direct。
+        // TtlCache 在 reject 时清除条目，所以失败不会被缓存住 5 秒。
         console.error("endpoint capability evidence unavailable", {
           error: error instanceof Error ? error.message : String(error),
         });
-        return EMPTY_ENDPOINT_EVIDENCE;
+        throw new PlatformError(
+          503,
+          "service_not_ready",
+          "能力证据表不可读，已停止真实调用与扣费。",
+        );
       }
     },
   );
+}
+
+// 只读展示用。后台目录列表在半迁移的库上应当仍能打开，此时能力列显示为推断值；
+// 这条路径不计费，因此降级是安全的。计费路径必须用 endpointEvidenceMap。
+async function endpointEvidenceMapForDisplay(
+  env: PlatformEnv,
+): Promise<EndpointEvidenceMap> {
+  try {
+    return await endpointEvidenceMap(env);
+  } catch (error) {
+    console.error("endpoint capability evidence unavailable", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return EMPTY_ENDPOINT_EVIDENCE;
+  }
 }
 
 function collectCapabilityInputFields(
@@ -1063,9 +1085,9 @@ export async function handlePlatformRequest(
         request,
         env,
         requestId,
-        decodeURIComponent(
+        decodedPathSegment(
           url.pathname.slice("/api/admin/capabilities/".length),
-        ),
+        ) ?? "",
       );
     }
 
@@ -1081,9 +1103,9 @@ export async function handlePlatformRequest(
         request,
         env,
         requestId,
-        decodeURIComponent(
+        decodedPathSegment(
           url.pathname.slice("/api/capabilities/".length),
-        ),
+        ) ?? "",
       );
     }
 
@@ -1431,7 +1453,7 @@ export async function handlePlatformRequest(
         request,
         env,
         requestId,
-        decodeURIComponent(url.pathname.slice("/v1/c/".length)),
+        decodedPathSegment(url.pathname.slice("/v1/c/".length)) ?? "",
       );
     }
 
@@ -7884,6 +7906,16 @@ async function handleCapabilityRequest(
   );
 }
 
+// URL 里的畸形百分号转义会让 decodeURIComponent 抛 URIError；那不是内部错误，
+// 而是一个不可能存在的 id，必须按"找不到"处理而不是 500。
+function decodedPathSegment(raw: string): string | null {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+}
+
 function capabilityNotFound(): PlatformError {
   return new PlatformError(
     404,
@@ -8074,9 +8106,12 @@ async function executeCatalogRequest(
                 (SELECT target_count || pagination_unit_count
                  FROM upstream_request_attempts LIMIT 1)
                   AS _upstream_attempt_metrics_schema,
-                (SELECT execution_mode || evidence_status
+                (SELECT execution_mode || evidence_status ||
+                        COALESCE(evidence_http_method, '')
                  FROM endpoint_capabilities LIMIT 1)
                   AS _endpoint_capabilities_schema,
+                (SELECT status || endpoint_path FROM capabilities LIMIT 1)
+                  AS _capabilities_schema,
                 (SELECT planned_requests || status
                  FROM upstream_capacity_leases LIMIT 1)
                   AS _upstream_capacity_leases_schema,
@@ -10037,26 +10072,67 @@ function capabilityPublicRequestBody(
   return rename(filtered);
 }
 
-function capabilityCodeExamples(
-  request: Request,
-  capability: PublicCapabilityRow,
+// 从公开输入结构里取示例字段名。POST 的字段在 requestBody 的 properties 里，
+// 不在 parameters 里；用 query 参数拼 POST 请求体会给出一个调用方照抄就报错的例子。
+function capabilityExampleFields(
   parameters: unknown,
-) {
-  const origin = new URL(request.url).origin;
-  const target = `${origin}/v1/c/${capability.id}`;
-  const fields = (Array.isArray(parameters) ? parameters : [])
+  requestBody: unknown,
+  isPost: boolean,
+): string[] {
+  if (isPost) {
+    const schema = capabilityRequestBodySchema(requestBody);
+    const properties =
+      isPlainRecord(schema) && isPlainRecord(schema.properties)
+        ? Object.keys(schema.properties)
+        : [];
+    if (properties.length > 0) return properties.slice(0, 3);
+  }
+  return (Array.isArray(parameters) ? parameters : [])
     .filter(
       (parameter) =>
         isPlainRecord(parameter) &&
-        parameter.in === "query" &&
+        (isPost || parameter.in === "query") &&
         typeof parameter.name === "string",
     )
     .slice(0, 3)
     .map((parameter) => String((parameter as Record<string, unknown>).name));
+}
+
+// requestBody 的形状是 { content: { "application/json": { schema } } }，
+// 但公开过滤后也可能已经是 schema 本身。
+function capabilityRequestBodySchema(requestBody: unknown): unknown {
+  if (!isPlainRecord(requestBody)) return null;
+  if (isPlainRecord(requestBody.properties)) return requestBody;
+  if (isPlainRecord(requestBody.schema)) {
+    return capabilityRequestBodySchema(requestBody.schema) ?? requestBody.schema;
+  }
+  if (isPlainRecord(requestBody.content)) {
+    for (const media of Object.values(requestBody.content)) {
+      const schema = capabilityRequestBodySchema(media);
+      if (schema !== null) return schema;
+    }
+  }
+  return null;
+}
+
+function capabilityCodeExamples(
+  request: Request,
+  capability: PublicCapabilityRow,
+  parameters: unknown,
+  requestBody: unknown,
+) {
+  const origin = new URL(request.url).origin;
+  const target = `${origin}/v1/c/${capability.id}`;
+  const isPostMethod = capability.http_method === "POST";
+  const fields = capabilityExampleFields(
+    parameters,
+    requestBody,
+    isPostMethod,
+  );
   const query = fields.map((field) => `${field}=<${field}>`).join("&");
   const url = query.length > 0 ? `${target}?${query}` : target;
   const body = Object.fromEntries(fields.map((field) => [field, `<${field}>`]));
-  const isPost = capability.http_method === "POST";
+  const isPost = isPostMethod;
   return {
     curl: isPost
       ? [
@@ -10254,6 +10330,9 @@ async function handleCapabilityDetail(
   const parameters = documented
     ? capabilityPublicParameters(endpoint.parameters, byUpstream)
     : null;
+  const requestBody = documented
+    ? capabilityPublicRequestBody(endpoint.requestBody, byUpstream)
+    : null;
   const pagination = parseCapabilityPagination(
     safeStoredJson(capability.pagination_json),
   );
@@ -10275,9 +10354,7 @@ async function handleCapabilityDetail(
       },
       input: {
         parameters,
-        requestBody: documented
-          ? capabilityPublicRequestBody(endpoint.requestBody, byUpstream)
-          : null,
+        requestBody,
       },
       response: {
         contentType: "application/json",
@@ -10287,7 +10364,12 @@ async function handleCapabilityDetail(
           "成功时返回 { success, capability, data, items, nextCursor }；" +
           "items 与 nextCursor 无法从上游响应中提取时为 null，不会伪造成空数组。",
       },
-      examples: capabilityCodeExamples(request, capability, parameters),
+      examples: capabilityCodeExamples(
+        request,
+        capability,
+        parameters,
+        requestBody,
+      ),
     },
     200,
     requestId,
@@ -10476,6 +10558,7 @@ async function handleAdminCapabilityList(
 
 async function insertCapabilityDraft(
   db: D1Database,
+  request: Request,
   requestId: string,
   draft: {
     id: string;
@@ -10489,6 +10572,7 @@ async function insertCapabilityDraft(
     responseItemsPath: string | null;
     summaryZh: string;
     summaryEn: string;
+    derived: boolean;
   },
 ): Promise<Response> {
   const inserted = await db
@@ -10528,6 +10612,17 @@ async function insertCapabilityDraft(
       "能力写入后无法读回。",
     );
   }
+  await writeAdminAudit(db, request, {
+    action: "capability.create",
+    targetType: "capability",
+    targetId: draft.id,
+    details: {
+      endpointPath: draft.endpointPath,
+      httpMethod: draft.httpMethod,
+      status: draft.status,
+      derived: draft.derived,
+    },
+  });
   return jsonResponse({ capability: adminCapabilityShape(row) }, 201, requestId);
 }
 
@@ -10557,7 +10652,8 @@ async function handleAdminCapabilityCreate(
     capabilityText(body.endpointPath, "endpointPath", 512),
   );
   await assertCapabilityEndpoint(db, endpointPath, httpMethod);
-  return await insertCapabilityDraft(db, requestId, {
+  return await insertCapabilityDraft(db, request, requestId, {
+    derived: false,
     id,
     platform: capabilityText(body.platform, "platform", 120),
     category: capabilityText(body.category, "category", 120),
@@ -10631,7 +10727,8 @@ async function handleAdminCapabilityDraftFromEndpoint(
     );
   }
   const summary = endpoint.summary ?? endpoint.path;
-  return await insertCapabilityDraft(db, requestId, {
+  return await insertCapabilityDraft(db, request, requestId, {
+    derived: true,
     id,
     platform: endpoint.platform,
     category,
@@ -10736,6 +10833,17 @@ async function handleAdminCapabilityUpdate(
   }
   const row = await adminCapabilityRecord(db, capabilityId);
   if (!row) throw capabilityNotFound();
+  await writeAdminAudit(db, request, {
+    action: "capability.update",
+    targetType: "capability",
+    targetId: capabilityId,
+    details: {
+      fromRevision: existing.revision,
+      toRevision: row.revision,
+      fromStatus: existing.status,
+      toStatus: row.status,
+    },
+  });
   return jsonResponse({ capability: adminCapabilityShape(row) }, 200, requestId);
 }
 
@@ -11129,7 +11237,7 @@ async function handleCatalogList(
 ): Promise<Response> {
   requireAdminSecret(request, env, "catalog");
   const db = requireDb(env);
-  const evidence = await endpointEvidenceMap(env);
+  const evidence = await endpointEvidenceMapForDisplay(env);
   const x402SchemaReady = await hasX402Schema(db);
   const url = new URL(request.url);
   const filters = normalizeCatalogListFilters(url, {
@@ -11465,7 +11573,7 @@ async function handlePendingCatalogList(
 ): Promise<Response> {
   requireAdminSecret(request, env, "catalog");
   const db = requireDb(env);
-  const evidence = await endpointEvidenceMap(env);
+  const evidence = await endpointEvidenceMapForDisplay(env);
   const url = new URL(request.url);
   const single = (name: string, maxLength: number): string => {
     if (url.searchParams.getAll(name).length > 1) {
@@ -16891,7 +16999,7 @@ async function handleCatalogSync(
           `UPDATE capabilities
            SET status = 'deprecated', revision = revision + 1,
                updated_at = CURRENT_TIMESTAMP
-           WHERE status <> 'deprecated'
+           WHERE status = 'published'
              AND NOT EXISTS (
                SELECT 1
                FROM catalog_sync_staging s
@@ -17019,7 +17127,10 @@ async function handleCatalogSync(
         openApiSnapshotHash,
         priceSnapshotHash,
         disabledMissing: Number(finalization[1]?.meta?.changes ?? 0),
-        note: "新端点默认禁用；已审核端点的上游价格一旦变化会自动停用并清除审核状态，客户价格不会被同步任务静默覆盖。",
+        // finalization[6]，即与端点下架同批的能力下架。运营需要看到这个数字：
+        // 一次同步静默下架了多少个已发布能力，直接决定要不要回滚上游快照。
+        deprecatedCapabilities: Number(finalization[6]?.meta?.changes ?? 0),
+        note: "新端点默认禁用；已审核端点的上游价格一旦变化会自动停用并清除审核状态，客户价格不会被同步任务静默覆盖。关联能力会随端点下架一并置为 deprecated。",
       },
       200,
       requestId,
@@ -19863,9 +19974,12 @@ async function computeOperationalReadiness(
              (SELECT target_count || pagination_unit_count
               FROM upstream_request_attempts LIMIT 1)
                AS upstream_attempt_metrics_schema,
-             (SELECT execution_mode || evidence_status
+             (SELECT execution_mode || evidence_status ||
+                     COALESCE(evidence_http_method, '')
               FROM endpoint_capabilities LIMIT 1)
                AS endpoint_capabilities_schema,
+             (SELECT status || endpoint_path FROM capabilities LIMIT 1)
+               AS capabilities_schema,
              (SELECT planned_requests || status
               FROM upstream_capacity_leases LIMIT 1)
                AS upstream_capacity_leases_schema,

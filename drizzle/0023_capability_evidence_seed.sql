@@ -296,3 +296,77 @@ WHERE `evidence_status` = 'verified'
       AND s.`http_method` = c.`http_method`
       AND s.`evidence_url` IS `endpoint_capabilities`.`evidence_url`
   );
+--> statement-breakpoint
+-- 目录同步用 ON CONFLICT 更新既有行，其中包含 http_method。证据是按方法给出的，
+-- 方法改变后必须重新求值：改成与证据不符时降级为 direct（否则会按过期的批量假设
+-- 执行），改成与证据相符时补回证据（否则已验证的 native_batch 端点会被 x402 当成
+-- fanout 计价，交付多条数据只收一个单位）。仅 AFTER INSERT 的触发器覆盖不到这条路径。
+CREATE TRIGGER `endpoint_capabilities_after_catalog_method_change`
+AFTER UPDATE OF `http_method` ON `endpoint_catalog`
+WHEN NEW.`http_method` IS NOT OLD.`http_method`
+BEGIN
+  UPDATE `endpoint_capabilities`
+     SET
+           `execution_mode` = COALESCE(
+               (SELECT s.`execution_mode` FROM `capability_evidence_seed` s
+                 WHERE s.`path` = NEW.`path`
+                   AND s.`http_method` = NEW.`http_method`),
+               'direct'),
+           `native_batch_supported` = COALESCE(
+               (SELECT s.`native_batch_supported` FROM `capability_evidence_seed` s
+                 WHERE s.`path` = NEW.`path`
+                   AND s.`http_method` = NEW.`http_method`),
+               0),
+           `native_batch_max` = (SELECT s.`native_batch_max` FROM `capability_evidence_seed` s
+                 WHERE s.`path` = NEW.`path`
+                   AND s.`http_method` = NEW.`http_method`),
+           `target_field` = (SELECT s.`target_field` FROM `capability_evidence_seed` s
+                 WHERE s.`path` = NEW.`path`
+                   AND s.`http_method` = NEW.`http_method`),
+           `target_encoding` = (SELECT s.`target_encoding` FROM `capability_evidence_seed` s
+                 WHERE s.`path` = NEW.`path`
+                   AND s.`http_method` = NEW.`http_method`),
+           `pagination_style` = (SELECT s.`pagination_style` FROM `capability_evidence_seed` s
+                 WHERE s.`path` = NEW.`path`
+                   AND s.`http_method` = NEW.`http_method`),
+           `pagination_request_field` = (SELECT s.`pagination_request_field` FROM `capability_evidence_seed` s
+                 WHERE s.`path` = NEW.`path`
+                   AND s.`http_method` = NEW.`http_method`),
+           `pagination_response_field` = (SELECT s.`pagination_response_field` FROM `capability_evidence_seed` s
+                 WHERE s.`path` = NEW.`path`
+                   AND s.`http_method` = NEW.`http_method`),
+           `pagination_page_size_field` = (SELECT s.`pagination_page_size_field` FROM `capability_evidence_seed` s
+                 WHERE s.`path` = NEW.`path`
+                   AND s.`http_method` = NEW.`http_method`),
+           `pagination_page_size_max` = (SELECT s.`pagination_page_size_max` FROM `capability_evidence_seed` s
+                 WHERE s.`path` = NEW.`path`
+                   AND s.`http_method` = NEW.`http_method`),
+           `typical_items_per_response` = (SELECT s.`typical_items_per_response` FROM `capability_evidence_seed` s
+                 WHERE s.`path` = NEW.`path`
+                   AND s.`http_method` = NEW.`http_method`),
+           `response_items_path` = (SELECT s.`response_items_path` FROM `capability_evidence_seed` s
+                 WHERE s.`path` = NEW.`path`
+                   AND s.`http_method` = NEW.`http_method`),
+           `evidence_status` = COALESCE(
+               (SELECT s.`evidence_status` FROM `capability_evidence_seed` s
+                 WHERE s.`path` = NEW.`path`
+                   AND s.`http_method` = NEW.`http_method`),
+               'pending'),
+           `evidence_url` = (SELECT s.`evidence_url` FROM `capability_evidence_seed` s
+                 WHERE s.`path` = NEW.`path`
+                   AND s.`http_method` = NEW.`http_method`),
+           `verified_at` = (SELECT s.`verified_at` FROM `capability_evidence_seed` s
+                 WHERE s.`path` = NEW.`path`
+                   AND s.`http_method` = NEW.`http_method`),
+           `evidence_note` = COALESCE(
+             (SELECT s.`evidence_note` FROM `capability_evidence_seed` s
+               WHERE s.`path` = NEW.`path`
+                 AND s.`http_method` = NEW.`http_method`),
+             'RelayBase currently forwards one customer request as one upstream request. Native batching, pagination response semantics, async behavior and returned-item counts require endpoint-specific evidence.'),
+           `evidence_http_method` =
+             (SELECT s.`http_method` FROM `capability_evidence_seed` s
+               WHERE s.`path` = NEW.`path`
+                 AND s.`http_method` = NEW.`http_method`),
+           `updated_at` = CURRENT_TIMESTAMP
+   WHERE `path` = NEW.`path`;
+END;

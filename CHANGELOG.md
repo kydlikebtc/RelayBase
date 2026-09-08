@@ -41,7 +41,10 @@
   `endpoint_capabilities_after_catalog_insert` 触发器改写为 `LEFT JOIN` 种子表：
   证据在目录行插入时注入，覆盖目录同步、人工 SQL 与测试夹具全部插入路径；种子
   缺失时 `COALESCE` 落回原来的 `direct`/`pending` 默认值。已有部署由同一迁移回填，
-  并保护运营人工确认过的行。
+  并保护运营人工确认过的行。同一迁移新增
+  `endpoint_capabilities_after_catalog_method_change`：目录同步用 `ON CONFLICT`
+  重写 `http_method`，而证据是按方法给出的，仅 `AFTER INSERT` 的触发器覆盖不到这条
+  路径——方法被改正为证据方法后端点将永远拿不回证据，x402 会按 `fanout` 少收。
 - `endpoint_capabilities` 新增 `evidence_http_method`。被删除的
   `VERIFIED_ENDPOINT_METHODS` 常量让运行时在每次查询时确认目录仍在提供证据对应的
   方法；把方法存到行上保留了这一校验，同时让 `endpointCapabilityFor` 保持为对预载
@@ -49,7 +52,8 @@
 - `executeCatalogRequest` 从 `handleProxyRequest` 中抽出，承载目录解析、输入校验、
   鉴权、幂等、限流、扣费与响应装配。能力入口复用同一实现，两条路径的计费与幂等
   语义因此不会分叉。搬移的函数体逐字节相同。
-- 能力调用入口 `GET /v1/c/{capabilityId}`。用量按端点记账；草稿与不存在同为 404，
+- 能力调用入口 `GET /v1/c/{capabilityId}`。路径段中畸形的百分号转义按 404 处理，
+  不再变成 500。用量按端点记账；草稿与不存在同为 404，
   已下架为 410；输入别名冲突返回 400 `capability_input_conflict`。`items` 与
   `nextCursor` 提取失败时为 `null` 而非空数组。
 - 公开能力接口 `GET /api/capabilities` 与 `GET /api/capabilities/{id}`。详情把上游
@@ -58,10 +62,27 @@
 - 管理端能力 CRUD：`GET|POST /api/admin/capabilities`、
   `PATCH /api/admin/capabilities/{id}`（`expectedRevision` CAS，冲突 409）与
   `POST /api/admin/capabilities/draft-from-endpoint`（推导不出合法 id 时 400）。
-  目录同步下架端点时，同一 batch 内把关联能力置为 `deprecated`。
+  目录同步下架端点时，同一 batch 内把关联**已发布**能力置为 `deprecated`；草稿是
+  运营的在途工作，不会被同步销毁，也不会因此从 404 变成 410 而暴露其存在。
 - `worker/lib/capability-io.ts` 新增 `translateCapabilityQuery` 与
   `parseCapabilityAliases`。查询串翻译单独实现：记录表达不了 `?id=1&id=2`，
   合并重复值会改变调用方的请求。单元测试由 34 项增至 41 项，集成测试增至 85 项。
+
+  合并重复值会改变调用方的请求。
+- 管理端能力写入落 `admin_audit_logs`（`capability.create` / `capability.update`）。
+  目录同步的响应新增 `deprecatedCapabilities`，让运营看得到一次同步静默下架了多少
+  个已发布能力。
+- 单元测试由 34 项增至 43 项，集成测试由 76 项增至 88 项。
+
+### Security
+
+- 能力证据读取改为失败关闭。此前读表失败会降级成空证据并被缓存 5 秒，已验证的
+  `native_batch` 端点会在 x402 报价里被当作 `fanout`：按 `requests.length` 而不是
+  目标数计价，交付 50 条数据只收 1 个单位。降级并不等同于"回到删除常量之前"——
+  常量是编译期的，不可能读不到。现在证据不可读时返回 503 `service_not_ready`，
+  只有后台目录列表这类不计费的展示路径才降级。
+- 就绪性探针扩展到 `evidence_http_method` 与 `capabilities` 表。此前停留在迁移
+  `0022` 的数据库会报告 schema 就绪，却读不出运行时用来计价的那一列。
 - 迁移 `0022` 新增 `capabilities` 表，作为能力层（Phase 1）的数据地基：能力 id 为
   主键，`endpoint_path` 对 `endpoint_catalog` 级联，`status` 默认 `draft`，
   `revision` 沿用既有的 `expectedRevision` 乐观并发。**当前没有任何路由读取该表，

@@ -239,3 +239,26 @@ test("malformed alias configuration reads as no aliases", () => {
   assert.deepEqual(parseCapabilityAliases(["a"]), {});
   assert.deepEqual(parseCapabilityAliases("handle"), {});
 });
+
+test("a zero cursor is an end-of-feed sentinel, not a cursor", () => {
+  const pagination = { responseCursorPath: "next", requestField: null,
+    pageSizeField: null, pageSizeMax: null };
+  assert.equal(
+    extractNextCursor({ next: 0 }, pagination),
+    null,
+    "echoing 0 back would restart the feed and loop forever",
+  );
+  assert.equal(extractNextCursor({ next: 12 }, pagination), "12");
+});
+
+test("a cursor that cannot round-trip is not a cursor", () => {
+  const pagination = { responseCursorPath: "next", requestField: null,
+    pageSizeField: null, pageSizeMax: null };
+  assert.equal(
+    extractNextCursor({ next: 9007199254740993 }, pagination),
+    null,
+    "JSON.parse already lost the precision; resuming here reads the wrong page",
+  );
+  assert.equal(extractNextCursor({ next: 1.5 }, pagination), null);
+  assert.equal(extractNextCursor({ next: Infinity }, pagination), null);
+});

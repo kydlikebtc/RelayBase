@@ -10999,6 +10999,11 @@ test("hides unpublished capabilities and separates deprecated from missing", asy
   const malformed = await call("/v1/c/NotACapabilityId", "capability-013");
   assert.equal(malformed.status, 404);
   assert.equal((await malformed.json()).error.code, "capability_not_found");
+
+  // A malformed percent-escape is an impossible id, not an internal error.
+  const undecodable = await call("/v1/c/%ff", "capability-014");
+  assert.equal(undecodable.status, 404);
+  assert.equal((await undecodable.json()).error.code, "capability_not_found");
 });
 
 test("reports unextractable items and cursors as null rather than empty", async (t) => {
@@ -11299,6 +11304,22 @@ test("administers capabilities under catalog_write with revision CAS", async (t)
     "published",
     "a rejected CAS must not have written",
   );
+
+  // Capability writes change what callers can reach and must be attributable.
+  assert.deepEqual(
+    db.raw
+      .prepare(
+        `SELECT action, target_id FROM admin_audit_logs
+          WHERE target_type = 'capability' ORDER BY rowid`,
+      )
+      .all()
+      .map((row) => [row.action, row.target_id]),
+    [
+      ["capability.create", "tiktok.user.posts"],
+      ["capability.update", "tiktok.user.posts"],
+    ],
+    "a rejected CAS writes no audit row either",
+  );
 });
 
 test("derives capability drafts from endpoints and refuses unnamable ones", async (t) => {
@@ -11397,12 +11418,28 @@ test("deprecates capabilities in the same batch that retires their endpoint", as
     globalThis.fetch = nativeFetch;
   });
 
+  db.raw
+    .prepare(
+      `INSERT INTO capabilities
+       (id, platform, category, endpoint_path, http_method, status,
+        input_aliases_json, summary_zh, summary_en, revision)
+       VALUES ('tiktok.user.wip', 'tiktok', 'profile_creator', ?, 'GET',
+               'draft', '{}', '在途草稿', 'Work in progress', 1)`,
+    )
+    .run(path);
+
   const sync = await fetchWorker(
     "/api/admin/catalog/sync",
     { method: "POST", headers: { authorization: `Bearer ${catalogSecret}` } },
     env,
   );
-  assert.equal(sync.status, 200, JSON.stringify(await sync.clone().json()));
+  const syncBody = await sync.clone().json();
+  assert.equal(sync.status, 200, JSON.stringify(syncBody));
+  assert.equal(
+    syncBody.deprecatedCapabilities,
+    1,
+    "operators must see how many capabilities a sync retired",
+  );
 
   const retired = db.raw
     .prepare("SELECT enabled FROM endpoint_catalog WHERE path = ?")
@@ -11417,4 +11454,194 @@ test("deprecates capabilities in the same batch that retires their endpoint", as
     "a retired endpoint must not keep serving a published capability",
   );
   assert.equal(capability.revision, 2);
+
+  const draft = db.raw
+    .prepare("SELECT status, revision FROM capabilities WHERE id = ?")
+    .get("tiktok.user.wip");
+  assert.deepEqual(
+    { ...draft },
+    { status: "draft", revision: 1 },
+    "a draft is an operator's work in progress, not something a sync retires",
+  );
+});
+
+test("re-evaluates capability evidence when the catalog changes an endpoint's method", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const nativeBatch = "/v1/douyin/web/fetch_multi_video"; // seeded as POST
+  db.raw
+    .prepare(
+      `INSERT INTO endpoint_catalog
+       (path, platform, http_method, upstream_price_usd_micros,
+        customer_price_usd_micros, price_verified, enabled, read_only)
+       VALUES (?, 'douyin', 'GET', 1000, 2000, 1, 1, 1)`,
+    )
+    .run(nativeBatch);
+  const read = db.raw.prepare(
+    `SELECT execution_mode, native_batch_max, evidence_status,
+            evidence_http_method
+       FROM endpoint_capabilities WHERE path = ?`,
+  );
+  assert.equal(
+    read.get(nativeBatch).execution_mode,
+    "direct",
+    "evidence is POST-only, so a GET row must not inherit it",
+  );
+
+  // Catalog sync upserts endpoint_catalog and rewrites http_method on conflict.
+  db.raw
+    .prepare("UPDATE endpoint_catalog SET http_method = 'POST' WHERE path = ?")
+    .run(nativeBatch);
+  assert.deepEqual(
+    { ...read.get(nativeBatch) },
+    {
+      execution_mode: "native_batch",
+      native_batch_max: 50,
+      evidence_status: "verified",
+      evidence_http_method: "POST",
+    },
+    "a corrected method must regain the evidence, or x402 underprices the batch",
+  );
+
+  db.raw
+    .prepare("UPDATE endpoint_catalog SET http_method = 'GET' WHERE path = ?")
+    .run(nativeBatch);
+  assert.deepEqual(
+    { ...read.get(nativeBatch) },
+    {
+      execution_mode: "direct",
+      native_batch_max: null,
+      evidence_status: "pending",
+      evidence_http_method: null,
+    },
+    "and a method that no longer matches must drop the batching assumption",
+  );
+});
+
+test("refuses to bill when the capability evidence table is unreadable", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  // Everything except 0023: the worker is deployed ahead of its migration.
+  await migrate(db, migrationFiles.slice(0, migrationFiles.length - 1));
+  const { env, path } = seedCapabilityFixture(db, t);
+
+  // The endpoint that migration 0019 already marked verified native_batch.
+  const nativeBatchPath = "/v1/tiktok/app/v3/fetch_multi_video_v2";
+  db.raw
+    .prepare(
+      `INSERT INTO endpoint_catalog
+       (path, platform, http_method, data_type, tags_json, surface,
+        operation_id, summary, upstream_price_usd_micros,
+        customer_price_usd_micros, price_verified, enabled, read_only,
+        safety_classification, safety_reasons_json, safety_policy_version,
+        revision, sync_generation, reviewed_at)
+       VALUES (?, 'tiktok', 'POST', 'other', '["app","other"]', 'app',
+               'relaybase_tiktok_app_v3_fetch_multi_video_v2',
+               'Fetch multiple videos', 1000, 2000, 1, 1, 1,
+               'safe_data_read', '["test_fixture"]', 1, 1, ?,
+               CURRENT_TIMESTAMP)`,
+    )
+    .run(nativeBatchPath, TEST_CATALOG_GENERATION);
+
+  // Readiness must not claim the schema is ready when the runtime cannot read
+  // the column it prices from.
+  const readiness = await fetchWorker("/api/readiness", {}, env);
+  assert.equal(readiness.status, 503);
+  const readinessBody = await readiness.json();
+  assert.equal(readinessBody.capabilities.schemaReady, false);
+
+  // The catalog query probes the column the runtime prices from, so the refusal
+  // lands before authentication — no key can be minted on this database either.
+  const proxied = await fetchWorker(
+    `${path}?uniqueId=x`,
+    {
+      headers: {
+        authorization: "Bearer rb_live_whatever",
+        "idempotency-key": "evidence-0001",
+      },
+    },
+    env,
+  );
+  assert.equal(proxied.status, 503);
+  assert.equal((await proxied.json()).error.code, "service_not_ready");
+  assert.equal(
+    db.raw.prepare("SELECT COUNT(*) AS n FROM api_calls").get().n,
+    0,
+    "an unreadable evidence table must stop billing, not price without it",
+  );
+});
+
+test("builds POST capability examples from the request body, not query params", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const { env } = seedCapabilityFixture(db, t);
+  const postPath = "/v1/tiktok/app/v3/fetch_multi_video_v2";
+  db.raw
+    .prepare(
+      `INSERT INTO endpoint_catalog
+       (path, platform, http_method, data_type, tags_json, surface,
+        operation_id, summary, parameter_schema_json,
+        upstream_price_usd_micros, customer_price_usd_micros,
+        price_verified, enabled, read_only, safety_classification,
+        safety_reasons_json, safety_policy_version, revision,
+        sync_generation, reviewed_at)
+       VALUES (?, 'tiktok', 'POST', 'other', '["app","other"]', 'app',
+               'relaybase_tiktok_app_v3_fetch_multi_video_v2',
+               'Fetch multiple videos', ?, 1000, 2000, 1, 1, 1,
+               'safe_data_read', '["test_fixture"]', 1, 1, ?,
+               CURRENT_TIMESTAMP)`,
+    )
+    .run(
+      postPath,
+      JSON.stringify({
+        parameters: [],
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: { aweme_ids: { type: "array" } },
+                required: ["aweme_ids"],
+              },
+            },
+          },
+        },
+      }),
+      TEST_CATALOG_GENERATION,
+    );
+  db.raw
+    .prepare(
+      `INSERT INTO capabilities
+       (id, platform, category, endpoint_path, http_method, status,
+        input_aliases_json, summary_zh, summary_en, revision)
+       VALUES ('tiktok.video.batch', 'tiktok', 'other', ?, 'POST',
+               'published', ?, '批量视频', 'Batch videos', 1)`,
+    )
+    .run(postPath, JSON.stringify({ ids: "aweme_ids" }));
+
+  const detail = await fetchWorker(
+    "/api/capabilities/tiktok.video.batch",
+    {},
+    env,
+  );
+  assert.equal(detail.status, 200);
+  const data = await detail.json();
+  assert.deepEqual(
+    Object.keys(
+      data.input.requestBody.content["application/json"].schema.properties,
+    ),
+    ["ids"],
+    "the request body is presented with the capability's field name",
+  );
+  for (const example of Object.values(data.examples)) {
+    assert.match(
+      example,
+      /\bids\b/,
+      "a POST example must name the body field callers actually send",
+    );
+    assert.doesNotMatch(example, /aweme_ids/);
+  }
+  assert.match(data.examples.curl, /-X POST/);
 });

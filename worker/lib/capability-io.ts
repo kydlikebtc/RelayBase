@@ -179,9 +179,22 @@ export function parseCapabilityPagination(
 /**
  * Pull the next cursor out of a response.
  *
- * Only strings and finite numbers count. A boolean, object or empty string is
+ * Only strings and safe integers count. A boolean, object or empty string is
  * not a cursor the caller can send back, and returning one would produce a
  * pagination loop that never terminates or that refetches the same page.
+ *
+ * Two numeric cases are deliberately rejected:
+ *
+ * - `0`, which upstreams overwhelmingly use as the "no more pages" sentinel
+ *   alongside a `has_more` flag. Echoing it back restarts the feed from the
+ *   beginning, so the caller loops forever over page one.
+ * - Anything outside the safe integer range. JSON.parse has already destroyed
+ *   the precision by the time the value reaches here, so `String(value)` would
+ *   hand back a cursor that is not the one the upstream sent, and the caller
+ *   would silently resume from the wrong position.
+ *
+ * An upstream that genuinely uses `0` as a cursor needs `responseCursorPath`
+ * pointed at a different field.
  */
 export function extractNextCursor(
   payload: unknown,
@@ -191,7 +204,10 @@ export function extractNextCursor(
     return null;
   const value = readJsonPath(payload, pagination.responseCursorPath);
   if (typeof value === "string") return value.length > 0 ? value : null;
-  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value === 0) return null;
+    return String(value);
+  }
   return null;
 }
 
