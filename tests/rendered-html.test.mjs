@@ -11522,8 +11522,19 @@ test("re-evaluates capability evidence when the catalog changes an endpoint's me
 test("refuses to bill when the capability evidence table is unreadable", async (t) => {
   const db = new TestD1();
   t.after(() => db.close());
-  // Everything except 0023: the worker is deployed ahead of its migration.
-  await migrate(db, migrationFiles.slice(0, migrationFiles.length - 1));
+  // Everything before 0023: the worker is deployed ahead of the migration that
+  // adds the column it prices from. Anchored by name, not position — "the last
+  // migration" stops meaning 0023 the moment another one lands.
+  const beforeEvidenceSeed = migrationFiles.slice(
+    0,
+    migrationFiles.findIndex((name) => name.includes("0023_")),
+  );
+  assert.ok(
+    beforeEvidenceSeed.length > 0 &&
+      beforeEvidenceSeed.length < migrationFiles.length,
+    "expected 0023 to exist and not be the first migration",
+  );
+  await migrate(db, beforeEvidenceSeed);
   const { env, path } = seedCapabilityFixture(db, t);
 
   // The endpoint that migration 0019 already marked verified native_batch.
@@ -11644,4 +11655,60 @@ test("builds POST capability examples from the request body, not query params", 
     assert.doesNotMatch(example, /aweme_ids/);
   }
   assert.match(data.examples.curl, /-X POST/);
+});
+
+test("migration 0024 leaves existing keys at full scope and no spend ceiling", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  const beforeScopes = migrationFiles.slice(
+    0,
+    migrationFiles.findIndex((name) => name.includes("0024_")),
+  );
+  assert.ok(beforeScopes.length > 0, "expected 0024 to exist");
+  await migrate(db, beforeScopes);
+
+  // A key and an account that predate the scope columns entirely.
+  db.raw
+    .prepare(
+      `INSERT INTO users (id, email, display_name)
+       VALUES ('usr_before_scopes', 'before@example.com', 'Before Scopes')`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO api_keys (id, user_id, label, key_prefix, key_hash)
+       VALUES ('key_before_scopes', 'usr_before_scopes', 'legacy key',
+               'rb_live_zz', 'hash_before_scopes')`,
+    )
+    .run();
+
+  await migrate(db, [
+    migrationFiles[migrationFiles.findIndex((n) => n.includes("0024_"))],
+  ]);
+
+  const key = db.raw
+    .prepare("SELECT * FROM api_keys WHERE id = 'key_before_scopes'")
+    .get();
+  assert.ok(key, "rebuilding users must not cascade away existing keys");
+  assert.deepEqual(
+    {
+      scopes: key.scopes_json,
+      limit: key.spend_limit_usd_micros,
+      spent: key.spent_usd_micros,
+      hash: key.key_hash,
+    },
+    {
+      scopes: '["*"]',
+      limit: null,
+      spent: 0,
+      hash: "hash_before_scopes",
+    },
+    "an upgrade must never narrow a live key",
+  );
+  const user = db.raw
+    .prepare("SELECT * FROM users WHERE id = 'usr_before_scopes'")
+    .get();
+  assert.equal(user.account_kind, "human");
+  assert.equal(user.email, "before@example.com");
+  assert.equal(user.display_name, "Before Scopes");
 });

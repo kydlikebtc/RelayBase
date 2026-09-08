@@ -17,6 +17,13 @@ export const users = sqliteTable(
     email: text("email").notNull(),
     displayName: text("display_name"),
     status: text("status").notNull().default("active"),
+    /**
+     * `agent` rows are created by self-registration and have no login
+     * identity yet; `human` is every account that arrived through Google or
+     * wallet sign-in. Existing rows default to `human`, which is what they
+     * are — the column must not change the meaning of any stored account.
+     */
+    accountKind: text("account_kind").notNull().default("human"),
     rateLimitRps: integer("rate_limit_rps").notNull().default(3),
     rateLimitBurst: integer("rate_limit_burst").notNull().default(6),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -24,6 +31,10 @@ export const users = sqliteTable(
   },
   (table) => [
     uniqueIndex("users_email_unique").on(table.email),
+    check(
+      "users_account_kind_values",
+      sql`${table.accountKind} IN ('human', 'agent')`,
+    ),
     check(
       "users_rate_limit_rps_range",
       sql`${table.rateLimitRps} BETWEEN 1 AND 1000`,
@@ -45,6 +56,16 @@ export const apiKeys = sqliteTable(
     label: text("label").notNull(),
     keyPrefix: text("key_prefix").notNull(),
     keyHash: text("key_hash").notNull(),
+    /**
+     * JSON array of scope strings. The default grants everything, so keys
+     * that existed before this column was added keep working exactly as they
+     * did — an upgrade must never silently narrow a live key.
+     * Syntax and matching live in worker/lib/key-scopes.ts.
+     */
+    scopesJson: text("scopes_json").notNull().default('["*"]'),
+    /** Null means no ceiling. Compared before any money moves. */
+    spendLimitUsdMicros: integer("spend_limit_usd_micros"),
+    spentUsdMicros: integer("spent_usd_micros").notNull().default(0),
     rateLimitRpm: integer("rate_limit_rpm").notNull().default(60),
     rateLimitRps: integer("rate_limit_rps").notNull().default(3),
     rateLimitBurst: integer("rate_limit_burst").notNull().default(6),
@@ -63,6 +84,11 @@ export const apiKeys = sqliteTable(
       "api_keys_rate_limit_burst_range",
       sql`${table.rateLimitBurst} BETWEEN ${table.rateLimitRps} AND 2000`,
     ),
+    check(
+      "api_keys_spend_limit_range",
+      sql`${table.spendLimitUsdMicros} IS NULL OR ${table.spendLimitUsdMicros} BETWEEN 0 AND 1000000000000`,
+    ),
+    check("api_keys_spent_non_negative", sql`${table.spentUsdMicros} >= 0`),
   ],
 );
 
@@ -743,6 +769,61 @@ export const capabilities = sqliteTable(
       sql`${table.status} IN ('draft', 'published', 'deprecated')`,
     ),
     check("capabilities_revision_positive", sql`${table.revision} >= 1`),
+  ],
+);
+
+/**
+ * One-shot tokens that let a self-registered `agent` account be claimed by a
+ * real sign-in. The token itself is never stored — only its hash — so a leaked
+ * database row cannot be replayed to steal the account it points at.
+ */
+export const accountBindTokens = sqliteTable(
+  "account_bind_tokens",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    /** The agent account whose balance, keys and usage will be migrated. */
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    expiresAt: text("expires_at").notNull(),
+    /** Set in the same batch that migrates the account, so it cannot be reused. */
+    consumedAt: text("consumed_at"),
+    consumedByUserId: text("consumed_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("account_bind_tokens_user_idx").on(table.userId),
+    index("account_bind_tokens_expiry_idx").on(table.expiresAt),
+  ],
+);
+
+/**
+ * Precomputed call statistics shown next to a capability in the market.
+ *
+ * Usage is billed and recorded per endpoint, and several capabilities can
+ * point at one endpoint, so these numbers describe the capability's endpoint
+ * rather than the capability alone. The reconciliation job recomputes them;
+ * nothing on the request path writes here.
+ */
+export const capabilityStats = sqliteTable(
+  "capability_stats",
+  {
+    capabilityId: text("capability_id")
+      .primaryKey()
+      .references(() => capabilities.id, { onDelete: "cascade" }),
+    windowDays: integer("window_days").notNull().default(30),
+    callCount: integer("call_count").notNull().default(0),
+    successCount: integer("success_count").notNull().default(0),
+    /** Null when the window holds too few calls to rank honestly. */
+    p95LatencyMs: integer("p95_latency_ms"),
+    computedAt: text("computed_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    check("capability_stats_counts_non_negative", sql`${table.callCount} >= 0 AND ${table.successCount} >= 0`),
+    check("capability_stats_success_within_calls", sql`${table.successCount} <= ${table.callCount}`),
+    check("capability_stats_window_range", sql`${table.windowDays} BETWEEN 1 AND 365`),
   ],
 );
 
