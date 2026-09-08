@@ -112,9 +112,6 @@
   时返回 null，不伪造游标或空数组——伪造会让调用方的分页循环静默出错。JSON 路径
   解析在解析期拒绝 `__proto__`、`constructor` 与 `prototype`，避免恶意上游响应经由
   操作员配置的路径触达原型链。单元测试由 9 项增至 34 项。
-
-### Security
-
 - 生产依赖通过 `overrides` 把 `nanoid` 升级到 `3.3.18`、`postcss` 升级到 `8.5.28`，修复
   GHSA-28wg-ghj8-5hjv、GHSA-2v37-7h3g-55p8 与 GHSA-fxqj-rqcc-2cmp；
   `npm audit --omit=dev --audit-level=high` 恢复为零高危生产依赖漏洞。
