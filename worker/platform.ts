@@ -40,6 +40,7 @@ import {
 } from "./lib/balance-sql";
 import { trustedIdentityHeadersActive } from "./lib/identity-headers";
 import { TtlCache, parseTtlMs } from "./lib/ttl-cache";
+import { parseKeyScopes, scopeAllows } from "./lib/key-scopes";
 import {
   CAPABILITY_ID_MAX_LENGTH,
   deriveCapabilityId,
@@ -246,6 +247,9 @@ type NamedAdminAccess = {
 type ApiKeyRecord = {
   id: string;
   user_id: string;
+  scopes_json: string;
+  spend_limit_usd_micros: number | null;
+  spent_usd_micros: number;
   rate_limit_rpm: number;
   rate_limit_rps: number;
   rate_limit_burst: number;
@@ -7881,6 +7885,7 @@ async function handleCapabilityRequest(
     readiness,
     endpointUrl,
     {
+      capabilityId: capability.id,
       translateBody: (parsed) => {
         if (!isPlainRecord(parsed)) return parsed;
         const translated = translateCapabilityInput(parsed, aliases);
@@ -8028,7 +8033,10 @@ function assertReconciliationFresh(readiness: OperationalReadiness): void {
 //
 // 调用方只负责就绪性检查与请求解析；鉴权刻意留在目录解析之后，与提取前的
 // 顺序一致——先解析目录再鉴权，未启用端点返回 404 而不是 401。
-type CatalogExecutionHooks = {
+type CatalogExecutionOptions = {
+  // 仅当请求走 /v1/c/{id} 时存在。作用域校验需要它：按能力授权的 Key 不应
+  // 因为底层端点路径恰好匹配而被放行。
+  capabilityId?: string;
   // 在 validateCatalogProxyInputs 之前重写已解析的 POST 请求体。能力入口用它把
   // 能力字段名翻译成上游参数名；翻译冲突以 PlatformError 抛出。
   translateBody?: (parsed: unknown) => unknown;
@@ -8043,7 +8051,7 @@ async function executeCatalogRequest(
   db: D1Database,
   readiness: OperationalReadiness,
   url: URL,
-  hooks: CatalogExecutionHooks = {},
+  options: CatalogExecutionOptions = {},
 ): Promise<Response> {
   let catalog: CatalogRecord | null;
   try {
@@ -8250,8 +8258,8 @@ async function executeCatalogRequest(
         "POST 请求体必须是有效的 JSON 对象或数组。",
       );
     }
-    if (hooks.translateBody) {
-      parsedUpstreamBody = hooks.translateBody(parsedUpstreamBody);
+    if (options.translateBody) {
+      parsedUpstreamBody = options.translateBody(parsedUpstreamBody);
       // 转发给上游的是翻译后的字节，而不是调用方发来的原始字节。
       upstreamBody = JSON.stringify(parsedUpstreamBody);
     }
@@ -8283,7 +8291,9 @@ async function executeCatalogRequest(
   const keyHash = await sha256Hex(secret);
   const key = await db
     .prepare(
-      `SELECT k.id, k.user_id, k.rate_limit_rpm,
+      `SELECT k.id, k.user_id, k.scopes_json,
+              k.spend_limit_usd_micros, k.spent_usd_micros,
+              k.rate_limit_rpm,
               k.rate_limit_rps, k.rate_limit_burst,
               u.rate_limit_rps AS account_rate_limit_rps,
               u.rate_limit_burst AS account_rate_limit_burst
@@ -8482,6 +8492,30 @@ async function executeCatalogRequest(
   }
 
   const costUsdMicros = catalog.customer_price_usd_micros;
+  // 作用域与花费上限都在扣款之前判定。放到扣款之后就变成"先扣钱再说不允许"，
+  // 而退款是另一条需要成功执行的路径——失败时钱就留在错误的一侧了。
+  if (
+    !scopeAllows(parseKeyScopes(key.scopes_json), {
+      endpointPath: catalog.path,
+      capabilityId: options.capabilityId ?? null,
+    })
+  ) {
+    throw new PlatformError(
+      403,
+      "key_scope_denied",
+      "该 API Key 的作用域不包含这个端点或能力。",
+    );
+  }
+  if (
+    key.spend_limit_usd_micros != null &&
+    key.spent_usd_micros + costUsdMicros > key.spend_limit_usd_micros
+  ) {
+    throw new PlatformError(
+      402,
+      "key_spend_limit_exceeded",
+      "该 API Key 已达到设定的花费上限。",
+    );
+  }
   const [debitResult] = await db.batch([
     db
       .prepare(
@@ -8501,6 +8535,15 @@ async function executeCatalogRequest(
         ...availableBalanceBindings(key.user_id),
         costUsdMicros,
       ),
+    // 紧跟扣款语句，`changes() = 1` 指的是上一条扣款是否真的写入。分成两批会
+    // 出现"扣了钱没记额度"或"记了额度没扣钱"，两者都会让上限失去意义。
+    db
+      .prepare(
+        `UPDATE api_keys
+         SET spent_usd_micros = spent_usd_micros + ?
+         WHERE id = ? AND changes() = 1`,
+      )
+      .bind(costUsdMicros, key.id),
     db
       .prepare(
         `UPDATE proxy_requests
@@ -8572,6 +8615,7 @@ async function executeCatalogRequest(
       key.user_id,
       ledgerReferenceId,
       costUsdMicros,
+      key.id,
     );
     await logApiCall(db, {
       requestId,
@@ -8647,6 +8691,7 @@ async function executeCatalogRequest(
         key.user_id,
         ledgerReferenceId,
         costUsdMicros,
+        key.id,
       );
       try {
         await logApiCall(db, {
@@ -8694,6 +8739,7 @@ async function executeCatalogRequest(
       key.user_id,
       ledgerReferenceId,
       costUsdMicros,
+      key.id,
     );
   }
 
@@ -8734,6 +8780,7 @@ async function executeCatalogRequest(
       key.user_id,
       ledgerReferenceId,
       costUsdMicros,
+      key.id,
     );
     await markProxyRequest(db, requestId, "reconciled", 500);
     throw new PlatformError(
@@ -8768,7 +8815,9 @@ async function executeCatalogRequest(
     );
   }
 
-  if (hooks.respond) return hooks.respond(successfulPayload, responseHeaders);
+  if (options.respond) {
+    return options.respond(successfulPayload, responseHeaders);
+  }
   return jsonResponse(
     {
       success: true,
@@ -20770,21 +20819,33 @@ async function refundRequest(
   userId: string,
   ledgerReferenceId: string,
   costUsdMicros: number,
+  apiKeyId: string,
 ): Promise<void> {
-  await db
-    .prepare(
-      `INSERT OR IGNORE INTO balance_ledger
-       (id, user_id, entry_type, delta_usd_micros, reference_id, description, created_at)
-       VALUES (?, ?, 'api_refund', ?, ?, 'API request refund', ?)`,
-    )
-    .bind(
-      `led_${randomBase64Url(16)}`,
-      userId,
-      costUsdMicros,
-      `${ledgerReferenceId}:refund`,
-      new Date().toISOString(),
-    )
-    .run();
+  // 退款是幂等的（reference_id 唯一 + OR IGNORE）。额度的回退必须同样幂等，
+  // 否则同一个请求被退两次会把 spent 扣穿——所以用 `changes() = 1` 把回退
+  // 绑定在"这次真的插入了退款行"上，并且与退款同批。
+  await db.batch([
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO balance_ledger
+         (id, user_id, entry_type, delta_usd_micros, reference_id, description, created_at)
+         VALUES (?, ?, 'api_refund', ?, ?, 'API request refund', ?)`,
+      )
+      .bind(
+        `led_${randomBase64Url(16)}`,
+        userId,
+        costUsdMicros,
+        `${ledgerReferenceId}:refund`,
+        new Date().toISOString(),
+      ),
+    db
+      .prepare(
+        `UPDATE api_keys
+         SET spent_usd_micros = MAX(0, spent_usd_micros - ?)
+         WHERE id = ? AND changes() = 1`,
+      )
+      .bind(costUsdMicros, apiKeyId),
+  ]);
 }
 
 async function markProxyRequest(

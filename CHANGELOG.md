@@ -4,6 +4,16 @@
 
 ## Unreleased
 
+### Added
+
+- 迁移 `0024`：`api_keys` 新增 `scopes_json`、`spend_limit_usd_micros`、
+  `spent_usd_micros`；`users` 新增 `account_kind`；新增 `account_bind_tokens` 与
+  `capability_stats` 两张表。`scopes_json` 默认 `["*"]`，存量 Key 升级后仍是全作用域。
+- API Key 作用域与花费上限校验（`worker/lib/key-scopes.ts`）。两者都在扣款之前判定：
+  作用域不匹配 403 `key_scope_denied`，超出上限 402 `key_spend_limit_exceeded`，都不
+  计量、不触达上游。已花费额度与扣款同批累加、与退款同批回退。作用域配置读不出来时
+  拒绝所有调用，不回落成全放行。
+
 ### Changed
 
 - 全站九个页面（首页、数据市场、定价、文档、登录、控制台、运营后台及其子页）从暖纸浅色

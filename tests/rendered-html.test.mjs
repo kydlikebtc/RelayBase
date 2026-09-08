@@ -11712,3 +11712,162 @@ test("migration 0024 leaves existing keys at full scope and no spend ceiling", a
   assert.equal(user.email, "before@example.com");
   assert.equal(user.display_name, "Before Scopes");
 });
+
+async function scopedKeyFixture(db, t, upstream) {
+  const env = baseEnv({
+    DB: db,
+    READINESS_CACHE_TTL_MS: "10000",
+    RESELLER_AUTHORIZED: "true",
+    LEGAL_REVIEW_CONFIRMED: "true",
+    UPSTREAM_COMMERCIAL_CLEARANCE_CONFIRMED: "true",
+    UPSTREAM_API_KEY: "upstream-secret",
+    CATALOG_SYNC_SECRET: "catalog-sync-secret-32-characters-minimum",
+    RECONCILIATION_SECRET: "reconcile-secret-32-characters-minimum",
+  });
+  const path = "/v1/tiktok/web/fetch_user_profile";
+  enableCatalogEndpoint(db, path, 2000, "upstream-secret");
+  db.raw
+    .prepare(
+      `INSERT INTO capabilities
+       (id, platform, category, endpoint_path, http_method, status,
+        input_aliases_json, summary_zh, summary_en, revision)
+       VALUES ('tiktok.user.profile', 'tiktok', 'profile_creator', ?, 'GET',
+               'published', '{}', '资料', 'Profile', 1)`,
+    )
+    .run(path);
+  const created = (
+    await (
+      await fetchWorker(
+        "/api/keys",
+        {
+          method: "POST",
+          headers: signedInHeaders(),
+          body: JSON.stringify({ label: "scoped key" }),
+        },
+        { ...env },
+      )
+    ).json()
+  ).key;
+  const user = db.raw
+    .prepare("SELECT id FROM users WHERE email = ?")
+    .get("owner@example.com");
+  db.raw
+    .prepare(
+      `INSERT INTO balance_ledger
+       (id, user_id, entry_type, delta_usd_micros, reference_id)
+       VALUES ('seed-scope', ?, 'test_credit', 1000000, 'test:scope')`,
+    )
+    .run(user.id);
+  const nativeFetch = globalThis.fetch;
+  let upstreamCalls = 0;
+  globalThis.fetch = async (...args) => {
+    upstreamCalls += 1;
+    return upstream(...args);
+  };
+  t.after(() => {
+    globalThis.fetch = nativeFetch;
+  });
+  const setScope = (scopes, limit = null) =>
+    db.raw
+      .prepare(
+        "UPDATE api_keys SET scopes_json = ?, spend_limit_usd_micros = ? WHERE id = ?",
+      )
+      .run(JSON.stringify(scopes), limit, created.id);
+  const spent = () =>
+    db.raw
+      .prepare("SELECT spent_usd_micros AS s FROM api_keys WHERE id = ?")
+      .get(created.id).s;
+  const billed = () =>
+    db.raw.prepare("SELECT COUNT(*) AS n FROM api_calls").get().n;
+  const call = (target, key) =>
+    fetchWorker(
+      target,
+      {
+        headers: {
+          authorization: `Bearer ${created.secret}`,
+          "idempotency-key": key,
+        },
+      },
+      env,
+    );
+  return { env, path, call, setScope, spent, billed, upstreamCalls: () => upstreamCalls };
+}
+
+test("a key outside its scope is refused before any money moves", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const f = await scopedKeyFixture(db, t, async () =>
+    Response.json({ code: 200, data: { uniqueId: "x" }, request_id: "r" }),
+  );
+
+  f.setScope(["/v1/douyin/*"]);
+  const denied = await f.call(`${f.path}?uniqueId=x`, "scope-0001");
+  assert.equal(denied.status, 403);
+  assert.equal((await denied.json()).error.code, "key_scope_denied");
+  assert.equal(f.billed(), 0, "a refused scope must not be billed");
+  assert.equal(f.spent(), 0);
+  assert.equal(f.upstreamCalls(), 0, "and must never reach upstream");
+
+  f.setScope([f.path]);
+  const allowed = await f.call(`${f.path}?uniqueId=x`, "scope-0002");
+  assert.equal(allowed.status, 200);
+  assert.equal(f.spent(), 2000, "an allowed call records exactly its price");
+});
+
+test("a capability scope grants the capability but not the raw endpoint", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  const f = await scopedKeyFixture(db, t, async () =>
+    Response.json({ code: 200, data: { uniqueId: "x" }, request_id: "r" }),
+  );
+  f.setScope(["tiktok.user.profile"]);
+
+  const viaCapability = await f.call(
+    "/v1/c/tiktok.user.profile?uniqueId=x",
+    "scope-0010",
+  );
+  assert.equal(viaCapability.status, 200);
+
+  const viaPath = await f.call(`${f.path}?uniqueId=x`, "scope-0011");
+  assert.equal(viaPath.status, 403);
+  assert.equal(
+    (await viaPath.json()).error.code,
+    "key_scope_denied",
+    "narrowing a key to one capability must not grant its whole endpoint",
+  );
+});
+
+test("a spend limit is compared before the debit and unwound on refund", async (t) => {
+  const db = new TestD1();
+  t.after(() => db.close());
+  await migrate(db);
+  let failUpstream = false;
+  const f = await scopedKeyFixture(db, t, async () =>
+    failUpstream
+      ? new Response("upstream down", { status: 503 })
+      : Response.json({ code: 200, data: { uniqueId: "x" }, request_id: "r" }),
+  );
+
+  // Exactly enough for two calls at 2000 each.
+  f.setScope(["*"], 4000);
+  assert.equal((await f.call(`${f.path}?uniqueId=x`, "limit-0001")).status, 200);
+  assert.equal(f.spent(), 2000);
+  assert.equal((await f.call(`${f.path}?uniqueId=x`, "limit-0002")).status, 200);
+  assert.equal(f.spent(), 4000);
+
+  const overLimit = await f.call(`${f.path}?uniqueId=x`, "limit-0003");
+  assert.equal(overLimit.status, 402);
+  assert.equal((await overLimit.json()).error.code, "key_spend_limit_exceeded");
+  assert.equal(f.spent(), 4000, "a refused call must not consume the ceiling");
+  assert.equal(f.billed(), 2, "and must not be billed");
+
+  // A refunded call must give its allowance back, or a flaky upstream would
+  // permanently eat the key's budget.
+  f.setScope(["*"], 100000);
+  failUpstream = true;
+  const failed = await f.call(`${f.path}?uniqueId=x`, "limit-0004");
+  assert.notEqual(failed.status, 200);
+  assert.equal(f.spent(), 4000, "the failed call's spend was returned");
+});
