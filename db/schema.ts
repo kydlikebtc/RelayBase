@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { capabilityIdCheckSql } from "../worker/lib/capability-id";
 import {
   check,
   index,
@@ -634,6 +635,53 @@ export const endpointCapabilities = sqliteTable(
       "endpoint_capabilities_page_size_range",
       sql`${table.paginationPageSizeMax} IS NULL OR ${table.paginationPageSizeMax} BETWEEN 1 AND 100000`,
     ),
+  ],
+);
+
+/**
+ * Capabilities are the public, Agent-facing names for catalog endpoints:
+ * `/v1/c/{id}` resolves here. One endpoint may carry several capabilities as
+ * aliases or versions, so the id — not the path — is the primary key.
+ */
+export const capabilities = sqliteTable(
+  "capabilities",
+  {
+    id: text("id").primaryKey(),
+    platform: text("platform").notNull(),
+    category: text("category").notNull(),
+    endpointPath: text("endpoint_path")
+      .notNull()
+      .references(() => endpointCatalog.path, { onDelete: "cascade" }),
+    httpMethod: text("http_method").notNull(),
+    status: text("status").notNull().default("draft"),
+    /** Capability field name -> upstream parameter name. */
+    inputAliasesJson: text("input_aliases_json").notNull().default("{}"),
+    /** Cursor request field, response cursor path, page size field and ceiling. */
+    paginationJson: text("pagination_json"),
+    responseItemsPath: text("response_items_path"),
+    summaryZh: text("summary_zh").notNull(),
+    summaryEn: text("summary_en").notNull(),
+    /** Optimistic concurrency, matching the catalog's expectedRevision pattern. */
+    revision: integer("revision").notNull().default(1),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("capabilities_endpoint_path_idx").on(table.endpointPath),
+    index("capabilities_platform_status_idx").on(table.platform, table.status),
+    // SQLite has no REGEXP, so the id shape is guarded by a GLOB expression
+    // kept deliberately looser than the application validator in
+    // worker/lib/capability-id.ts, which stays authoritative.
+    check("capabilities_id_shape", sql.raw(capabilityIdCheckSql("id"))),
+    check(
+      "capabilities_http_method_values",
+      sql`${table.httpMethod} IN ('GET', 'POST')`,
+    ),
+    check(
+      "capabilities_status_values",
+      sql`${table.status} IN ('draft', 'published', 'deprecated')`,
+    ),
+    check("capabilities_revision_positive", sql`${table.revision} >= 1`),
   ],
 );
 

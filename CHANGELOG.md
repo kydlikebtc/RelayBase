@@ -22,6 +22,16 @@
   闸门 → 有序目录点阵，未通过审核的供给在闸门处被打回）。three.js 以动态 import 分离为独立
   chunk（gzip 171KB），其余页面不加载；`prefers-reduced-motion` 与视口宽度不足 1100px 时
   完全跳过，连 chunk 都不会请求。
+- 迁移 `0022` 新增 `capabilities` 表，作为能力层（Phase 1）的数据地基：能力 id 为
+  主键，`endpoint_path` 对 `endpoint_catalog` 级联，`status` 默认 `draft`，
+  `revision` 沿用既有的 `expectedRevision` 乐观并发。**当前没有任何路由读取该表，
+  运行时行为与迁移前完全一致。**
+- `worker/lib/capability-id.ts` 与 `worker/lib/capability-io.ts` 两个纯函数模块：
+  前者负责能力 id 的校验、草稿 id 推导与列 CHECK 表达式；后者负责输入别名翻译，
+  以及按 JSON 路径从上游响应提取 `items` 与 `nextCursor`。两者均只在缺失或类型不符
+  时返回 null，不伪造游标或空数组——伪造会让调用方的分页循环静默出错。JSON 路径
+  解析在解析期拒绝 `__proto__`、`constructor` 与 `prototype`，避免恶意上游响应经由
+  操作员配置的路径触达原型链。单元测试由 9 项增至 34 项。
 
 ### Security
 
