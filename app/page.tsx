@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { HeroFlow } from "./components/HeroFlow";
 import { PlatformIcon } from "./components/PlatformIcon";
 import { getLocale } from "./locale";
-import { getRequestOrigin } from "./request-origin";
 
 export async function generateMetadata(): Promise<Metadata> {
   const locale = await getLocale();
@@ -19,517 +19,686 @@ export async function generateMetadata(): Promise<Metadata> {
       };
 }
 
+const heroStats = [
+  { value: "25+", label: "PLATFORMS", signal: false },
+  { value: "1", label: "PROTOCOL / KEY", signal: false },
+  { value: "0", label: "FAILED-CALL CHARGE", signal: true },
+] as const;
+
+// Mirrors the three zones the hero canvas animates: scattered supply drifts in,
+// a review gate accepts or deflects it, accepted supply seats into the lattice.
+const pipelineZones = [
+  {
+    code: "01",
+    label: { en: "Scattered supply", zh: "分散供给" },
+    tone: "idle",
+  },
+  { code: "02", label: { en: "Review gate", zh: "审核闸门" }, tone: "signal" },
+  { code: "03", label: { en: "Ordered catalog", zh: "有序目录" }, tone: "ink" },
+] as const;
+
+const settlementReceipt = [
+  {
+    k: { en: "Wallet settlements", zh: "钱包结算" },
+    v: { en: "1", zh: "1 次" },
+    signal: false,
+  },
+  {
+    k: { en: "Data targets", zh: "数据目标" },
+    v: { en: "2,400", zh: "2,400" },
+    signal: false,
+  },
+  {
+    k: { en: "Upstream requests", zh: "上游请求" },
+    v: { en: "120", zh: "120" },
+    signal: false,
+  },
+  {
+    k: { en: "Execution time", zh: "执行耗时" },
+    v: { en: "38.2 s", zh: "38.2 s" },
+    signal: false,
+  },
+  {
+    k: { en: "Settled total", zh: "结算总额" },
+    v: { en: "$4.80", zh: "$4.80" },
+    signal: true,
+  },
+] as const;
+
 const platforms = [
   {
     name: "TikTok",
     value: "tiktok",
     detail: { en: "Users · videos · search", zh: "用户 · 视频 · 搜索" },
-    group: { en: "Short video", zh: "短视频" },
+    group: { en: "SHORT VIDEO", zh: "短视频" },
   },
   {
     name: "Douyin",
     value: "douyin",
     detail: { en: "Posts · comments · trends", zh: "作品 · 评论 · 热榜" },
-    group: { en: "Short video", zh: "短视频" },
+    group: { en: "SHORT VIDEO", zh: "短视频" },
   },
   {
     name: "Xiaohongshu",
     value: "xiaohongshu",
     detail: { en: "Notes · creators · comments", zh: "笔记 · 作者 · 评论" },
-    group: { en: "Content community", zh: "内容社区" },
+    group: { en: "CONTENT COMMUNITY", zh: "内容社区" },
   },
   {
     name: "Instagram",
     value: "instagram",
     detail: { en: "Profiles · posts · Reels", zh: "主页 · 帖子 · Reels" },
-    group: { en: "Social media", zh: "社交媒体" },
+    group: { en: "SOCIAL MEDIA", zh: "社交媒体" },
   },
   {
     name: "YouTube",
     value: "youtube",
     detail: { en: "Channels · videos · captions", zh: "频道 · 视频 · 字幕" },
-    group: { en: "Video content", zh: "视频内容" },
+    group: { en: "VIDEO CONTENT", zh: "视频内容" },
   },
   {
     name: "X / Twitter",
     value: "twitter",
     detail: { en: "Users · posts · trends", zh: "用户 · 推文 · 趋势" },
-    group: { en: "Social media", zh: "社交媒体" },
+    group: { en: "SOCIAL MEDIA", zh: "社交媒体" },
   },
   {
     name: "Reddit",
     value: "reddit",
     detail: { en: "Communities · posts · comments", zh: "社区 · 帖子 · 评论" },
-    group: { en: "Content community", zh: "内容社区" },
+    group: { en: "CONTENT COMMUNITY", zh: "内容社区" },
   },
   {
     name: "Bilibili",
     value: "bilibili",
     detail: { en: "Videos · creators · comments", zh: "视频 · 创作者 · 评论" },
-    group: { en: "Video content", zh: "视频内容" },
+    group: { en: "VIDEO CONTENT", zh: "视频内容" },
   },
   {
     name: "Weibo",
     value: "weibo",
     detail: { en: "Users · posts · trends", zh: "用户 · 帖子 · 热点" },
-    group: { en: "Social media", zh: "社交媒体" },
+    group: { en: "SOCIAL MEDIA", zh: "社交媒体" },
   },
   {
     name: "Kuaishou",
     value: "kuaishou",
     detail: { en: "Creators · videos · live", zh: "创作者 · 视频 · 直播" },
-    group: { en: "Short video", zh: "短视频" },
+    group: { en: "SHORT VIDEO", zh: "短视频" },
   },
   {
     name: "WeChat",
     value: "wechat_mp",
     detail: { en: "Accounts · articles · search", zh: "公众号 · 文章 · 搜索" },
-    group: { en: "Content ecosystem", zh: "内容生态" },
+    group: { en: "CONTENT ECOSYSTEM", zh: "内容生态" },
   },
   {
     name: "Threads",
     value: "threads",
     detail: { en: "Profiles · posts · replies", zh: "主页 · 帖子 · 回复" },
-    group: { en: "Social media", zh: "社交媒体" },
+    group: { en: "SOCIAL MEDIA", zh: "社交媒体" },
   },
 ] as const;
 
-const coreCapabilities = [
+const audiences = [
   {
-    code: "DISCOVER",
-    title: { en: "Discover trusted data supply", zh: "发现可信数据供给" },
+    index: "01",
+    code: "AGENT",
+    title: { en: "AI agents and automation", zh: "AI Agent 与自动化" },
     body: {
-      en: "Find the right data product by platform, data type, capability and availability. Unsynced or unreviewed supply never enters the callable catalog.",
-      zh: "从平台、数据类型、能力与可用状态出发，快速找到适合业务的数据产品；未同步、未审核的供给不会进入可用目录。",
+      en: "Hand a whole batch of data targets to one wallet settlement. The quote freezes target count and execution shape, and nothing switches silently after payment.",
+      zh: "把一整批数据目标交给一次钱包结算。报价冻结数量与执行方式，付款后不会静默切换。",
     },
-    href: "/catalog",
-    link: { en: "Explore the data market", zh: "进入数据市场" },
+    points: {
+      en: [
+        "Caller-held wallet; RelayBase never custodies private keys",
+        "Verified native batch endpoints shard against their own limits",
+        "Batch receipts keep the Base transaction hash and execution result",
+      ],
+      zh: [
+        "调用方自持钱包，RelayBase 不托管私钥",
+        "已验证原生批量接口按上限分片执行",
+        "批次回执保存 Base 交易哈希与执行结果",
+      ],
+    },
+    entry: "POST /v1/x402/batch",
   },
   {
-    code: "STANDARDIZE",
-    title: { en: "Organize APIs as data products", zh: "将接口组织成数据产品" },
+    index: "02",
+    code: "PRODUCT",
+    title: { en: "Product and growth teams", zh: "产品与增长团队" },
     body: {
-      en: "Platform, data type, invocation model, availability and price share one product structure, making supply searchable, comparable and governable.",
-      zh: "平台来源、数据类型、调用方式、可用状态和价格被放进同一套商品结构，供给可以被搜索、比较和持续治理。",
+      en: "Skip integrating upstream platforms one by one. One Key fetches data, charged per call, refunded automatically on failure.",
+      zh: "不用逐个对接上游平台。一个 Key 直接取数，按次计费，失败自动退款。",
     },
-    href: "/docs",
-    link: { en: "Read the product standard", zh: "查看产品规范" },
+    points: {
+      en: [
+        "Prepaid balance with per-request idempotency and a max-price guard",
+        "Credentials, rate limits, retries and refunds handled server-side",
+        "Console lists status, latency, unit price and charge per request",
+      ],
+      zh: [
+        "预充值余额，请求级幂等与最高报价保护",
+        "凭据、限流、重试和退款由服务端处理",
+        "控制台逐条查看状态码、延迟、单价与扣费",
+      ],
+    },
+    entry: "GET /v1/{platform}/…",
   },
   {
-    code: "CONSUME",
-    title: { en: "Consume data through one protocol", zh: "用统一协议消费数据" },
+    index: "03",
+    code: "RESEARCH",
+    title: { en: "Research and data analysis", zh: "研究与数据分析" },
     body: {
-      en: "Use a Bearer Key with prepaid balance for standard /v1 calls, or let an Agent wallet settle one Base USDC payment for a whole x402 batch.",
-      zh: "标准 /v1 调用使用 Bearer Key 与预充值余额；Agent 批量任务也可由调用方钱包通过 x402 用 Base USDC 一批结算一次。",
+      en: "Compare coverage before committing. The catalog publishes each product's invocation model, pagination unit, target ceiling and typical response size.",
+      zh: "先比覆盖面再动手。目录公开每个产品的调用方式、分页单位、目标上限与典型返回规模。",
     },
-    href: "/console",
-    link: { en: "Start using data", zh: "开始使用数据" },
-  },
-  {
-    code: "SETTLE",
-    title: { en: "Settle transparently by usage", zh: "按真实用量透明结算" },
-    body: {
-      en: "Prepaid usage and x402 wallet settlements use separate ledgers and receipts. Every amount remains traceable to a request or batch.",
-      zh: "预充值用量与 x402 钱包结算分别进入独立账本和回执；每笔金额都能追溯到具体请求或批次。",
+    points: {
+      en: [
+        "Compare supply across platforms and data categories side by side",
+        "Pagination and cursor fields, and per-page ceilings, are public",
+        "Uncountable supply is marked pending, never faked as zero",
+      ],
+      zh: [
+        "按平台与数据分类横向比对供给",
+        "分页与游标字段、单页上限公开可查",
+        "无法可靠计数时标为待确认，不伪造为 0",
+      ],
     },
-    href: "/pricing",
-    link: { en: "Understand settlement", zh: "了解市场结算" },
-  },
-] as const;
-
-const workflow = [
-  {
-    number: "01",
-    title: { en: "Discover the data product you need", zh: "发现需要的数据产品" },
-    body: {
-      en: "Enter through platform and data type, then filter the supply that exists now and has passed review.",
-      zh: "从平台和数据类型进入市场，筛选当前真实存在且通过审核的数据供给。",
-    },
-    accent: "blue",
-  },
-  {
-    number: "02",
-    title: { en: "Compare capability, status and price", zh: "比较能力、状态与价格" },
-    body: {
-      en: "Confirm data scope, parameters, availability, rate policy and per-request price in the product detail.",
-      zh: "在产品详情中确认数据范围、请求参数、可用状态、限流策略和每次消费价格。",
-    },
-    accent: "lime",
-  },
-  {
-    number: "03",
-    title: { en: "Ship through one protocol", zh: "通过统一协议投入生产" },
-    body: {
-      en: "Choose explicitly: standard /v1 + API Key charges prepaid balance; /v1/x402/batch + wallet payment settles a whole batch once.",
-      zh: "明确选择入口：标准 /v1 + API Key 扣预充值余额；/v1/x402/batch + 钱包支付为整批一次结算。",
-    },
-    accent: "dark",
-  },
-  {
-    number: "04",
-    title: { en: "Settle against real consumption", zh: "按真实消费完成结算" },
-    body: {
-      en: "Prepaid calls enter the account ledger. x402 batches enter a separate Base USDC settlement ledger with transaction and execution receipts.",
-      zh: "预充值调用进入账户用量账本；x402 批次进入独立的 Base USDC 结算账本，保存交易与执行回执。",
-    },
-    accent: "brown",
+    entry: "GET /api/marketplace",
   },
 ] as const;
 
-const billRows = [
-  { item: { en: "TikTok profiles", zh: "TikTok 用户资料" }, requests: "1,000", unit: "$0.002", total: "$2.00" },
-  { item: { en: "Video detail", zh: "视频详情" }, requests: "500", unit: "$0.004", total: "$2.00" },
-  { item: { en: "Failed requests", zh: "失败请求" }, requests: "37", unit: "$0.000", total: "$0.00" },
+const paths = [
+  {
+    kicker: "PATH B · AGENT BATCH",
+    badge: "AGENT NATIVE",
+    accent: "signal",
+    title: { en: "x402 wallet settlement", zh: "x402 钱包结算" },
+    body: {
+      en: "The caller's wallet produces a PAYMENT-SIGNATURE and one batch settles once. An API Key is neither needed nor accepted as proof of payment.",
+      zh: "调用方钱包生成 PAYMENT-SIGNATURE，一个批次一次结算。不需要也不接受 API Key 作为付款凭据。",
+    },
+    rows: [
+      {
+        k: "CREDENTIAL",
+        v: {
+          en: "PAYMENT-SIGNATURE · caller-held wallet",
+          zh: "PAYMENT-SIGNATURE · 调用方自持钱包",
+        },
+      },
+      {
+        k: "SETTLE",
+        v: {
+          en: "x402 v2 exact · native USDC on Base mainnet",
+          zh: "x402 v2 exact · Base 主网原生 USDC",
+        },
+      },
+      {
+        k: "EXECUTE",
+        v: {
+          en: "Pay first, then execute; synchronous batch, one settlement",
+          zh: "先支付后执行，同步批量，一批一次结算",
+        },
+      },
+      {
+        k: "QUOTE",
+        v: {
+          en: "Freezes count, execution shape and capability revision",
+          zh: "冻结数量、执行方式与能力 revision",
+        },
+      },
+      {
+        k: "LEDGER",
+        v: {
+          en: "Separate settlement ledger with Base transaction and receipts",
+          zh: "独立结算账本，保存 Base 交易与执行回执",
+        },
+      },
+    ],
+  },
+  {
+    kicker: "PATH A · STANDARD",
+    badge: "LIVE",
+    accent: "neutral",
+    title: { en: "API Key + prepaid balance", zh: "API Key + 预充值余额" },
+    body: {
+      en: "Standard /v1 requests carry a Bearer Key and draw on the signed-in account's prepaid balance. Suited to sustained, predictable production traffic.",
+      zh: "标准 /v1 请求携带 Bearer Key，从登录账户的预充值余额扣费。适合持续、可预测的生产流量。",
+    },
+    rows: [
+      {
+        k: "CREDENTIAL",
+        v: {
+          en: "Authorization: Bearer rb_live_…",
+          zh: "Authorization: Bearer rb_live_…",
+        },
+      },
+      {
+        k: "BILLING",
+        v: {
+          en: "Charged on success, auto-refunded on failure; idempotency key required",
+          zh: "成功扣费，失败自动退款；幂等键必填",
+        },
+      },
+      {
+        k: "RATE LIMIT",
+        v: {
+          en: "Key and account tiers, with standard 429 retry headers",
+          zh: "API Key 与账户双层，标准 429 重试响应头",
+        },
+      },
+      {
+        k: "TOP-UP",
+        v: {
+          en: "$10 / $25 / $50 / $100 stablecoin prepaid orders",
+          zh: "$10 / $25 / $50 / $100 稳定币预付订单",
+        },
+      },
+      {
+        k: "LEDGER",
+        v: {
+          en: "Account usage ledger; balance is snapshot plus delta",
+          zh: "账户用量账本，余额由快照加增量核算",
+        },
+      },
+    ],
+  },
+] as const;
+
+const governance = [
+  {
+    code: "CURATE",
+    title: { en: "Curated data supply", zh: "数据供给经过审核" },
+    body: {
+      en: "Products stay out of the callable market until catalog sync, safety review and manual price review are complete. Only fully defined entries list.",
+      zh: "未完成目录同步、安全核验和人工核价的产品不会进入可调用市场。只有完整定义条目才能上架。",
+    },
+  },
+  {
+    code: "BOUNDARY",
+    title: { en: "Read-only data access", zh: "只开放数据查询" },
+    body: {
+      en: "RelayBase does not proxy writes, publishing, interaction or deletion. Upstream addresses, credentials and control-plane routes stay private.",
+      zh: "不代理写入、发布、互动或删除操作。上游来源地址、凭据与控制面路由不会向客户暴露。",
+    },
+  },
+  {
+    code: "LEDGER",
+    title: { en: "Request-level audit trail", zh: "请求级审计记录" },
+    body: {
+      en: "Status, latency, logical target count, unit price and charge are queryable per request, and the request id comes back in a response header.",
+      zh: "状态码、延迟、逻辑目标数、单价与扣费金额逐条可查，请求编号通过响应头返回。",
+    },
+  },
+  {
+    code: "FAIL CLOSED",
+    title: { en: "No evidence, no service", zh: "缺证据就关闭" },
+    body: {
+      en: "If critical config, catalog evidence or the reconciliation heartbeat is missing, live proxying and stablecoin top-ups close automatically.",
+      zh: "关键配置、目录证据或对账心跳任一缺失，真实代理与稳定币充值自动安全关闭。",
+    },
+  },
 ] as const;
 
 export default async function Home() {
-  const origin = await getRequestOrigin();
   const locale = await getLocale();
   const isZh = locale === "zh";
 
   return (
-    <main id="main-content">
-      <section className="hero section-grid">
+    <main className="home" id="main-content">
+      <HeroFlow />
+
+      <section className="hero">
         <div className="hero-copy">
-          <div className="eyebrow">
-            <span className="eyebrow-pulse" aria-hidden="true" />
-            MULTI-PLATFORM DATA MARKETPLACE · RELAYBASE
-          </div>
+          <p className="page-kicker">
+            <span>MULTI-PLATFORM DATA MARKET</span>
+            <i aria-hidden="true" />
+            <span>V0.4.0</span>
+          </p>
           <h1>
-            {isZh ? "面向 AI 与应用的" : "The multi-platform"}
-            <span>{isZh ? "多平台数据市场" : "data market for AI"}</span>
+            {isZh ? (
+              <>
+                一个 Key，
+                <br />
+                打通 <mark>25 个平台</mark>
+                <br />
+                的公开数据
+              </>
+            ) : (
+              <>
+                One Key,
+                <br />
+                <mark>25 platforms</mark>
+                <br />
+                of public data
+              </>
+            )}
           </h1>
           <p className="hero-lede">
             {isZh
-              ? "RelayBase 将分散在不同平台的公开数据能力，标准化为可搜索、可比较、可计价、可调用的数据产品。团队从发现供给到规模化使用，都在同一个市场完成。"
-              : "RelayBase turns fragmented public data capabilities into searchable, comparable, priced and callable data products. Teams discover supply and put it into production in one market."}
+              ? "RelayBase 把分散在各平台的公开数据能力，整理成可搜索、可比较、可计价、可调用的数据产品。你不用逐个对接上游、维护凭据、处理限流和退款。"
+              : "RelayBase organizes public data capabilities scattered across platforms into searchable, comparable, priced and callable data products. No integrating upstreams one by one, no credential upkeep, no rate-limit or refund handling."}
+          </p>
+          <p className="hero-sub">
+            {isZh
+              ? "Agent 批量任务可以由调用方钱包通过 x402 在 Base 上用 USDC 一批结算一次；标准生产流量继续走 API Key 与预充值余额。"
+              : "Agent batches can settle once in Base USDC through x402 from a caller-held wallet. Standard production traffic keeps using an API Key and prepaid balance."}
           </p>
           <div className="hero-actions">
             <Link className="button button-blue button-large" href="/catalog">
               {isZh ? "进入数据市场" : "Explore the data market"}
               <span aria-hidden="true">→</span>
             </Link>
-            <a className="button button-ghost button-large" href="/console">
+            <a className="button button-large" href="/login">
               {isZh ? "开始使用数据" : "Start using data"}
             </a>
           </div>
-          <div className="hero-proof" aria-label={isZh ? "产品特性" : "Product characteristics"}>
-            <span>
-              <b>01</b> {isZh ? "多源数据供给" : "Multi-source supply"}
-            </span>
-            <span>
-              <b>02</b> {isZh ? "标准化数据产品" : "Standardized products"}
-            </span>
-            <span>
-              <b>03</b> {isZh ? "透明计价与审计" : "Transparent pricing"}
-            </span>
-          </div>
+          <dl className="hero-stats">
+            {heroStats.map((stat) => (
+              <div key={stat.label}>
+                <dd className={stat.signal ? "is-signal" : undefined}>
+                  {stat.value}
+                </dd>
+                <dt>{stat.label}</dt>
+              </div>
+            ))}
+          </dl>
         </div>
 
-        <div className="hero-console" aria-label={isZh ? "API 请求示例" : "API request example"}>
-          <div className="code-window">
-            <div className="code-window-bar">
-              <div className="window-dots" aria-hidden="true">
-                <span />
-                <span />
-                <span />
-              </div>
-              <span>request.sh</span>
-              <span className="code-live">
-                <i aria-hidden="true" />
-                API v1
-              </span>
-            </div>
-            <div className="code-tabs" aria-hidden="true">
-              <span className="active">cURL</span>
-              <span>JavaScript</span>
-              <span>Python</span>
-            </div>
-            <pre className="hero-code">
-              <code>
-                <span className="code-muted">01</span>{" "}
-                <span className="code-blue">curl</span> --request GET \{"\n"}
-                <span className="code-muted">02</span> &nbsp;
-                <span className="code-lime">
-                  &apos;{origin}/v1/example/
-                  {"\n"}
-                </span>
-                <span className="code-muted">03</span> &nbsp;
-                <span className="code-lime">
-                  profile/read?profile_id=demo-123&apos;
-                </span>{" "}
-                \{"\n"}
-                <span className="code-muted">04</span> &nbsp;--header{" "}
-                <span className="code-lime">
-                  &apos;Authorization: Bearer rb_live_••••&apos;
-                </span>
-                {" "}
-                \{"\n"}
-                <span className="code-muted">05</span> &nbsp;--header{" "}
-                <span className="code-lime">
-                  &apos;Idempotency-Key: profile-sync-001&apos;
-                </span>
-              </code>
-            </pre>
-            <div className="response-label">
-              <span>RELAYBASE JSON · 200</span>
-              <span>482 ms</span>
-            </div>
-            <pre className="response-code">
-              <code>
-                {"{"}
-                {"\n"} &nbsp;<span className="code-blue">&quot;success&quot;</span>:{" "}
-                <span className="code-lime">true</span>,
-                {"\n"} &nbsp;<span className="code-blue">&quot;data&quot;</span>:{" "}
-                {"{"}
-                {"\n"} &nbsp;&nbsp;
-                <span className="code-blue">&quot;userInfo&quot;</span>:{" "}
-                {"{"} <span className="code-blue">&quot;uniqueId&quot;</span>:{" "}
-                <span className="code-lime">&quot;mrbeast&quot;</span>, … {"}"}
-                {"\n"} &nbsp;{"}"}
-                {"\n"}
-                {"}"}
-              </code>
-            </pre>
-          </div>
-          <div className="console-note">
-            <span className="note-arrow" aria-hidden="true">
-              ↳
+        <ul aria-hidden="true" className="hero-pipeline">
+          <li className="hero-pipeline-title">SUPPLY PIPELINE</li>
+          {pipelineZones.map((zone) => (
+            <li className={`is-${zone.tone}`} key={zone.code}>
+              <span className="hero-pipeline-label">{zone.label[locale]}</span>
+              <span className="hero-pipeline-code">{zone.code}</span>
+              <i />
+              <span className="hero-pipeline-dot" />
+            </li>
+          ))}
+        </ul>
+
+        <aside
+          aria-label={
+            isZh ? "x402 批次结算回执" : "x402 batch settlement receipt"
+          }
+          className="hero-panel ticks"
+        >
+          <header>
+            <span className="hero-panel-kicker">SETTLEMENT CORE</span>
+            <span className="hero-panel-status">
+              <span className="status-dot" aria-hidden="true" />
+              SETTLED
             </span>
-            <p>
-              <b>
-                {isZh
-                  ? "每一项可调用能力，都是可发现、可计价、可审计的数据产品。"
-                  : "Every callable capability is a discoverable, priced and auditable data product."}
-              </b>
-              <br />
+          </header>
+          <div className="hero-panel-body">
+            <div className="hero-panel-id">
+              <span className="hero-panel-glyph" aria-hidden="true">
+                ◇
+              </span>
+              <div>
+                <b>{isZh ? "x402 批次回执" : "x402 batch receipt"}</b>
+                <code>RB_BATCH_01JQ8F2K7M4XZ</code>
+              </div>
+            </div>
+            <dl className="hero-panel-rows">
+              {settlementReceipt.map((row) => (
+                <div key={row.k.en}>
+                  <dt>{row.k[locale]}</dt>
+                  <dd className={row.signal ? "is-signal" : undefined}>
+                    {row.v[locale]}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+            <p className="hero-panel-note">
               {isZh
-                ? "API 是交付方式，数据才是市场的核心。"
-                : "APIs are the delivery layer. Data is the market."}
+                ? "一次钱包结算跑完一整批。报价冻结数量与执行方式，付款后不会静默切换；Base 交易哈希与执行结果都写进回执。"
+                : "One wallet settlement covers the whole batch. The quote freezes count and execution shape, nothing switches silently after payment, and the Base transaction hash and execution result are both written into the receipt."}
             </p>
           </div>
-        </div>
+          <footer>
+            <Link href="/pricing">
+              {isZh ? "了解结算方式" : "How settlement works"}
+              <span aria-hidden="true">→</span>
+            </Link>
+          </footer>
+        </aside>
       </section>
 
-      <section className="trust-strip" aria-label={isZh ? "数据市场特点" : "Data market characteristics"}>
-        <span>CURATED DATA SUPPLY</span>
-        <i />
-        <span>STANDARDIZED PRODUCTS</span>
-        <i />
-        <span>UNIFIED CONSUMPTION</span>
-        <i />
-        <span>TRANSPARENT SETTLEMENT</span>
-      </section>
-
-      <section className="section section-grid" id="platforms">
-        <div className="section-heading">
-          <p className="section-kicker">SUPPLY / 01</p>
-          <h2>
-            {isZh ? "一个市场，" : "One market,"}
-            <br />
-            {isZh ? "连接分散的数据供给" : "connected data supply"}
-          </h2>
+      <section className="section supply-section" id="supply">
+        <div className="section-head">
+          <div>
+            <p className="section-kicker">SUPPLY / 01</p>
+            <h2>
+              {isZh ? (
+                <>
+                  一个市场，
+                  <br />
+                  连接分散的数据供给
+                </>
+              ) : (
+                <>
+                  One market,
+                  <br />
+                  connecting scattered supply
+                </>
+              )}
+            </h2>
+          </div>
+          <div>
+            <p>
+              {isZh
+                ? "首页那条流水就是这件事：左边是各平台未经整理的原始供给，中间是审核闸门，右边是排成阵列的可调用目录。未完成核验的供给会在闸门处被打回，不会进入右侧阵列。"
+                : "The flow behind the hero is exactly this: raw, unsorted platform supply on the left, a review gate in the middle, and the callable catalog seated in a lattice on the right. Supply that fails verification is deflected at the gate and never reaches the lattice."}
+            </p>
+            <Link className="text-link" href="/catalog">
+              {isZh ? "查看完整数据市场" : "See the full data market"}
+              <span aria-hidden="true">↗</span>
+            </Link>
+          </div>
         </div>
-        <div className="section-intro">
-          <p>
-            {isZh
-              ? "RelayBase 按平台聚合短视频、社交媒体、视频内容与内容社区的数据能力，再将它们整理为结构一致的数据产品。市场中的能力、价格和状态均来自当前运行时供给目录。"
-              : "RelayBase aggregates short-video, social, video and community data capabilities by platform, then organizes them into consistently structured products. Capability, price and status come from the current runtime catalog."}
-          </p>
-          <Link className="text-link" href="/catalog">
-            {isZh ? "查看数据供给版图" : "Browse the supply map"} <span aria-hidden="true">↗</span>
-          </Link>
-        </div>
+        <ul className="supply-legend">
+          <li className="is-idle">{isZh ? "未整理供给" : "Unsorted supply"}</li>
+          <li className="is-signal">
+            {isZh ? "通过审核 · 入目录" : "Reviewed · catalogued"}
+          </li>
+          <li className="is-pending">
+            {isZh ? "闸门打回" : "Deflected at gate"}
+          </li>
+          <li className="is-ink">
+            {isZh ? "已上架 · 可调用" : "Listed · callable"}
+          </li>
+        </ul>
         <div className="platform-grid">
           {platforms.map((platform) => (
             <article className="platform-card" key={platform.name}>
               <div className="platform-card-top">
                 <PlatformIcon
-                  platform={platform.value}
                   className="platform-logo"
+                  platform={platform.value}
                 />
-                <span className="platform-index">{platform.group[locale]}</span>
               </div>
-              <h3>{platform.name}</h3>
-              <p>{platform.detail[locale]}</p>
-              <span className="platform-arrow" aria-hidden="true">
-                ↗
-              </span>
-            </article>
-          ))}
-          <article className="platform-card platform-card-more">
-            <div className="platform-card-top">
-              <PlatformIcon platform="all" className="platform-logo" />
-              <span className="platform-index">{isZh ? "完整目录" : "Full catalog"}</span>
-            </div>
-            <h3>{isZh ? "更多平台" : "More platforms"}</h3>
-            <p>{isZh ? "在数据市场查看全部平台与当前可用产品" : "See every platform and currently available product"}</p>
-            <Link href="/catalog">{isZh ? "进入市场" : "Enter market"}</Link>
-          </article>
-        </div>
-      </section>
-
-      <section className="section capability-section">
-        <div className="capability-heading">
-          <div>
-            <p className="section-kicker">MARKET / 02</p>
-            <h2>{isZh ? "不止汇总接口，而是组织一整个数据市场。" : "More than an API directory: an organized data market."}</h2>
-          </div>
-          <p>
-            {isZh
-              ? "RelayBase 把分散的接口供给转化为可理解、可比较、可消费的数据产品，并用统一的接入和结算基础设施，让数据真正进入生产流程。"
-              : "RelayBase turns fragmented API supply into understandable, comparable and consumable data products, backed by common integration and settlement infrastructure."}
-          </p>
-        </div>
-        <div className="capability-grid">
-          {coreCapabilities.map((capability, index) => (
-            <article className="capability-card" key={capability.code}>
-              <header>
-                <span>{String(index + 1).padStart(2, "0")}</span>
-                <code>{capability.code}</code>
-              </header>
-              <h3>{capability.title[locale]}</h3>
-              <p>{capability.body[locale]}</p>
-              {capability.href === "/console" ? (
-                <a href={capability.href}>
-                  {capability.link[locale]}
-                  <span aria-hidden="true">→</span>
-                </a>
-              ) : (
-                <Link href={capability.href}>
-                  {capability.link[locale]}
-                  <span aria-hidden="true">→</span>
-                </Link>
-              )}
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="section workflow-section">
-        <div className="workflow-header">
-          <p className="section-kicker">TRANSACTION / 03</p>
-          <h2>{isZh ? "从发现数据到投入生产，四步完成。" : "From discovery to production in four steps."}</h2>
-        </div>
-        <div className="workflow-grid">
-          {workflow.map((step) => (
-            <article
-              className={`workflow-card workflow-${step.accent}`}
-              key={step.number}
-            >
-              <span>{step.number}</span>
               <div>
-                <h3>{step.title[locale]}</h3>
-                <p>{step.body[locale]}</p>
+                <h3>{platform.name}</h3>
+                <p>{platform.detail[locale]}</p>
+                <div className="platform-card-foot">
+                  <span className="platform-group">
+                    {platform.group[locale]}
+                  </span>
+                  <span aria-hidden="true">↗</span>
+                </div>
               </div>
             </article>
           ))}
-        </div>
-        <div className="workflow-endpoint">
-          <span className="endpoint-method">GET</span>
-          <code>/v1/example/profile/read</code>
-          <span className="endpoint-latency">200 · 482 ms</span>
-        </div>
-      </section>
-
-      <section className="section billing-section section-grid">
-        <div className="section-heading">
-          <p className="section-kicker">SETTLEMENT / 04</p>
-          <h2>
-            {isZh ? "数据消费，" : "Data consumption,"}
-            <br />
-            {isZh ? "两条明确的结算路径" : "with two explicit payment paths"}
-          </h2>
-          <p className="heading-note">
-            {isZh
-              ? "标准 /v1 请求使用 API Key 并扣预充值余额；Agent 批量任务使用调用方自持钱包，通过 x402 在 Base 上用 USDC 一批结算一次。两者不会隐式切换，也不会混用账本。"
-              : "Standard /v1 requests use an API Key and prepaid balance. Agent batches use a caller-controlled wallet to settle once in Base USDC through x402. The service never switches implicitly or mixes their ledgers."}
-          </p>
-          <Link className="button button-dark" href="/pricing">
-            {isZh ? "比较两种支付方式" : "Compare payment paths"}
-            <span aria-hidden="true">→</span>
+          <Link className="platform-card platform-card-more" href="/catalog">
+            <div className="platform-card-top">
+              <PlatformIcon className="platform-logo" platform="all" />
+            </div>
+            <div>
+              <h3>{isZh ? "更多平台" : "More platforms"}</h3>
+              <p>
+                {isZh
+                  ? "在数据市场查看全部平台与当前可用产品"
+                  : "See every platform and currently available product"}
+              </p>
+              <div className="platform-card-foot">
+                <span className="platform-group">
+                  {isZh ? "完整目录" : "FULL CATALOG"}
+                </span>
+                <span aria-hidden="true">↗</span>
+              </div>
+            </div>
           </Link>
         </div>
-        <div className="receipt-card">
-          <div className="receipt-header">
-            <div>
-              <span>{isZh ? "用量样例" : "Usage example"}</span>
-              <b>30 DAYS</b>
-            </div>
-            <span>USD</span>
-          </div>
-          <div className="receipt-table" role="table" aria-label={isZh ? "计费样例" : "Billing example"}>
-            <div className="receipt-row receipt-row-head" role="row">
-              <span role="columnheader">{isZh ? "调用项" : "Product"}</span>
-              <span role="columnheader">{isZh ? "次数" : "Calls"}</span>
-              <span role="columnheader">{isZh ? "单价" : "Unit"}</span>
-              <span role="columnheader">{isZh ? "小计" : "Subtotal"}</span>
-            </div>
-            {billRows.map((row) => (
-              <div className="receipt-row" role="row" key={row.item.en}>
-                <span role="cell">{row.item[locale]}</span>
-                <span role="cell">{row.requests}</span>
-                <span role="cell">{row.unit}</span>
-                <span role="cell">{row.total}</span>
+      </section>
+
+      <section className="section access-section">
+        <div className="section-head is-stacked">
+          <p className="section-kicker">ACCESS / 02</p>
+          <h2>
+            {isZh
+              ? "三种团队，三条已经铺好的路"
+              : "Three kinds of team, three paths already paved"}
+          </h2>
+          <p>
+            {isZh
+              ? "同一个目录、同一套价格，入口按你的工作方式不同。选好入口就能开始，不需要先读完全部文档。"
+              : "One catalog and one price list; the entry point follows how you work. Pick an entry and start — reading every page of the docs first is optional."}
+          </p>
+        </div>
+        <div className="access-grid">
+          {audiences.map((audience) => (
+            <article className="access-card" key={audience.code}>
+              <header>
+                <span className="access-index">{audience.index}</span>
+                <span className="access-code">{audience.code}</span>
+              </header>
+              <h3>{audience.title[locale]}</h3>
+              <p>{audience.body[locale]}</p>
+              <ul>
+                {audience.points[locale].map((point) => (
+                  <li key={point}>{point}</li>
+                ))}
+              </ul>
+              <div className="access-entry">
+                <span>ENTRY</span>
+                <code>{audience.entry}</code>
               </div>
-            ))}
-          </div>
-          <div className="receipt-total">
-            <span>{isZh ? "样例总额" : "Example total"}</span>
-            <strong>$4.00</strong>
-          </div>
-          <p>{isZh ? "* 价格仅作说明，实际单价以调用路径和控制台记录为准。" : "* Illustrative only. The request path and console ledger are authoritative."}</p>
+            </article>
+          ))}
         </div>
       </section>
 
-      <section className="section security-section">
-        <div className="security-copy">
-          <p className="section-kicker">GOVERNANCE / 05</p>
-          <h2>{isZh ? "市场有边界，数据使用才有信任。" : "Clear market boundaries create trusted data use."}</h2>
+      <section className="section settle-section" id="settle">
+        <div className="section-head is-stacked">
+          <p className="section-kicker">SETTLEMENT / 03</p>
+          <h2>
+            {isZh
+              ? "两条明确的付费路径，不会互相顶替"
+              : "Two explicit payment paths that never displace each other"}
+          </h2>
           <p>
             {isZh
-              ? "RelayBase 只将完成目录、安全与价格审核的数据能力放进可用市场。平台来源、只读边界、调用状态与结算证据都被明确记录。"
-              : "RelayBase lists data capabilities only after catalog, safety and price review. Platform source, read-only boundary, call status and settlement evidence remain explicit."}
+              ? "标准 /v1 请求走 API Key 与预充值余额；Agent 批量任务走调用方自持钱包，在 Base 上用 USDC 一批结算一次。两者账本独立，不会隐式切换。"
+              : "Standard /v1 requests use an API Key and prepaid balance. Agent batches use a caller-held wallet and settle once in Base USDC. The two keep separate ledgers and never switch implicitly."}
           </p>
         </div>
-        <div className="security-list">
-          <div>
-            <span>CURATE</span>
-            <p>
-              <b>{isZh ? "数据供给经过审核" : "Curated data supply"}</b>
-              {isZh ? "未完成目录同步、安全核验和价格复核的产品不会进入可用市场。" : "Products stay out of the callable market until catalog sync, safety review and price verification are complete."}
-            </p>
-          </div>
-          <div>
-            <span>BOUNDARY</span>
-            <p>
-              <b>{isZh ? "只开放数据查询" : "Read-only data access"}</b>
-              {isZh ? "不代理写入、发布、互动或删除操作，来源与控制字段不会向客户暴露。" : "RelayBase does not proxy writes, publishing, interaction or deletion, and source control fields stay private."}
-            </p>
-          </div>
-          <div>
-            <span>LEDGER</span>
-            <p>
-              <b>{isZh ? "请求级审计记录" : "Request-level audit trail"}</b>
-              {isZh ? "状态码、延迟、数据来源、单价与扣费金额逐条可查。" : "Status, latency, source, unit price and charge are recorded for every request."}
-            </p>
-          </div>
+        <div className="path-grid">
+          {paths.map((path) => (
+            <article
+              className={`path-card is-${path.accent}`}
+              key={path.kicker}
+            >
+              <header>
+                <span className="path-kicker">{path.kicker}</span>
+                <span className="path-badge">{path.badge}</span>
+              </header>
+              <div className="path-body">
+                <h3>{path.title[locale]}</h3>
+                <p>{path.body[locale]}</p>
+                <dl>
+                  {path.rows.map((row) => (
+                    <div key={row.k}>
+                      <dt>{row.k}</dt>
+                      <dd>{row.v[locale]}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+            </article>
+          ))}
         </div>
+        <p className="path-note">
+          <span className="path-note-tag">USD MICROS</span>
+          <span>
+            {isZh
+              ? "客户价按 USD micros 记账，1 USD = 1,000,000。只有完整、合法的上游 200 JSON 响应才扣费；网络失败、非成功状态、超限或畸形响应自动退款。"
+              : "Customer prices are booked in USD micros, where 1 USD = 1,000,000. Only a complete, valid upstream 200 JSON response is charged; network failures, non-success statuses, over-limit and malformed responses are refunded automatically."}
+          </span>
+        </p>
+      </section>
+
+      <section className="section governance-section">
+        <div>
+          <p className="section-kicker">GOVERNANCE / 04</p>
+          <h2>
+            {isZh ? (
+              <>
+                市场有边界，
+                <br />
+                数据使用才有信任
+              </>
+            ) : (
+              <>
+                A market with boundaries
+                <br />
+                is a market you can trust
+              </>
+            )}
+          </h2>
+          <p>
+            {isZh
+              ? "只有完成目录、安全与价格审核的数据能力会进入可用市场。平台来源、只读边界、调用状态和结算证据都被明确记录。"
+              : "Only capabilities that clear catalog, safety and price review enter the callable market. Platform source, the read-only boundary, call status and settlement evidence are all recorded explicitly."}
+          </p>
+        </div>
+        <dl className="governance-list">
+          {governance.map((item) => (
+            <div key={item.code}>
+              <dt>{item.code}</dt>
+              <dd>
+                <b>{item.title[locale]}</b>
+                <p>{item.body[locale]}</p>
+              </dd>
+            </div>
+          ))}
+        </dl>
       </section>
 
       <section className="final-cta">
-        <div className="cta-grid" aria-hidden="true" />
-        <p>ENTER THE DATA MARKET</p>
-          <h2>
-          {isZh ? "下一项数据能力，" : "Your next data capability"}
-          <br />
-          {isZh ? "不必再从零寻找。" : "starts in the market."}
+        <p className="final-cta-kicker">ENTER THE DATA MARKET</p>
+        <h2>
+          {isZh ? (
+            <>
+              下一项数据能力，
+              <br />
+              不必再从零寻找。
+            </>
+          ) : (
+            <>
+              Your next data capability
+              <br />
+              does not start from zero.
+            </>
+          )}
         </h2>
         <div>
           <Link className="button button-lime button-large" href="/catalog">
-            {isZh ? "进入数据市场" : "Explore the data market"} <span aria-hidden="true">↗</span>
+            {isZh ? "进入数据市场" : "Explore the data market"}
+            <span aria-hidden="true">↗</span>
           </Link>
-          <Link className="button button-ghost-light button-large" href="/docs">
+          <Link className="button button-large" href="/docs">
             {isZh ? "查看接入文档" : "Read integration docs"}
           </Link>
         </div>

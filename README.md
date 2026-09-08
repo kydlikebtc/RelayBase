@@ -66,6 +66,21 @@ CI 在 `npm run check` 之后还会执行 `npm audit --omit=dev --audit-level=hi
 出现高危通告时，在 `package.json` 的 `overrides` 中固定修复版本并同步 lockfile，同时在
 `CHANGELOG.md` 记录；不要用忽略通告的方式让门禁通过。
 
+## 前端与呈现层
+
+站点使用近黑仪表主题。设计 token（底色、五级墨阶、一个信号绿加待处理琥珀 / 阻断红、
+发丝线阶与栅格）集中定义在 `app/globals.css` 的 `:root`，页面样式表只引用 token，不写
+色值字面量。该文件同时保留旧变量名的兼容别名，改版可以逐页推进而不出现中间态破图。
+
+字体经 `next/font` 自托管：构建期从 Google Fonts 拉取 JetBrains Mono 与 Noto Sans SC，
+写入 `.vinext/fonts` 缓存，产物进静态资源目录，不占用 Worker 脚本体积。首次构建需要访问
+`fonts.googleapis.com` 与 `fonts.gstatic.com`；中文字体按 unicode-range 切成约 300 个分片，
+所以首次构建明显较慢，之后走缓存。运行时不产生任何第三方字体请求。
+
+首页 hero 的 three.js 供给流水图是站点唯一的动画。`three` 是生产依赖，但以动态 `import`
+分离为独立 chunk，只有首页会加载；`prefers-reduced-motion` 或视口宽度不足 1100px 时整段
+跳过，连 chunk 都不会请求。
+
 ## 环境变量
 
 复制 `.env.example` 的键名，在本地或托管 Secret 中填入真实值。不要提交任何真实

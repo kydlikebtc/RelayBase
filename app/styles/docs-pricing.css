@@ -39,7 +39,6 @@
 .docs-checklist code {
   padding: 2px 6px;
   border: 1px solid var(--border);
-  border-radius: 6px;
   color: var(--accent-strong);
   background: var(--surface);
   font-size: 0.84em;
@@ -51,7 +50,6 @@
   padding: 18px;
   border: 1px solid var(--border);
   border-top: 3px solid var(--accent);
-  border-radius: 14px;
   background: var(--surface);
 }
 
@@ -72,8 +70,7 @@
 .docs-version i {
   width: fit-content;
   padding: 4px 8px;
-  border-radius: 999px;
-  color: white;
+  color: var(--bg);
   background: var(--green);
   font-family: var(--mono);
   font-size: 8px;
@@ -144,7 +141,6 @@
   margin-top: 64px;
   padding: 16px;
   border: 1px solid var(--border);
-  border-radius: 12px;
   background: var(--surface);
 }
 
@@ -220,13 +216,11 @@
   margin: 26px 0;
   padding: 18px 20px;
   border: 1px solid var(--border);
-  border-radius: 12px;
   background: var(--surface);
 }
 
 .endpoint-box span {
   padding: 5px 8px;
-  border-radius: 6px;
   color: var(--green);
   background: color-mix(in srgb, var(--green) 10%, var(--surface));
   font-family: var(--mono);
@@ -265,8 +259,7 @@
   height: 24px;
   flex: 0 0 24px;
   place-items: center;
-  border-radius: 50%;
-  color: white;
+  color: var(--bg);
   background: var(--green);
   font-family: var(--mono);
   font-size: 9px;
@@ -286,9 +279,8 @@
 .docs-code-panel {
   margin: 22px 0;
   overflow: hidden;
-  border: 1px solid #403c37;
-  border-radius: 12px;
-  color: #e8e3dc;
+  border: 1px solid var(--line-strong);
+  color: var(--ink-2);
   background: var(--code);
 }
 
@@ -296,9 +288,9 @@
   display: flex;
   justify-content: space-between;
   padding: 11px 15px;
-  border-bottom: 1px solid #44403b;
-  color: #aaa49a;
-  background: #35312d;
+  border-bottom: 1px solid var(--line-strong);
+  color: var(--ink-3);
+  background: var(--surface-soft);
   font-family: var(--mono);
   font-size: 8px;
   font-weight: 600;
@@ -325,7 +317,6 @@
   margin: 26px 0;
   padding: 18px;
   border: 1px solid var(--border);
-  border-radius: 12px;
   background: var(--bg-alt);
 }
 
@@ -335,8 +326,7 @@
   height: 28px;
   flex: 0 0 28px;
   place-items: center;
-  border-radius: 50%;
-  color: white;
+  color: var(--bg);
   background: var(--accent);
   font-family: var(--mono);
   font-size: 10px;
@@ -361,7 +351,7 @@
 
 .docs-callout-warning {
   border-color: color-mix(in srgb, var(--warning) 28%, var(--border));
-  background: #faf4e8;
+  background: var(--pending-wash);
 }
 
 .docs-callout-warning > span {
@@ -370,7 +360,7 @@
 
 .docs-callout-lime {
   border-color: color-mix(in srgb, var(--green) 28%, var(--border));
-  background: #f0f5ed;
+  background: var(--signal-wash);
 }
 
 .docs-callout-lime > span {
@@ -393,7 +383,6 @@
   min-height: 170px;
   padding: 20px;
   border: 1px solid var(--border);
-  border-radius: 14px;
   background: var(--surface);
 }
 
@@ -422,7 +411,6 @@
   margin: 28px 0;
   overflow-x: auto;
   border: 1px solid var(--border);
-  border-radius: 12px;
   background: var(--surface);
 }
 
@@ -513,7 +501,6 @@
   min-height: 180px;
   padding: 20px;
   border: 1px solid var(--border);
-  border-radius: 14px;
   background: var(--surface);
 }
 
@@ -522,8 +509,7 @@
   width: 28px;
   height: 28px;
   place-items: center;
-  border-radius: 50%;
-  color: white;
+  color: var(--bg);
   background: var(--accent);
   font-family: var(--mono);
   font-size: 9px;
@@ -553,8 +539,7 @@
 
 .docs-next {
   padding: clamp(32px, 5vw, 52px);
-  border-radius: 18px;
-  color: white;
+  color: var(--bg);
   background: var(--charcoal);
 }
 
@@ -585,8 +570,8 @@
 }
 
 .docs-next .button-ghost {
-  border-color: #777168;
-  color: white;
+  border-color: var(--line-active);
+  color: var(--ink);
 }
 
 /* Pricing */
@@ -607,10 +592,9 @@
   z-index: -1;
   width: 430px;
   height: 430px;
-  border-radius: 50%;
   background:
-    radial-gradient(circle at 50% 50%, transparent 34%, rgb(196 148 106 / 0.1) 35% 36%, transparent 37%),
-    radial-gradient(circle at 50% 50%, transparent 54%, rgb(216 184 150 / 0.18) 55% 56%, transparent 57%);
+    radial-gradient(circle at 50% 50%, transparent 34%, rgb(242 244 245 / 0.07) 35% 36%, transparent 37%),
+    radial-gradient(circle at 50% 50%, transparent 54%, rgb(94 227 155 / 0.14) 55% 56%, transparent 57%);
   content: "";
 }
 
@@ -624,7 +608,6 @@
 .pricing-flags span {
   padding: 7px 11px;
   border: 1px solid var(--border);
-  border-radius: 999px;
   color: var(--ink-2);
   background: var(--surface);
   font-family: var(--mono);
@@ -694,7 +677,6 @@
   margin: -12px 0 24px;
   padding: 16px 18px;
   border: 1px solid var(--border);
-  border-radius: 12px;
   background: var(--surface);
 }
 
@@ -704,8 +686,7 @@
   height: 24px;
   flex: 0 0 24px;
   place-items: center;
-  border-radius: 50%;
-  color: white;
+  color: var(--bg);
   background: var(--ink-3);
   font-family: var(--mono);
   font-size: 11px;
@@ -741,7 +722,6 @@
   padding: 24px;
   border: 1px solid var(--border);
   border-top: 3px solid var(--tan);
-  border-radius: 16px;
   background: var(--surface);
 }
 
@@ -758,7 +738,7 @@
 }
 
 .topup-featured {
-  background: #fffdfa;
+  background: var(--signal-wash);
 }
 
 .topup-badge {
@@ -766,8 +746,7 @@
   top: 12px;
   right: 14px;
   padding: 5px 9px;
-  border-radius: 999px;
-  color: white;
+  color: var(--bg);
   background: var(--accent);
   font-family: var(--mono);
   font-size: 8px;
@@ -866,7 +845,6 @@
   margin-top: 34px;
   padding: 16px 18px;
   border: 1px solid var(--border);
-  border-radius: 12px;
   background: var(--surface);
 }
 
@@ -888,7 +866,6 @@
 .price-list {
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 16px;
   background: var(--surface);
 }
 
@@ -958,7 +935,6 @@
   min-height: 230px;
   padding: 24px;
   border: 1px solid var(--border);
-  border-radius: 16px;
   background: var(--surface);
 }
 
@@ -967,8 +943,7 @@
   width: 34px;
   height: 34px;
   place-items: center;
-  border-radius: 50%;
-  color: white;
+  color: var(--bg);
   background: var(--accent);
   font-family: var(--mono);
 }
@@ -1038,7 +1013,7 @@
 
 .pricing-cta {
   padding: clamp(86px, 11vw, 130px) var(--page-pad);
-  color: white;
+  color: var(--bg);
   background: var(--charcoal);
   text-align: center;
 }
@@ -1125,7 +1100,6 @@
   .docs-sidebar nav a {
     padding: 6px 8px;
     border: 1px solid var(--border);
-    border-radius: 999px;
   }
 
   .docs-help {
