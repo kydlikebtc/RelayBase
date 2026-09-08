@@ -1,7 +1,17 @@
 "use client";
 
-import type { FormEvent, ReactNode } from "react";
+import type { FormEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  AdminApiError,
+  NAMED_ADMIN_SESSION,
+  StatePanel,
+  adminRequest,
+  isNonEmptyString,
+  isObject,
+} from "./adminApi";
+import type { RemoteState } from "./adminApi";
+import { CapabilitiesTab } from "./CapabilitiesTab";
 
 type AdminTab =
   | "overview"
@@ -15,11 +25,8 @@ type CatalogView =
   | "add"
   | "pricing"
   | "x402"
+  | "capabilities"
   | "consistency";
-type RemoteState<T> =
-  | { status: "idle" | "loading" }
-  | { status: "ready"; data: T }
-  | { status: "error"; message: string };
 
 type OverviewResponse = {
   summary: {
@@ -680,7 +687,6 @@ type ConfirmAction =
     }
   | { kind: "sync" };
 
-type JsonObject = Record<string, unknown>;
 type JsonValue =
   | null
   | boolean
@@ -688,9 +694,6 @@ type JsonValue =
   | string
   | JsonValue[]
   | { [key: string]: JsonValue };
-type Validator<T> = (value: unknown) => value is T;
-
-const NAMED_ADMIN_SESSION = "__named_admin_session__";
 const CATALOG_SAFETY_POLICY_VERSION = 1;
 const PENDING_CATALOG_PAGE_SIZE = 50;
 const ROUTE_CATALOG_PAGE_SIZE = 50;
@@ -729,19 +732,6 @@ function readinessMissingLabel(value: string): string {
   return readinessMissingLabels[value] ?? value;
 }
 
-class AdminApiError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-  ) {
-    super(message);
-  }
-}
-
-function isObject(value: unknown): value is JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function isSafeNonNegativeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
@@ -756,12 +746,6 @@ function isFiniteRate(value: unknown): value is number {
     Number.isFinite(value) &&
     value >= 0 &&
     value <= 1
-  );
-}
-
-function isNonEmptyString(value: unknown, max = 2_000): value is string {
-  return (
-    typeof value === "string" && value.length > 0 && value.length <= max
   );
 }
 
@@ -2150,52 +2134,6 @@ function isUserUpdateResponse(
   );
 }
 
-async function adminRequest<T>(
-  url: string,
-  secret: string,
-  validator: Validator<T>,
-  init?: RequestInit,
-): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    cache: "no-store",
-    credentials: "same-origin",
-    headers: {
-      Accept: "application/json",
-      ...(secret && secret !== NAMED_ADMIN_SESSION
-        ? { Authorization: `Bearer ${secret}` }
-        : {}),
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
-      ...init?.headers,
-    },
-  });
-  const payload: unknown = await response.json().catch(() => null);
-
-  if (!response.ok) {
-    let message =
-      response.status === 401
-        ? "管理员会话已失效，请重新登录。"
-        : response.status === 403
-          ? "当前账户没有执行此操作所需的管理员角色。"
-        : `管理接口请求失败（HTTP ${response.status}）。`;
-    if (
-      isObject(payload) &&
-      isObject(payload.error) &&
-      isNonEmptyString(payload.error.message, 500)
-    ) {
-      message = payload.error.message;
-    }
-    throw new AdminApiError(message, response.status);
-  }
-
-  if (!validator(payload)) {
-    throw new AdminApiError(
-      "服务返回的数据格式不符合管理后台契约，已停止展示以避免误操作。",
-      502,
-    );
-  }
-  return payload;
-}
 
 function formatUsd(micros: number, digits = 2) {
   return `$${(micros / 1_000_000).toLocaleString("en-US", {
@@ -2462,46 +2400,6 @@ function reviewReasonLabel(reason: string) {
   return labels[reason] ?? reason;
 }
 
-function StatePanel({
-  state,
-  label,
-  onRetry,
-  children,
-}: {
-  state: RemoteState<unknown>;
-  label: string;
-  onRetry: () => void;
-  children: ReactNode;
-}) {
-  if (state.status === "idle" || state.status === "loading") {
-    return (
-      <div className="admin-state admin-state-loading" role="status">
-        <span className="admin-spinner" aria-hidden="true" />
-        <div>
-          <strong>正在读取{label}</strong>
-          <p>只展示服务端返回并通过格式校验的数据。</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (state.status === "error") {
-    return (
-      <div className="admin-state admin-state-error" role="alert">
-        <span aria-hidden="true">!</span>
-        <div>
-          <strong>{label}加载失败</strong>
-          <p>{state.message}</p>
-        </div>
-        <button className="button button-ghost button-small" onClick={onRetry}>
-          重新加载
-        </button>
-      </div>
-    );
-  }
-
-  return children;
-}
 
 function ConfirmDialog({
   title,
@@ -6998,6 +6896,7 @@ export function AdminClient() {
                   ["routes", "当前路由", "查看运行目录与发布状态"],
                   ["pricing", "定价发布", "批量定价、审核与上下架"],
                   ["x402", "x402 批量", "配置 Agent 钱包批量入口"],
+                  ["capabilities", "能力", "Agent 调用的公开名字与输入别名"],
                   ["consistency", "一致性证明", "核对快照、覆盖率与代次"],
                 ] as const
               ).map(([id, label, description]) => (
@@ -7373,7 +7272,10 @@ export function AdminClient() {
               </StatePanel>
               </section>
             ) : null}
-            {catalogView !== "add" ? (
+            {catalogView === "capabilities" ? (
+              <CapabilitiesTab secret={adminSecret} />
+            ) : null}
+            {catalogView !== "add" && catalogView !== "capabilities" ? (
               <StatePanel
                 state={catalog}
                 label="接口目录"

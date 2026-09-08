@@ -405,6 +405,9 @@ CHECK 约束；SQLite 没有 REGEXP，所以 SQL 守卫比应用层校验更宽�
 - `POST /api/admin/capabilities/draft-from-endpoint`：由端点推导草稿 id；推导不出
   合法 id 时返回 400 `capability_id_underivable`，不会自造名字。
 - 目录同步下架端点时，同一 batch 内把关联能力置为 `deprecated`。
+- 后台「路由与定价 → 能力」子页提供列表、从端点创建草稿与状态切换。状态变更用
+  `expectedRevision` CAS，冲突时提示本次操作未生效并重新加载。写入与审计记录同批
+  提交，任一失败都整体回滚，被拒绝的 CAS 不会留下审计痕迹。
 
 ## 客户调用
 

@@ -10575,7 +10575,21 @@ async function insertCapabilityDraft(
     derived: boolean;
   },
 ): Promise<Response> {
-  const inserted = await db
+  // 审计语句与写入同批：审计准备失败（例如管理员身份无法归属）必须在任何写入
+  // 之前抛出，写入之后再失败会留下"已改但报错"的状态，运营重试只会撞上 CAS。
+  const audit = await prepareAdminAuditStatement(db, request, {
+    action: "capability.create",
+    targetType: "capability",
+    targetId: draft.id,
+    capabilityRevision: { id: draft.id, revision: 1 },
+    details: {
+      endpointPath: draft.endpointPath,
+      httpMethod: draft.httpMethod,
+      status: draft.status,
+      derived: draft.derived,
+    },
+  });
+  const insert = db
     .prepare(
       `INSERT OR IGNORE INTO capabilities
        (id, platform, category, endpoint_path, http_method, status,
@@ -10595,9 +10609,9 @@ async function insertCapabilityDraft(
       draft.responseItemsPath,
       draft.summaryZh,
       draft.summaryEn,
-    )
-    .run();
-  if ((inserted.meta?.changes ?? 0) === 0) {
+    );
+  const results = await db.batch([insert, audit]);
+  if (Number(results[0]?.meta?.changes ?? 0) === 0) {
     throw new PlatformError(
       409,
       "capability_already_exists",
@@ -10612,17 +10626,6 @@ async function insertCapabilityDraft(
       "能力写入后无法读回。",
     );
   }
-  await writeAdminAudit(db, request, {
-    action: "capability.create",
-    targetType: "capability",
-    targetId: draft.id,
-    details: {
-      endpointPath: draft.endpointPath,
-      httpMethod: draft.httpMethod,
-      status: draft.status,
-      derived: draft.derived,
-    },
-  });
   return jsonResponse({ capability: adminCapabilityShape(row) }, 201, requestId);
 }
 
@@ -10802,8 +10805,24 @@ async function handleAdminCapabilityUpdate(
         : capabilityText(body.summaryEn, "summaryEn", 400),
   };
 
+  const audit = await prepareAdminAuditStatement(db, request, {
+    action: "capability.update",
+    targetType: "capability",
+    targetId: capabilityId,
+    capabilityRevision: {
+      id: capabilityId,
+      revision: existing.revision + 1,
+    },
+    details: {
+      fromRevision: existing.revision,
+      toRevision: existing.revision + 1,
+      fromStatus: existing.status,
+      toStatus: next.status,
+    },
+  });
   // CAS 写在 WHERE 里，而不是先读后写：并发的两次修改否则会互相覆盖。
-  const updated = await db
+  // 与审计同批，任一失败都整体回滚。
+  const update = db
     .prepare(
       `UPDATE capabilities
           SET category = ?, status = ?, input_aliases_json = ?,
@@ -10822,9 +10841,9 @@ async function handleAdminCapabilityUpdate(
       next.summaryEn,
       capabilityId,
       body.expectedRevision,
-    )
-    .run();
-  if ((updated.meta?.changes ?? 0) === 0) {
+    );
+  const results = await db.batch([update, audit]);
+  if (Number(results[0]?.meta?.changes ?? 0) === 0) {
     throw new PlatformError(
       409,
       "capability_conflict",
@@ -10833,17 +10852,6 @@ async function handleAdminCapabilityUpdate(
   }
   const row = await adminCapabilityRecord(db, capabilityId);
   if (!row) throw capabilityNotFound();
-  await writeAdminAudit(db, request, {
-    action: "capability.update",
-    targetType: "capability",
-    targetId: capabilityId,
-    details: {
-      fromRevision: existing.revision,
-      toRevision: row.revision,
-      fromStatus: existing.status,
-      toStatus: row.status,
-    },
-  });
   return jsonResponse({ capability: adminCapabilityShape(row) }, 200, requestId);
 }
 
@@ -23124,6 +23132,10 @@ async function prepareAdminAuditStatement(
       path: string;
       revision: number;
     };
+    capabilityRevision?: {
+      id: string;
+      revision: number;
+    };
     pendingCatalogPriceUpdate?: {
       path: string;
       customerPriceUsdMicros: number;
@@ -23166,7 +23178,9 @@ async function prepareAdminAuditStatement(
   }
   const causalKey =
     input.idempotencyKey ??
-    (input.catalogEndpointRevision
+    (input.capabilityRevision
+      ? `capability:${input.capabilityRevision.id}:${input.capabilityRevision.revision}`
+      : input.catalogEndpointRevision
       ? `revision:${input.catalogEndpointRevision.path}:${input.catalogEndpointRevision.revision}`
       : input.pendingCatalogPriceUpdate
         ? `pending-price:${input.pendingCatalogPriceUpdate.path}:${input.pendingCatalogPriceUpdate.customerPriceUsdMicros}:${input.pendingCatalogPriceUpdate.updatedAt}`
@@ -23235,6 +23249,28 @@ async function prepareAdminAuditStatement(
         input.paymentReviewResolution.caseId,
         input.paymentReviewResolution.action,
         input.paymentReviewResolution.requestHash,
+      );
+  }
+  // 只有当同批的写入确实落库（能力已处于目标 revision）时才记一条审计。
+  // 无条件插入会让审计日志记下一次没有发生的变更——读日志的人会据此相信状态变了。
+  if (input.capabilityRevision) {
+    return db
+      .prepare(
+        `INSERT OR IGNORE INTO admin_audit_logs
+         (id, actor_fingerprint, action, target_type, target_id,
+          details_json, created_at)
+         SELECT ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+         WHERE changes() = 1
+           AND EXISTS (
+             SELECT 1
+             FROM capabilities
+             WHERE id = ? AND revision = ?
+           )`,
+      )
+      .bind(
+        ...values,
+        input.capabilityRevision.id,
+        input.capabilityRevision.revision,
       );
   }
   if (input.catalogEndpointRevision) {

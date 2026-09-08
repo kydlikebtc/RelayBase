@@ -16,6 +16,22 @@
   此前被 `admin.css`、`console.css` 与 `docs-pricing.css` 引用但从未定义，相关声明一直被
   浏览器静默丢弃，现已生效。
 
+### Added
+
+- 后台「路由与定价」新增「能力」子页（`app/admin/CapabilitiesTab.tsx`）：列出全部
+  能力，从端点创建草稿，并以 `expectedRevision` CAS 切换 draft / published /
+  deprecated。冲突时明确告知本次操作未生效并重新加载，不静默重试——重试会覆盖别人
+  的修改。共用的管理端请求、校验与状态面板抽到 `app/admin/adminApi.tsx`，
+  `AdminClient.tsx` 不再继续膨胀。
+
+### Fixed
+
+- 能力管理端的审计记录改为与写入同批，并加 `changes() = 1` 守卫。此前审计在写入
+  **之后**单独执行：具名管理员身份无法归属时审计抛 401，而能力其实已经改完，运营
+  看到失败去重试，只会撞上 CAS 冲突；同时被拒绝的 CAS 也会留下一条"改过了"的审计，
+  读日志的人会据此相信状态变了。集成测试走 bearer 密钥路径，两种情况都没暴露，是
+  在本地跑起后台点出来的。
+
 ## [0.5.0-preview.1] - 2026-09-08
 
 ### Changed
